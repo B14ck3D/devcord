@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useVoiceRoom } from './useVoiceRoom';
 import { 
   Send, Search, Plus, ArrowUpRight, Hash, Volume2, 
@@ -57,33 +57,6 @@ function guestSessionId(): string {
     sessionStorage.setItem(k, id);
   }
   return id;
-}
-
-// --- WBUDOWANY MOCK useVoiceRoom ---
-function useVoiceRoomMock({ enabled, roomId, userId }: { enabled: boolean, roomId: string | null, userId: string, micDeviceId: string }) {
-  const [localMuted, setLocalMuted] = useState(false);
-  const [participants, setParticipants] = useState<string[]>([]);
-  const [phase, setPhase] = useState('disconnected');
-
-  useEffect(() => {
-    if (enabled && roomId) {
-      setPhase('connecting_signaling');
-      const timer = setTimeout(() => {
-        setPhase('connected');
-        if (roomId === 'v1') {
-          setParticipants(['u2', 'u3', userId]);
-        } else {
-          setParticipants([userId]);
-        }
-      }, 800);
-      return () => clearTimeout(timer);
-    } else {
-      setPhase('disconnected');
-      setParticipants([]);
-    }
-  }, [enabled, roomId, userId]);
-
-  return { phase, error: null, participants, localMuted, setLocalMuted };
 }
 
 // --- MOCK DLA UDOSTĘPNIANIA EKRANU W IFRAME ---
@@ -183,7 +156,13 @@ export default function App() {
   const [threadInputValue, setThreadInputValue] = useState('');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<'profile' | 'audio'>('profile');
-  const [micDeviceId, setMicDeviceId] = useState('');
+  const [micDeviceId, setMicDeviceId] = useState(() => {
+    try {
+      return localStorage.getItem('flux_mic_device') ?? '';
+    } catch {
+      return '';
+    }
+  });
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
   const [isCmdPaletteOpen, setIsCmdPaletteOpen] = useState(false);
   const [cmdSearchQuery, setCmdSearchQuery] = useState('');
@@ -195,17 +174,15 @@ export default function App() {
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
-  const voiceChannelIds = useMemo(() => mockChannels.filter((c) => c.type === 'voice').map((c) => c.id), []);
-
   const myUserId = guestIdRef.current;
-  
+
   const {
     phase: voicePhase,
     error: voiceError,
     participants: voiceParticipants,
     localMuted,
     setLocalMuted,
-  } = useVoiceRoomMock({
+  } = useVoiceRoom({
     enabled: !!activeVoiceChannel,
     roomId: activeVoiceChannel,
     userId: myUserId,
@@ -585,7 +562,12 @@ export default function App() {
               <div className="flex-1 p-6 sm:p-10 flex flex-col overflow-auto custom-scrollbar relative z-10">
                 {activeVoiceChannel === currentChannelData.id ? (
                   <div className="w-full max-w-7xl mx-auto flex flex-col pb-24">
-                    
+                    {voicePhase === 'error' && voiceError && (
+                      <div className="mb-6 rounded-2xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+                        {voiceError}
+                      </div>
+                    )}
+
                     {/* Holograficzny Ekran Główny (Udostępnianie) */}
                     {screenStream && (
                       <div className="w-full aspect-video rounded-3xl border border-[#00eeff]/20 bg-black/80 p-2 shadow-[0_0_80px_rgba(0,238,255,0.1)] relative mb-12 group transition-all duration-700">
