@@ -15,7 +15,7 @@ import {
   ListTodo, Bold, Italic, Code as CodeIcon, Link, FileText, Image as ImageIcon,
   Command as CmdIcon, User, Moon, LogOut, 
   X, MicOff, PhoneOff, Palette, BellRing, MessageSquareShare,
-  UploadCloud, Copy, Smile, MonitorUp, Monitor, Trash2, Edit2, MoreVertical, CheckSquare, Square, Download, FileAudio, FileArchive, Eye, UserCheck, UserMinus, BellOff, LogIn, Server, Link2, CopyPlus, ChevronDown, FolderPlus, Pin, SlidersHorizontal, VolumeX
+  UploadCloud, Copy, Smile, MonitorUp, Monitor, Trash2, Edit2, MoreVertical, CheckSquare, Square, Download, FileAudio, FileArchive, Eye, UserCheck, UserMinus, BellOff, LogIn, Server, Link2, CopyPlus, ChevronDown, FolderPlus, Pin, SlidersHorizontal, VolumeX, Wifi
 } from 'lucide-react';
 
 // ============================================================================
@@ -276,6 +276,7 @@ function useVoiceRoomMaybe(opts: {
   userId: string;
   micDeviceId: string;
   screenStream: MediaStream | null;
+  cameraStream: MediaStream | null;
   screenBitrate?: number;
   micSoftwareGate: boolean;
   micGateThresholdDb: number;
@@ -286,6 +287,7 @@ function useVoiceRoomMaybe(opts: {
     userId: opts.userId,
     micDeviceId: opts.micDeviceId,
     screenStream: opts.screenStream,
+    cameraStream: opts.cameraStream,
     screenBitrate: opts.screenBitrate,
     micSoftwareGate: opts.micSoftwareGate,
     micGateThresholdDb: opts.micGateThresholdDb,
@@ -472,6 +474,7 @@ export default function App() {
   // Stany Głosowe
   const [activeVoiceChannel, setActiveVoiceChannel] = useState<string | null>(null);
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
+  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
   const [remoteScreenWatching, setRemoteScreenWatching] = useState(false);
   const [maximizedScreenId, setMaximizedScreenId] = useState<string | null>(null);
   const [remoteScreenVolume, setRemoteScreenVolume] = useState(1);
@@ -921,10 +924,54 @@ export default function App() {
     userId: myUserId,
     micDeviceId,
     screenStream,
+    cameraStream,
     screenBitrate: screenRes === 1440 ? 8000000 : screenRes === 1080 ? 4000000 : screenRes === 720 ? 1500000 : 800000,
     micSoftwareGate,
     micGateThresholdDb,
   });
+
+  const [voicePingRttMs, setVoicePingRttMs] = useState<number | null>(null);
+  const [voicePingServerMs, setVoicePingServerMs] = useState<number | null>(null);
+  const [voicePingOk, setVoicePingOk] = useState(false);
+
+  useEffect(() => {
+    if (!API_BASE_URL || !activeVoiceChannel) {
+      setVoicePingRttMs(null);
+      setVoicePingServerMs(null);
+      setVoicePingOk(false);
+      return;
+    }
+    let alive = true;
+    const ping = async () => {
+      try {
+        const t0 = performance.now();
+        const r = await fetch(`${API_BASE_URL}/ping`, {
+          cache: 'no-store',
+          method: 'GET',
+          credentials: 'omit',
+        });
+        const rtt = Math.round(performance.now() - t0);
+        const j = (await r.json()) as { ok?: boolean; server_ms?: number };
+        if (!alive) return;
+        const bodyOk = j.ok !== false;
+        setVoicePingOk(r.ok && bodyOk);
+        setVoicePingRttMs(r.ok ? rtt : null);
+        setVoicePingServerMs(r.ok && typeof j.server_ms === 'number' ? j.server_ms : null);
+      } catch {
+        if (alive) {
+          setVoicePingOk(false);
+          setVoicePingRttMs(null);
+          setVoicePingServerMs(null);
+        }
+      }
+    };
+    void ping();
+    const id = window.setInterval(ping, 5000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [API_BASE_URL, activeVoiceChannel]);
 
   /** Słuchawki: u Ciebie brak odsłuchu innych + wyłączony mikrofon. */
   const toggleVoiceHeadphones = useCallback(() => {
@@ -1006,6 +1053,7 @@ export default function App() {
   }, [remoteScreenByUser]);
 
   const localScreenLive = useMemo(() => mediaStreamHasLiveVideo(screenStream), [screenStream, screenLayoutTick]);
+  const localCameraLive = useMemo(() => mediaStreamHasLiveVideo(cameraStream), [cameraStream, screenLayoutTick]);
   const remoteScreenPeers = useMemo(
     () =>
       Object.entries(remoteScreenByUser).filter(
@@ -1016,7 +1064,7 @@ export default function App() {
   const primaryRemoteScreen = remoteScreenPeers[0] ?? null;
   const primaryRemoteSharerId = primaryRemoteScreen?.[0] ?? null;
   const primaryRemoteStream = primaryRemoteScreen?.[1] ?? null;
-  const voiceHasScreenActivity = localScreenLive || remoteScreenPeers.length > 0;
+  const voiceHasScreenActivity = localScreenLive || localCameraLive || remoteScreenPeers.length > 0;
 
   useEffect(() => {
     if (!primaryRemoteStream || !mediaStreamHasLiveVideo(primaryRemoteStream)) {
@@ -1037,11 +1085,12 @@ export default function App() {
   useEffect(() => {
     const ids = new Set<string>();
     if (localScreenLive) ids.add(myUserId);
+    if (localCameraLive) ids.add(`${myUserId}-cam`);
     remoteScreenPeers.forEach(([id]) => ids.add(id));
     if (maximizedScreenId && !ids.has(maximizedScreenId)) {
       setMaximizedScreenId(ids.size > 0 ? [...ids][0] : null);
     }
-  }, [maximizedScreenId, localScreenLive, remoteScreenPeers, myUserId]);
+  }, [maximizedScreenId, localScreenLive, localCameraLive, remoteScreenPeers, myUserId]);
 
   const refreshAudioDevices = async () => {
     try {
@@ -1520,6 +1569,7 @@ export default function App() {
     setRemoteScreenWatching(false);
     setScreenStreamContext(null);
     if (screenStream) { screenStream.getTracks().forEach(track => track.stop()); setScreenStream(null); }
+    if (cameraStream) { cameraStream.getTracks().forEach(track => track.stop()); setCameraStream(null); }
     const currentViewType = currentServerChannels.find(c => c.id === activeChannel)?.type;
     if (currentViewType === 'voice') setActiveChannel(currentServerChannels.find(c => c.type === 'text')?.id || currentServerChannels[0]?.id || '');
   };
@@ -1546,6 +1596,26 @@ export default function App() {
         mockStream.getVideoTracks()[0].onended = () => setScreenStream(null);
         setScreenStream(mockStream);
       }
+    }
+  };
+
+  const toggleCameraShare = async () => {
+    if (!activeVoiceChannel) return;
+    if (cameraStream) {
+      cameraStream.getTracks().forEach((t) => t.stop());
+      setCameraStream(null);
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user' },
+        audio: false,
+      });
+      const vt = stream.getVideoTracks()[0];
+      if (vt) vt.onended = () => setCameraStream(null);
+      setCameraStream(stream);
+    } catch {
+      /* ignore */
     }
   };
 
@@ -3017,6 +3087,97 @@ export default function App() {
             </div>
             )}
 
+            {API_BASE_URL && activeVoiceChannel && (
+              <div className="shrink-0 px-3 py-2.5 border-t border-white/[0.06] bg-black/35 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <Wifi size={14} className={`shrink-0 ${voicePingOk ? 'text-emerald-400' : 'text-red-400'}`} />
+                    <span
+                      className={`text-[10px] font-semibold leading-tight truncate ${voicePingOk ? 'text-emerald-400' : 'text-red-400'}`}
+                    >
+                      {voicePingOk ? 'Serwer odpowiada' : 'Brak odpowiedzi'}
+                    </span>
+                  </div>
+                  <span className="text-[10px] text-zinc-500 tabular-nums shrink-0 font-mono text-right max-w-[55%] leading-tight">
+                    {voicePingRttMs != null ? (
+                      <>
+                        RTT {voicePingRttMs} ms
+                        {voicePingServerMs != null ? ` · srv ${voicePingServerMs} ms` : ''}
+                      </>
+                    ) : (
+                      '—'
+                    )}
+                  </span>
+                </div>
+                    <div className="flex items-start justify-between gap-2 pt-1 border-t border-white/[0.04]">
+                      <div className="min-w-0 flex-1">
+                        <p
+                          className={`text-[11px] font-bold leading-tight ${
+                            voicePhase === 'connected'
+                              ? 'text-emerald-400'
+                              : voicePhase === 'error'
+                                ? 'text-red-400'
+                                : 'text-amber-400'
+                          }`}
+                        >
+                          {voicePhase === 'connected'
+                            ? 'Nawiązano połączenie'
+                            : voicePhase === 'error'
+                              ? 'Błąd połączenia głosowego'
+                              : voicePhase === 'idle'
+                                ? 'Rozłączono'
+                                : 'Łączenie…'}
+                        </p>
+                        <p className="text-[10px] text-zinc-500 truncate mt-0.5 flex items-center gap-1">
+                          <Radio size={10} className="shrink-0 text-zinc-600" />
+                          {servers.find((s) => s.id === activeServer)?.name ?? 'Serwer'} ·{' '}
+                          {channels.find((c) => c.id === activeVoiceChannel)?.name ?? 'Kanał głosowy'}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex gap-1.5">
+                      <button
+                        type="button"
+                        title={
+                          voicePhase !== 'connected'
+                            ? 'Najpierw połączenie z kanałem'
+                            : cameraStream
+                              ? 'Wyłącz kamerę'
+                              : 'Włącz kamerę'
+                        }
+                        disabled={voicePhase !== 'connected'}
+                        onClick={() => void toggleCameraShare()}
+                        className={`flex-1 h-9 rounded-lg flex items-center justify-center border transition-colors ${
+                          cameraStream
+                            ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
+                            : 'bg-white/[0.05] border-white/[0.08] text-zinc-300 hover:bg-white/[0.08]'
+                        } disabled:opacity-40 disabled:pointer-events-none`}
+                      >
+                        <Video size={16} />
+                      </button>
+                      <button
+                        type="button"
+                        title={
+                          voicePhase !== 'connected'
+                            ? 'Najpierw połączenie z kanałem'
+                            : screenStream
+                              ? 'Zakończ udostępnianie ekranu'
+                              : 'Udostępnij ekran'
+                        }
+                        disabled={voicePhase !== 'connected'}
+                        onClick={() => void toggleScreenShare()}
+                        className={`flex-1 h-9 rounded-lg flex items-center justify-center border transition-colors ${
+                          screenStream
+                            ? 'bg-[#00eeff]/20 border-[#00eeff]/40 text-[#00eeff]'
+                            : 'bg-white/[0.05] border-white/[0.08] text-zinc-300 hover:bg-white/[0.08]'
+                        } disabled:opacity-40 disabled:pointer-events-none`}
+                      >
+                        <MonitorUp size={16} />
+                      </button>
+                    </div>
+              </div>
+            )}
+
             <div className="h-16 border-t border-white/[0.04] bg-black/40 p-2 flex items-center z-50">
               <div onClick={() => setIsSettingsOpen(true)} className="flex items-center gap-2 flex-1 hover:bg-white/[0.05] p-1.5 rounded-lg cursor-pointer transition-colors">
                 <div className="relative">
@@ -3165,9 +3326,22 @@ export default function App() {
                   <div className="w-full max-w-7xl mx-auto flex flex-col pb-24">
                     <div className="flex flex-col gap-10 mb-12 w-full">
                     {(() => {
-                      const allScreens = [
-                        ...(localScreenLive && screenStream ? [{ id: myUserId, stream: screenStream, isLocal: true }] : []),
-                        ...(API_BASE_URL ? remoteScreenPeers.map(([id, stream]) => ({ id, stream, isLocal: false })) : []),
+                      type ScreenTile = { id: string; stream: MediaStream; isLocal: boolean; kind: 'screen' | 'camera' };
+                      const allScreens: ScreenTile[] = [
+                        ...(localScreenLive && screenStream
+                          ? [{ id: myUserId, stream: screenStream, isLocal: true, kind: 'screen' as const }]
+                          : []),
+                        ...(localCameraLive && cameraStream
+                          ? [{ id: `${myUserId}-cam`, stream: cameraStream, isLocal: true, kind: 'camera' as const }]
+                          : []),
+                        ...(API_BASE_URL
+                          ? remoteScreenPeers.map(([id, stream]) => ({
+                              id,
+                              stream,
+                              isLocal: false,
+                              kind: 'screen' as const,
+                            }))
+                          : []),
                       ];
                       if (allScreens.length === 0) return null;
 
@@ -3179,42 +3353,54 @@ export default function App() {
                           {/* Maximized Screen */}
                           <div className="w-full aspect-video rounded-3xl border border-white/[0.12] bg-[#0a0a0c] p-2 shadow-[0_0_60px_rgba(0,0,0,0.5)] relative group transition-all duration-700 overflow-hidden">
                             {maximized.isLocal ? (
-                              <>
-                                <div className="absolute top-0 left-0 w-12 h-12 border-t-2 border-l-2 border-[#00eeff]/80 rounded-tl-3xl z-10 transition-all duration-500 group-hover:w-16 group-hover:h-16 shadow-[-5px_-5px_15px_rgba(0,238,255,0.2)]"></div>
-                                <div className="absolute top-0 right-0 w-12 h-12 border-t-2 border-r-2 border-[#00eeff]/80 rounded-tr-3xl z-10 transition-all duration-500 group-hover:w-16 group-hover:h-16 shadow-[5px_-5px_15px_rgba(0,238,255,0.2)]"></div>
-                                <div className="absolute bottom-0 left-0 w-12 h-12 border-b-2 border-l-2 border-[#00eeff]/80 rounded-bl-3xl z-10 transition-all duration-500 group-hover:w-16 group-hover:h-16 shadow-[-5px_5px_15px_rgba(0,238,255,0.2)]"></div>
-                                <div className="absolute bottom-0 right-0 w-12 h-12 border-b-2 border-r-2 border-[#00eeff]/80 rounded-br-3xl z-10 transition-all duration-500 group-hover:w-16 group-hover:h-16 shadow-[5px_5px_15px_rgba(0,238,255,0.2)]"></div>
-                                <div className="w-full h-full rounded-2xl overflow-hidden relative">
-                                  <VideoPlayer stream={maximized.stream} isLocal={true} className="w-full h-full object-contain bg-[#030303]" />
-                                  <div className="absolute top-4 left-4 z-20 px-3 py-1.5 bg-black/60 backdrop-blur-md rounded-lg text-[10px] uppercase tracking-widest font-black text-white border border-[#00eeff]/30 flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-[#00eeff] animate-pulse shadow-[0_0_8px_#00eeff]"></span>Twój ekran</div>
-                                  
-                                  <div className="absolute top-4 right-4 z-30 flex items-center gap-2 bg-black/60 backdrop-blur-md px-3 py-1.5 rounded-lg border border-white/[0.1]">
-                                    <span className="text-[10px] text-zinc-400 font-bold uppercase tracking-widest hidden sm:block mr-2">Jakość Streamu</span>
-                                    <div className="flex items-center gap-1.5 border-r border-white/[0.1] pr-2">
-                                      <Monitor size={12} className="text-[#00eeff]" />
-                                      <select value={screenRes} onChange={e => {
-                                        const r = parseInt(e.target.value);
-                                        setScreenRes(r);
-                                        if (r === 1440 && screenFps > 60) setScreenFps(60);
-                                      }} className="bg-transparent text-white font-semibold text-xs outline-none cursor-pointer">
-                                        <option value={480} className="bg-[#111]">480p</option>
-                                        <option value={720} className="bg-[#111]">720p</option>
-                                        <option value={1080} className="bg-[#111]">1080p</option>
-                                        <option value={1440} className="bg-[#111]">1440p (Max 60fps)</option>
-                                      </select>
-                                    </div>
-                                    <div className="flex items-center gap-1.5 pl-1">
-                                      <Zap size={12} className="text-emerald-400" />
-                                      <select value={screenFps} onChange={e => setScreenFps(parseInt(e.target.value))} className="bg-transparent text-white font-semibold text-xs outline-none cursor-pointer">
-                                        <option value={30} className="bg-[#111]">30 FPS</option>
-                                        <option value={60} className="bg-[#111]">60 FPS</option>
-                                        {screenRes < 1440 && <option value={120} className="bg-[#111]">120 FPS</option>}
-                                        {screenRes < 1440 && <option value={240} className="bg-[#111]">240 FPS</option>}
-                                      </select>
+                              maximized.kind === 'camera' ? (
+                                <>
+                                  <div className="w-full h-full rounded-2xl overflow-hidden relative">
+                                    <VideoPlayer stream={maximized.stream} isLocal={true} className="w-full h-full object-contain bg-[#030303]" />
+                                    <div className="absolute top-4 left-4 z-20 px-3 py-1.5 bg-black/60 backdrop-blur-md rounded-lg text-[10px] uppercase tracking-widest font-black text-white border border-emerald-400/30 flex items-center gap-2">
+                                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_#34d399]"></span>
+                                      Kamera
                                     </div>
                                   </div>
-                                </div>
-                              </>
+                                </>
+                              ) : (
+                                <>
+                                  <div className="absolute top-0 left-0 w-12 h-12 border-t-2 border-l-2 border-[#00eeff]/80 rounded-tl-3xl z-10 transition-all duration-500 group-hover:w-16 group-hover:h-16 shadow-[-5px_-5px_15px_rgba(0,238,255,0.2)]"></div>
+                                  <div className="absolute top-0 right-0 w-12 h-12 border-t-2 border-r-2 border-[#00eeff]/80 rounded-tr-3xl z-10 transition-all duration-500 group-hover:w-16 group-hover:h-16 shadow-[5px_-5px_15px_rgba(0,238,255,0.2)]"></div>
+                                  <div className="absolute bottom-0 left-0 w-12 h-12 border-b-2 border-l-2 border-[#00eeff]/80 rounded-bl-3xl z-10 transition-all duration-500 group-hover:w-16 group-hover:h-16 shadow-[-5px_5px_15px_rgba(0,238,255,0.2)]"></div>
+                                  <div className="absolute bottom-0 right-0 w-12 h-12 border-b-2 border-r-2 border-[#00eeff]/80 rounded-br-3xl z-10 transition-all duration-500 group-hover:w-16 group-hover:h-16 shadow-[5px_5px_15px_rgba(0,238,255,0.2)]"></div>
+                                  <div className="w-full h-full rounded-2xl overflow-hidden relative">
+                                    <VideoPlayer stream={maximized.stream} isLocal={true} className="w-full h-full object-contain bg-[#030303]" />
+                                    <div className="absolute top-4 left-4 z-20 px-3 py-1.5 bg-black/60 backdrop-blur-md rounded-lg text-[10px] uppercase tracking-widest font-black text-white border border-[#00eeff]/30 flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-[#00eeff] animate-pulse shadow-[0_0_8px_#00eeff]"></span>Twój ekran</div>
+                                    
+                                    <div className="absolute top-4 right-4 z-30 flex items-center gap-2 bg-black/60 backdrop-blur-md px-3 py-1.5 rounded-lg border border-white/[0.1]">
+                                      <span className="text-[10px] text-zinc-400 font-bold uppercase tracking-widest hidden sm:block mr-2">Jakość Streamu</span>
+                                      <div className="flex items-center gap-1.5 border-r border-white/[0.1] pr-2">
+                                        <Monitor size={12} className="text-[#00eeff]" />
+                                        <select value={screenRes} onChange={e => {
+                                          const r = parseInt(e.target.value);
+                                          setScreenRes(r);
+                                          if (r === 1440 && screenFps > 60) setScreenFps(60);
+                                        }} className="bg-transparent text-white font-semibold text-xs outline-none cursor-pointer">
+                                          <option value={480} className="bg-[#111]">480p</option>
+                                          <option value={720} className="bg-[#111]">720p</option>
+                                          <option value={1080} className="bg-[#111]">1080p</option>
+                                          <option value={1440} className="bg-[#111]">1440p (Max 60fps)</option>
+                                        </select>
+                                      </div>
+                                      <div className="flex items-center gap-1.5 pl-1">
+                                        <Zap size={12} className="text-emerald-400" />
+                                        <select value={screenFps} onChange={e => setScreenFps(parseInt(e.target.value))} className="bg-transparent text-white font-semibold text-xs outline-none cursor-pointer">
+                                          <option value={30} className="bg-[#111]">30 FPS</option>
+                                          <option value={60} className="bg-[#111]">60 FPS</option>
+                                          {screenRes < 1440 && <option value={120} className="bg-[#111]">120 FPS</option>}
+                                          {screenRes < 1440 && <option value={240} className="bg-[#111]">240 FPS</option>}
+                                        </select>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </>
+                              )
                             ) : (
                               <div className="w-full h-full rounded-2xl overflow-hidden relative bg-[#121214] min-h-[200px] flex items-center justify-center">
                                 {remoteScreenWatching ? (
@@ -3252,8 +3438,10 @@ export default function App() {
                                 <div key={s.id} onClick={() => setMaximizedScreenId(s.id)} className="w-64 aspect-video rounded-2xl border border-white/[0.1] bg-[#0a0a0c] overflow-hidden cursor-pointer hover:border-[#00eeff]/50 hover:shadow-[0_0_20px_rgba(0,238,255,0.15)] transition-all relative group">
                                   <VideoPlayer stream={s.stream} isLocal={s.isLocal} className="w-full h-full object-cover opacity-60 group-hover:opacity-100 transition-opacity" />
                                   <div className="absolute bottom-2 left-2 flex items-center gap-1.5 px-2 py-1 rounded-lg bg-black/80 text-white text-[10px] font-semibold border border-white/[0.05]">
-                                    <Monitor size={10} className="text-[#00eeff]" />
-                                    <span className="truncate max-w-[100px]">{s.isLocal ? 'Twój ekran' : getUser(s.id).name}</span>
+                                    {s.kind === 'camera' ? <Video size={10} className="text-emerald-400" /> : <Monitor size={10} className="text-[#00eeff]" />}
+                                    <span className="truncate max-w-[100px]">
+                                      {s.kind === 'camera' && s.isLocal ? 'Kamera' : s.isLocal ? 'Twój ekran' : getUser(s.id).name}
+                                    </span>
                                   </div>
                                 </div>
                               ))}

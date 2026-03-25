@@ -70,6 +70,8 @@ func (a *App) Router() http.Handler {
 		_, _ = w.Write([]byte("ok"))
 	})
 
+	r.Get("/api/ping", a.handlePublicPing)
+
 	r.Route("/api", func(r chi.Router) {
 		r.Post("/auth/register", a.handleRegister)
 		r.Post("/auth/verify", a.handleVerify)

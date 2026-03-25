@@ -83,6 +83,7 @@ export function useVoiceRoom(opts: {
   userId: string;
   micDeviceId: string;
   screenStream?: MediaStream | null;
+  cameraStream?: MediaStream | null;
   /** Max bitrate for screen track output in bits per second */
   screenBitrate?: number;
   /** Bramka progu w Web Audio — wycina to, co jest poniżej progu dBFS */
@@ -96,8 +97,9 @@ export function useVoiceRoom(opts: {
     userId,
     micDeviceId,
     screenStream = null,
+    cameraStream = null,
     screenBitrate,
-    micSoftwareGate = true,
+    micSoftwareGate = false,
     micGateThresholdDb = -40,
   } = opts;
   const [phase, setPhase] = useState<VoicePhase>('idle');
@@ -118,16 +120,15 @@ export function useVoiceRoom(opts: {
   const pcsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const iceQueuesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   const remoteAudioCombinedRef = useRef<Map<string, MediaStream>>(new Map());
-  /** Odsłuch zdalny przez Web Audio (gain > 1 = powyżej „100%”) */
-  const playbackCtxRef = useRef<AudioContext | null>(null);
-  const peerPlaybackRef = useRef(
-    new Map<string, { src: MediaStreamAudioSourceNode; gain: GainNode }>(),
-  );
+  const audioElsRef = useRef(new Map<string, HTMLAudioElement>());
+  const remoteVadStopRef = useRef(new Map<string, () => void>());
   const remoteVolRef = useRef(new Map<string, number>());
   const remoteMuteRef = useRef(new Map<string, boolean>());
   const remoteScreenTracksRef = useRef<Record<string, MediaStream>>({});
   const screenStreamRef = useRef<MediaStream | null>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
   const prevScreenTrackIdsRef = useRef<Set<string>>(new Set());
+  const prevCameraTrackIdsRef = useRef<Set<string>>(new Set());
   const userIdRef = useRef(userId);
   userIdRef.current = userId;
   const localMutedRef = useRef(localMuted);
@@ -137,8 +138,6 @@ export function useVoiceRoom(opts: {
 
   const speakingSnapRef = useRef<Record<string, boolean>>({});
   const localVadStopRef = useRef<(() => void) | null>(null);
-  const remoteVadStopRef = useRef<Map<string, () => void>>(new Map());
-
   const flushSpeaking = useCallback((id: string, speaking: boolean) => {
     if (speakingSnapRef.current[id] === speaking) return;
     speakingSnapRef.current[id] = speaking;
@@ -150,89 +149,74 @@ export function useVoiceRoom(opts: {
     if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
   }, []);
 
-  const ensurePlaybackCtx = useCallback(() => {
-    let ctx = playbackCtxRef.current;
-    const Ctor = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-    if (!ctx || ctx.state === 'closed') {
-      ctx = new Ctor();
-      playbackCtxRef.current = ctx;
+  const disposeRemotePlayback = useCallback((peerId: string) => {
+    remoteVadStopRef.current.get(peerId)?.();
+    remoteVadStopRef.current.delete(peerId);
+    const el = audioElsRef.current.get(peerId);
+    if (el) {
+      el.srcObject = null;
+      el.remove();
+      audioElsRef.current.delete(peerId);
     }
-    void ctx.resume().catch(() => {});
-    return ctx;
   }, []);
 
-  const disposePeerPlayback = useCallback((peerId: string) => {
-    const p = peerPlaybackRef.current.get(peerId);
-    if (!p) return;
-    try {
-      p.src.disconnect();
-    } catch {
-      /* ignore */
-    }
-    try {
-      p.gain.disconnect();
-    } catch {
-      /* ignore */
-    }
-    peerPlaybackRef.current.delete(peerId);
-  }, []);
-
-  const computeOutputGain = useCallback((peerId: string) => {
-    if (localDeafenedRef.current) return 0;
-    if (remoteMuteRef.current.get(peerId)) return 0;
-    return Math.min(8, Math.max(0, remoteVolRef.current.get(peerId) ?? 1));
-  }, []);
-
-  const refreshPeerPlayback = useCallback(
+  const syncRemoteAudioElement = useCallback(
     (peerId: string) => {
       const combined = remoteAudioCombinedRef.current.get(peerId);
       if (!combined?.getAudioTracks().length) {
-        disposePeerPlayback(peerId);
+        disposeRemotePlayback(peerId);
         return;
       }
-      disposePeerPlayback(peerId);
-      const ctx = ensurePlaybackCtx();
-      let src: MediaStreamAudioSourceNode;
-      try {
-        src = ctx.createMediaStreamSource(combined);
-      } catch {
-        return;
-      }
-      const gain = ctx.createGain();
-      gain.gain.value = computeOutputGain(peerId);
-      src.connect(gain);
-      gain.connect(ctx.destination);
-      peerPlaybackRef.current.set(peerId, { src, gain });
-      void ctx.resume().catch(() => {});
+      disposeRemotePlayback(peerId);
+      const el = document.createElement('audio');
+      el.autoplay = true;
+      el.setAttribute('playsinline', '');
+      el.srcObject = combined;
+      el.volume = Math.min(1, Math.max(0, remoteVolRef.current.get(peerId) ?? 1));
+      el.muted = localDeafenedRef.current || !!remoteMuteRef.current.get(peerId);
+      document.body.appendChild(el);
+      audioElsRef.current.set(peerId, el);
+      void el.play().catch(() => {});
+      const stopVad = createSpeakingLevelMonitor(
+        combined,
+        peerId,
+        () => localDeafenedRef.current || !!remoteMuteRef.current.get(peerId),
+        flushSpeaking,
+      );
+      remoteVadStopRef.current.set(peerId, stopVad);
     },
-    [computeOutputGain, disposePeerPlayback, ensurePlaybackCtx],
+    [disposeRemotePlayback, flushSpeaking],
   );
 
-  const applyAllRemoteOutputGains = useCallback(() => {
-    for (const [pid, { gain }] of peerPlaybackRef.current) {
-      gain.gain.value = computeOutputGain(pid);
+  const applyAllRemoteAudioOutputs = useCallback(() => {
+    for (const peerId of audioElsRef.current.keys()) {
+      const el = audioElsRef.current.get(peerId);
+      if (!el) continue;
+      el.volume = Math.min(1, Math.max(0, remoteVolRef.current.get(peerId) ?? 1));
+      el.muted = localDeafenedRef.current || !!remoteMuteRef.current.get(peerId);
     }
-  }, [computeOutputGain]);
+  }, []);
 
-  const setUserVolume = useCallback(
-    (peerId: string, linearGain: number) => {
-      remoteVolRef.current.set(peerId, linearGain);
-      const p = peerPlaybackRef.current.get(peerId);
-      if (p) p.gain.gain.value = computeOutputGain(peerId);
-    },
-    [computeOutputGain],
-  );
+  const setUserVolume = useCallback((peerId: string, linearGain: number) => {
+    remoteVolRef.current.set(peerId, linearGain);
+    const el = audioElsRef.current.get(peerId);
+    if (el) {
+      el.volume = Math.min(1, Math.max(0, linearGain));
+      el.muted = localDeafenedRef.current || !!remoteMuteRef.current.get(peerId);
+    }
+  }, []);
 
-  const setUserOutputMuted = useCallback(
-    (peerId: string, muted: boolean) => {
-      remoteMuteRef.current.set(peerId, muted);
-      const p = peerPlaybackRef.current.get(peerId);
-      if (p) p.gain.gain.value = computeOutputGain(peerId);
-    },
-    [computeOutputGain],
-  );
+  const setUserOutputMuted = useCallback((peerId: string, muted: boolean) => {
+    remoteMuteRef.current.set(peerId, muted);
+    const el = audioElsRef.current.get(peerId);
+    if (el) {
+      el.muted = localDeafenedRef.current || muted;
+      el.volume = Math.min(1, Math.max(0, remoteVolRef.current.get(peerId) ?? 1));
+    }
+  }, []);
 
   screenStreamRef.current = screenStream;
+  cameraStreamRef.current = cameraStream;
 
   const flushIce = useCallback(
     async (peerId: string) => {
@@ -251,30 +235,34 @@ export function useVoiceRoom(opts: {
     [],
   );
 
-  const syncScreenShareTracks = useCallback(async () => {
+  const syncAuxMediaTracks = useCallback(async () => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const screen = screenStreamRef.current;
-    const oldIds = prevScreenTrackIdsRef.current;
-    const newIds = new Set((screen?.getTracks() ?? []).map((t) => t.id));
+    const camera = cameraStreamRef.current;
+    const newScreenIds = new Set((screen?.getTracks() ?? []).map((t) => t.id));
+    const newCamIds = new Set((camera?.getTracks() ?? []).map((t) => t.id));
+    const oldAll = new Set([...prevScreenTrackIdsRef.current, ...prevCameraTrackIdsRef.current]);
+    const newAll = new Set([...newScreenIds, ...newCamIds]);
 
     for (const [peerId, pc] of pcsRef.current) {
       let changed = false;
       for (const sender of [...pc.getSenders()]) {
         const tr = sender.track;
-        if (tr && oldIds.has(tr.id) && !newIds.has(tr.id)) {
+        if (tr && oldAll.has(tr.id) && !newAll.has(tr.id)) {
           pc.removeTrack(sender);
           changed = true;
         }
       }
-      if (screen) {
+      const addTracks = (stream: MediaStream | null, isScreen: boolean) => {
+        if (!stream) return;
         const existing = new Set(
           pc.getSenders().map((s) => s.track?.id).filter(Boolean) as string[],
         );
-        for (const t of screen.getTracks()) {
+        for (const t of stream.getTracks()) {
           if (!existing.has(t.id)) {
-            const sender = pc.addTrack(t, screen);
-            if (t.kind === 'video' && screenBitrate) {
+            const sender = pc.addTrack(t, stream);
+            if (isScreen && t.kind === 'video' && screenBitrate) {
               const params = sender.getParameters();
               if (!params.encodings) params.encodings = [{}];
               params.encodings[0].maxBitrate = screenBitrate;
@@ -283,7 +271,9 @@ export function useVoiceRoom(opts: {
             changed = true;
           }
         }
-      }
+      };
+      addTracks(screen, true);
+      addTracks(camera, false);
       if (!changed) continue;
       try {
         const offer = await pc.createOffer();
@@ -296,14 +286,13 @@ export function useVoiceRoom(opts: {
         /* ignore */
       }
     }
-    prevScreenTrackIdsRef.current = newIds;
+    prevScreenTrackIdsRef.current = newScreenIds;
+    prevCameraTrackIdsRef.current = newCamIds;
   }, [sendSignal, screenBitrate]);
 
   const cleanupAll = useCallback(() => {
     localVadStopRef.current?.();
     localVadStopRef.current = null;
-    for (const stop of remoteVadStopRef.current.values()) stop();
-    remoteVadStopRef.current.clear();
     speakingSnapRef.current = {};
     setSpeakingPeers({});
 
@@ -314,18 +303,12 @@ export function useVoiceRoom(opts: {
       pc.close();
     }
     pcsRef.current.clear();
-    for (const pid of [...peerPlaybackRef.current.keys()]) disposePeerPlayback(pid);
-    try {
-      if (playbackCtxRef.current && playbackCtxRef.current.state !== 'closed') {
-        void playbackCtxRef.current.close();
-      }
-    } catch {
-      /* ignore */
-    }
-    playbackCtxRef.current = null;
+    for (const pid of [...audioElsRef.current.keys()]) disposeRemotePlayback(pid);
+    remoteVadStopRef.current.clear();
     remoteAudioCombinedRef.current.clear();
     remoteScreenTracksRef.current = {};
     prevScreenTrackIdsRef.current.clear();
+    prevCameraTrackIdsRef.current.clear();
     setRemoteScreenByUser({});
     micGateDisposeRef.current?.();
     micGateDisposeRef.current = null;
@@ -342,7 +325,7 @@ export function useVoiceRoom(opts: {
       wsRef.current = null;
     }
     setParticipants([]);
-  }, [disposePeerPlayback]);
+  }, [disposeRemotePlayback]);
 
   useEffect(() => {
     if (!enabled || !roomId) {
@@ -429,17 +412,26 @@ export function useVoiceRoom(opts: {
 
         if (cancelled) return;
 
-        const attachScreenIfAny = (pc: RTCPeerConnection) => {
-          const scr = screenStreamRef.current;
-          if (!scr) return;
-          const existing = new Set(
-            pc.getSenders().map((s) => s.track?.id).filter(Boolean) as string[],
-          );
-          for (const t of scr.getTracks()) {
-            if (!existing.has(t.id)) {
-              pc.addTrack(t, scr);
+        const attachAuxMediaIfAny = (pc: RTCPeerConnection) => {
+          const add = (stream: MediaStream | null, isScreen: boolean) => {
+            if (!stream) return;
+            const existing = new Set(
+              pc.getSenders().map((s) => s.track?.id).filter(Boolean) as string[],
+            );
+            for (const t of stream.getTracks()) {
+              if (!existing.has(t.id)) {
+                const sender = pc.addTrack(t, stream);
+                if (isScreen && t.kind === 'video' && screenBitrate) {
+                  const params = sender.getParameters();
+                  if (!params.encodings) params.encodings = [{}];
+                  params.encodings[0].maxBitrate = screenBitrate;
+                  sender.setParameters(params).catch(() => {});
+                }
+              }
             }
-          }
+          };
+          add(screenStreamRef.current, true);
+          add(cameraStreamRef.current, false);
         };
 
         const ensurePc = (peerId: string): RTCPeerConnection => {
@@ -456,7 +448,11 @@ export function useVoiceRoom(opts: {
           };
           pc.ontrack = (ev) => {
             if (ev.track.kind === 'video') {
-              const ms = ev.streams[0] ?? new MediaStream([ev.track]);
+              let ms = remoteScreenTracksRef.current[peerId];
+              if (!ms) ms = new MediaStream();
+              if (!ms.getTracks().some((t) => t.id === ev.track.id)) {
+                ms.addTrack(ev.track);
+              }
               remoteScreenTracksRef.current[peerId] = ms;
               const combined = remoteAudioCombinedRef.current.get(peerId);
               if (combined) {
@@ -465,10 +461,16 @@ export function useVoiceRoom(opts: {
                     combined.removeTrack(t);
                   }
                 }
-                refreshPeerPlayback(peerId);
+                syncRemoteAudioElement(peerId);
               }
               setRemoteScreenByUser((prev) => ({ ...prev, [peerId]: ms }));
               ev.track.addEventListener('ended', () => {
+                const curMs = remoteScreenTracksRef.current[peerId];
+                try {
+                  curMs?.removeTrack(ev.track);
+                } catch {
+                  /* ignore */
+                }
                 setRemoteScreenByUser((prev) => {
                   const next = { ...prev };
                   const cur = next[peerId];
@@ -494,11 +496,7 @@ export function useVoiceRoom(opts: {
             if (!combined.getAudioTracks().some((t) => t.id === ev.track.id)) {
               combined.addTrack(ev.track);
             }
-            refreshPeerPlayback(peerId);
-
-            remoteVadStopRef.current.get(peerId)?.();
-            const stopRemoteVad = createSpeakingLevelMonitor(combined, peerId, () => false, flushSpeaking);
-            remoteVadStopRef.current.set(peerId, stopRemoteVad);
+            syncRemoteAudioElement(peerId);
 
             ev.track.addEventListener('ended', () => {
               try {
@@ -506,12 +504,12 @@ export function useVoiceRoom(opts: {
               } catch {
                 /* ignore */
               }
-              refreshPeerPlayback(peerId);
+              syncRemoteAudioElement(peerId);
             });
           };
           const s = streamRef.current;
           if (s) s.getTracks().forEach((t) => pc!.addTrack(t, s));
-          attachScreenIfAny(pc);
+          attachAuxMediaIfAny(pc);
           pcsRef.current.set(peerId, pc);
           return pc;
         };
@@ -581,7 +579,7 @@ export function useVoiceRoom(opts: {
               pc.close();
               pcsRef.current.delete(uid);
             }
-            disposePeerPlayback(uid);
+            disposeRemotePlayback(uid);
             remoteAudioCombinedRef.current.delete(uid);
             delete remoteScreenTracksRef.current[uid];
             setRemoteScreenByUser((prev) => {
@@ -589,8 +587,6 @@ export function useVoiceRoom(opts: {
               delete n[uid];
               return n;
             });
-            remoteVadStopRef.current.get(uid)?.();
-            remoteVadStopRef.current.delete(uid);
             iceQueuesRef.current.delete(uid);
             return;
           }
@@ -715,18 +711,18 @@ export function useVoiceRoom(opts: {
     flushIce,
     sendSignal,
     flushSpeaking,
-    refreshPeerPlayback,
+    syncRemoteAudioElement,
   ]);
 
   useEffect(() => {
     if (!enabled || !roomId) return;
-    const id = window.setTimeout(() => void syncScreenShareTracks(), 30);
+    const id = window.setTimeout(() => void syncAuxMediaTracks(), 30);
     return () => clearTimeout(id);
-  }, [screenStream, screenBitrate, enabled, roomId, phase, syncScreenShareTracks]);
+  }, [screenStream, cameraStream, screenBitrate, enabled, roomId, phase, syncAuxMediaTracks]);
 
   useEffect(() => {
-    applyAllRemoteOutputGains();
-  }, [localDeafened, applyAllRemoteOutputGains]);
+    applyAllRemoteAudioOutputs();
+  }, [localDeafened, applyAllRemoteAudioOutputs]);
 
   /** Tryb głuchy = brak odsłuchu innych; mikrofon musi być wyłączony (jak w typowych komunikatorach). */
   useEffect(() => {

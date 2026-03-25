@@ -40,7 +40,7 @@ const defaultSettings = (): FluxLocalSettings => ({
   version: 1,
   audio: {
     micDeviceId: '',
-    micSoftwareGate: true,
+    micSoftwareGate: false,
     micGateThresholdDb: -40,
   },
   screen: { fps: 60, res: 1080 },
