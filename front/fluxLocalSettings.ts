@@ -20,6 +20,10 @@ export type FluxLocalSettings = {
   userVoiceGain: Record<string, number>;
   /** Lokalne wyciszenie odsłuchu danego użytkownika (nie wpływa na jego mikrofon) */
   userOutputMuted: Record<string, boolean>;
+  /** Motyw interfejsu (tylko klient) */
+  appearance: {
+    theme: 'dark' | 'light';
+  };
 };
 
 function clampUserVoiceGainRecord(raw: Record<string, number> | undefined): Record<string, number> {
@@ -42,6 +46,7 @@ const defaultSettings = (): FluxLocalSettings => ({
   screen: { fps: 60, res: 1080 },
   userVoiceGain: {},
   userOutputMuted: {},
+  appearance: { theme: 'dark' },
 });
 
 function migrateLegacy(): Partial<FluxLocalSettings> {
@@ -83,6 +88,9 @@ export function loadFluxLocalSettings(): FluxLocalSettings {
           screen: { ...defaultSettings().screen, ...j.screen },
           userVoiceGain: clampUserVoiceGainRecord(j.userVoiceGain),
           userOutputMuted: { ...(j.userOutputMuted ?? {}) },
+          appearance: {
+            theme: j.appearance?.theme === 'light' ? 'light' : 'dark',
+          },
         };
       }
     }
@@ -98,6 +106,7 @@ export function loadFluxLocalSettings(): FluxLocalSettings {
     screen: { ...base.screen, ...leg.screen },
     userVoiceGain: clampUserVoiceGainRecord({ ...base.userVoiceGain, ...leg.userVoiceGain }),
     userOutputMuted: { ...base.userOutputMuted, ...leg.userOutputMuted },
+    appearance: { ...base.appearance, ...leg.appearance },
   };
 }
 
@@ -118,6 +127,7 @@ export function patchFluxLocalSettings(patch: Partial<FluxLocalSettings>): FluxL
     screen: { ...cur.screen, ...patch.screen },
     userVoiceGain: patch.userVoiceGain ?? cur.userVoiceGain,
     userOutputMuted: patch.userOutputMuted ?? cur.userOutputMuted,
+    appearance: { ...cur.appearance, ...patch.appearance },
   };
   saveFluxLocalSettings(merged);
   return merged;

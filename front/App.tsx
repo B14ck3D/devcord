@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback, useReducer } from 'react';
 import { useVoiceRoom } from './useVoiceRoom';
 import { loadFluxLocalSettings, saveFluxLocalSettings } from './fluxLocalSettings';
+import { resizeImageFileToDataUrl } from './resizeAvatarImage';
+import { SettingsGlowDropdown } from './SettingsGlowDropdown';
 import { useChatSocket } from './useChatSocket';
 import { iconFromKey } from './iconMap';
 import { AuthGate } from './AuthGate';
@@ -425,7 +427,17 @@ export default function App() {
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [settingsSuccess, setSettingsSuccess] = useState('');
   const [settingsError, setSettingsError] = useState('');
-  const [localTheme, setLocalTheme] = useState('dark');
+  const [localTheme, setLocalTheme] = useState<'dark' | 'light'>(() =>
+    fluxSeed.appearance.theme === 'light' ? 'light' : 'dark',
+  );
+  const [sessionEmail, setSessionEmail] = useState('');
+  const [accountPwdOpen, setAccountPwdOpen] = useState(false);
+  const [pwdOld, setPwdOld] = useState('');
+  const [pwdNew, setPwdNew] = useState('');
+  const [pwdConfirm, setPwdConfirm] = useState('');
+  const [pwdBusy, setPwdBusy] = useState(false);
+  const [pwdErr, setPwdErr] = useState('');
+  const [pwdOk, setPwdOk] = useState('');
   
   // Modale (Kanały/Serwery/Kategorie/Zadania)
   const [createServerModal, setCreateServerModal] = useState<'create' | 'join' | null>(null);
@@ -488,8 +500,9 @@ export default function App() {
       screen: { fps: screenFps, res: screenRes },
       userVoiceGain: userVolumes,
       userOutputMuted,
+      appearance: { theme: localTheme },
     });
-  }, [micDeviceId, micSoftwareGate, micGateThresholdDb, screenFps, screenRes, userVolumes, userOutputMuted]);
+  }, [micDeviceId, micSoftwareGate, micGateThresholdDb, screenFps, screenRes, userVolumes, userOutputMuted, localTheme]);
 
   useEffect(() => {
     if (!screenStream) return;
@@ -515,6 +528,7 @@ export default function App() {
   const guestIdRef = useRef(guestSessionId());
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const settingsAvatarFileRef = useRef<HTMLInputElement | null>(null);
   const initialNavSyncedRef = useRef(false);
 
   // Filtrowanie pod aktywny serwer
@@ -582,6 +596,7 @@ export default function App() {
   useEffect(() => {
     if (!API_BASE_URL || !fluxToken) {
       setMeUserId('');
+      setSessionEmail('');
       return;
     }
     (async () => {
@@ -589,6 +604,8 @@ export default function App() {
         const me = await apiClient('/auth/me');
         if (me && typeof me === 'object' && 'id' in me && (me as { id: string }).id) {
           setMeUserId((me as { id: string }).id);
+          const em = (me as { email?: string }).email;
+          if (typeof em === 'string') setSessionEmail(em);
           const dn = (me as { display_name?: string }).display_name;
           if (dn) setLocalUserName(dn);
           const av = (me as { avatar_url?: string }).avatar_url;
@@ -596,7 +613,7 @@ export default function App() {
           const nc = (me as { nick_color?: string }).nick_color;
           if (nc) setLocalUserColor(nc);
           const ng = (me as { nick_glow?: string }).nick_glow;
-          if (ng) setLocalUserGlow(ng);
+          if (ng != null && ng !== '') setLocalUserGlow(ng);
         }
       } catch {
         setMeUserId('');
@@ -1041,6 +1058,7 @@ export default function App() {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); setIsCmdPaletteOpen(prev => !prev); }
       if (e.key === 'Escape') {
         setIsCmdPaletteOpen(false); setIsSettingsOpen(false); setIsAIPromptOpen(false);
+        setAccountPwdOpen(false);
         setVoiceMixPanelOpen(false);
         setScreenStreamContext(null);
         setCreateChannelModal(null); setCreateTaskModal({ isOpen: false }); setContextMenu(null);
@@ -1634,8 +1652,26 @@ export default function App() {
     );
   }
 
+  const onSettingsAvatarFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setSettingsError('');
+    setSettingsSuccess('');
+    try {
+      const dataUrl = await resizeImageFileToDataUrl(file);
+      setLocalUserAvatar(dataUrl);
+    } catch (err) {
+      setSettingsError(err instanceof Error ? err.message : 'Nie udało się wgrać avatara.');
+    }
+  };
+
   const saveProfileSettings = async () => {
-    if (!API_BASE_URL) return;
+    if (!API_BASE_URL) {
+      setSettingsSuccess('Avatar i nick są widoczne lokalnie (tryb bez API).');
+      setTimeout(() => setSettingsSuccess(''), 2800);
+      return;
+    }
     setSettingsBusy(true); setSettingsSuccess(''); setSettingsError('');
     try {
       await apiClient('/auth/me', 'PUT', {
@@ -1653,8 +1689,47 @@ export default function App() {
     }
   };
 
+  const submitAccountPasswordChange = async () => {
+    setPwdErr('');
+    setPwdOk('');
+    if (!API_BASE_URL) {
+      setPwdErr('Dostępne tylko po zalogowaniu do serwera API.');
+      return;
+    }
+    if (pwdNew !== pwdConfirm) {
+      setPwdErr('Powtórzenie hasła nie zgadza się z nowym hasłem.');
+      return;
+    }
+    if (pwdNew.length < 8) {
+      setPwdErr('Nowe hasło musi mieć co najmniej 8 znaków.');
+      return;
+    }
+    setPwdBusy(true);
+    try {
+      await apiClient('/auth/me', 'PUT', { old_password: pwdOld, new_password: pwdNew });
+      setPwdOk('Hasło zostało zmienione.');
+      setPwdOld('');
+      setPwdNew('');
+      setPwdConfirm('');
+      window.setTimeout(() => {
+        setPwdOk('');
+        setAccountPwdOpen(false);
+      }, 2200);
+    } catch (e: unknown) {
+      setPwdErr(e instanceof Error ? e.message : 'Nie udało się zmienić hasła.');
+    } finally {
+      setPwdBusy(false);
+    }
+  };
+
   return (
-    <div className="flex h-screen w-full bg-[#000000] p-2 md:p-4 text-zinc-200 font-sans overflow-hidden selection:bg-[#00eeff]/30 selection:text-white relative"
+    <div
+      data-flux-theme={localTheme}
+      className={`flex h-screen w-full p-2 md:p-4 font-sans overflow-hidden relative transition-colors ${
+        localTheme === 'light'
+          ? 'bg-zinc-300 text-zinc-900 selection:bg-[#00eeff]/35'
+          : 'bg-[#000000] text-zinc-200 selection:bg-[#00eeff]/30 selection:text-white'
+      }`}
       onDragEnter={handleDragEnter} onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop} 
       onContextMenu={(e) => handleContextMenu(e, 'general', null)}
     >
@@ -1663,11 +1738,33 @@ export default function App() {
         .custom-scrollbar:hover::-webkit-scrollbar { display: block; }
         .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
+        [data-flux-theme="light"] .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); }
         .user-row:hover, .channel-row:hover { background-color: var(--hover-bg) !important; border-color: var(--hover-border) !important; }
         .loader-dot { animation: loader 1.4s infinite ease-in-out both; }
         .loader-dot:nth-child(1) { animation-delay: -0.32s; }
         .loader-dot:nth-child(2) { animation-delay: -0.16s; }
         @keyframes loader { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
+        [data-flux-theme="light"] .flux-sidebar .text-zinc-100,
+        [data-flux-theme="light"] .flux-main .text-zinc-100,
+        [data-flux-theme="light"] .flux-rightbar .text-zinc-100 { color: #18181b !important; }
+        [data-flux-theme="light"] .flux-sidebar .text-zinc-200,
+        [data-flux-theme="light"] .flux-main .text-zinc-200,
+        [data-flux-theme="light"] .flux-rightbar .text-zinc-200 { color: #27272a !important; }
+        [data-flux-theme="light"] .flux-sidebar .text-zinc-300,
+        [data-flux-theme="light"] .flux-main .text-zinc-300,
+        [data-flux-theme="light"] .flux-rightbar .text-zinc-300 { color: #3f3f46 !important; }
+        [data-flux-theme="light"] .flux-sidebar .text-zinc-400,
+        [data-flux-theme="light"] .flux-main .text-zinc-400,
+        [data-flux-theme="light"] .flux-rightbar .text-zinc-400 { color: #52525b !important; }
+        [data-flux-theme="light"] .flux-sidebar .text-zinc-500,
+        [data-flux-theme="light"] .flux-main .text-zinc-500,
+        [data-flux-theme="light"] .flux-rightbar .text-zinc-500 { color: #71717a !important; }
+        [data-flux-theme="light"] .flux-sidebar .text-zinc-600,
+        [data-flux-theme="light"] .flux-main .text-zinc-600,
+        [data-flux-theme="light"] .flux-rightbar .text-zinc-600 { color: #52525b !important; }
+        [data-flux-theme="light"] .flux-sidebar .text-white,
+        [data-flux-theme="light"] .flux-main .text-white,
+        [data-flux-theme="light"] .flux-rightbar .text-white { color: #0a0a0a !important; }
       `}</style>
 
       {/* --- MENU KONTEKSTOWE --- */}
@@ -2179,13 +2276,50 @@ export default function App() {
 
                     <div className="flex-1 space-y-4">
                       <div>
-                        <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">Avatar URL</label>
+                        <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">Avatar</label>
                         <input
-                          value={localUserAvatar}
+                          ref={settingsAvatarFileRef}
+                          type="file"
+                          accept="image/jpeg,image/png,image/webp,image/gif,image/avif"
+                          className="hidden"
+                          onChange={onSettingsAvatarFileChange}
+                        />
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={() => settingsAvatarFileRef.current?.click()}
+                            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#151515] border border-white/[0.1] text-sm text-zinc-200 hover:border-[#00eeff]/40 hover:text-white transition-colors"
+                          >
+                            <UploadCloud size={16} className="text-[#00eeff]" />
+                            Wgraj z dysku
+                          </button>
+                          {localUserAvatar ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setLocalUserAvatar('');
+                                setSettingsError('');
+                              }}
+                              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-white/[0.08] text-sm text-zinc-400 hover:text-red-400 hover:border-red-500/30 transition-colors"
+                            >
+                              <Trash2 size={16} />
+                              Usuń avatar
+                            </button>
+                          ) : null}
+                        </div>
+                        <p className="text-[11px] text-zinc-600 mt-2">JPG, PNG, WebP itd. — obraz zostanie zmniejszony (max ok. 512 px).</p>
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">Albo adres URL obrazka</label>
+                        <input
+                          value={localUserAvatar.startsWith('data:') ? '' : localUserAvatar}
                           onChange={(e) => setLocalUserAvatar(e.target.value)}
                           className="w-full bg-[#151515] border border-white/[0.1] rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-[#00eeff]/40 transition-colors"
-                          placeholder="https://imgur.com/..."
+                          placeholder="https://…"
                         />
+                        {localUserAvatar.startsWith('data:') ? (
+                          <p className="text-[11px] text-zinc-500 mt-1.5">Aktywny jest wgrany plik. Wpisz URL powyżej, aby go zastąpić linkiem.</p>
+                        ) : null}
                       </div>
                       <div>
                         <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">Wyświetlana nazwa</label>
@@ -2216,13 +2350,9 @@ export default function App() {
                     </div>
 
                     <div>
-                        <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">Poświata (CSS box-shadow/text-shadow)</label>
-                        <input
-                          value={localUserGlow}
-                          onChange={(e) => setLocalUserGlow(e.target.value)}
-                          className="w-full bg-[#151515] border border-white/[0.1] rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-[#00eeff]/40 font-mono transition-colors"
-                          placeholder="np. 0 0 15px rgba(0,238,255,0.4) lub none"
-                        />
+                        <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">Poświata nicku</label>
+                        <SettingsGlowDropdown value={localUserGlow} onChange={setLocalUserGlow} disabled={settingsBusy} />
+                        <p className="text-[11px] text-zinc-600 mt-2">Wybierz gotowy styl — bez wpisywania CSS.</p>
                     </div>
                     
                     <div className="mt-4 p-4 rounded-xl border border-white/[0.06] bg-black/40">
@@ -2249,7 +2379,7 @@ export default function App() {
                   </div>
 
                   <div className="grid grid-cols-2 gap-4 mt-6">
-                    <button onClick={() => setLocalTheme('dark')} className={`p-4 rounded-2xl border text-left transition-all ${localTheme === 'dark' ? 'border-[#00eeff] bg-[#00eeff]/5' : 'border-white/[0.08] hover:border-white/[0.2] bg-white/[0.02]'}`}>
+                    <button type="button" onClick={() => setLocalTheme('dark')} className={`p-4 rounded-2xl border text-left transition-all ${localTheme === 'dark' ? 'border-[#00eeff] bg-[#00eeff]/5' : 'border-white/[0.08] hover:border-white/[0.2] bg-white/[0.02]'}`}>
                       <div className="w-full h-24 bg-[#0a0a0c] rounded-lg border border-white/[0.1] mb-3 flex relative overflow-hidden">
                          <div className="w-1/4 bg-[#080808] border-r border-white/[0.05]"></div>
                          <div className="flex-1 p-2"><div className="w-1/2 h-2 rounded bg-white/[0.1] mb-1"></div><div className="w-3/4 h-2 rounded bg-[#00eeff]/50"></div></div>
@@ -2258,7 +2388,7 @@ export default function App() {
                       <p className="text-xs text-zinc-500 mt-1">Domyślny motyw Devcord.</p>
                     </button>
 
-                    <button onClick={() => setLocalTheme('light')} className={`p-4 rounded-2xl border text-left transition-all ${localTheme === 'light' ? 'border-[#00eeff] bg-[#00eeff]/5' : 'border-white/[0.08] hover:border-white/[0.2] bg-white/[0.02]'}`}>
+                    <button type="button" onClick={() => setLocalTheme('light')} className={`p-4 rounded-2xl border text-left transition-all ${localTheme === 'light' ? 'border-[#00eeff] bg-[#00eeff]/5' : 'border-white/[0.08] hover:border-white/[0.2] bg-white/[0.02]'}`}>
                       <div className="w-full h-24 bg-white rounded-lg border border-black/[0.1] mb-3 flex relative overflow-hidden">
                          <div className="w-1/4 bg-gray-100 border-r border-black/[0.05]"></div>
                          <div className="flex-1 p-2"><div className="w-1/2 h-2 rounded bg-black/[0.1] mb-1"></div><div className="w-3/4 h-2 rounded bg-[#00eeff]"></div></div>
@@ -2267,6 +2397,9 @@ export default function App() {
                       <p className="text-xs text-zinc-500 mt-1">Jasny wariant interfejsu.</p>
                     </button>
                   </div>
+                  <p className="text-sm text-zinc-500 mt-4 leading-relaxed">
+                    Motyw zapisuje się automatycznie w tej przeglądarce (localStorage) i stosuje się od razu.
+                  </p>
                 </div>
               )}
 
@@ -2277,28 +2410,100 @@ export default function App() {
                     <p className="text-sm text-zinc-400">Zarządzaj swoimi danymi dostępowymi.</p>
                   </div>
                   
-                  <div className="bg-black/40 border border-white/[0.06] rounded-2xl p-6">
-                    <div className="flex items-center justify-between mb-6 border-b border-white/[0.06] pb-6">
+                  <div className="bg-black/40 border border-white/[0.06] rounded-2xl p-6 space-y-6">
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-white/[0.06] pb-6">
                       <div>
-                        <span className="text-xs uppercase font-bold text-zinc-500 block mb-1">Email kontaktowy</span>
-                        <span className="text-zinc-200">{authEmail || 'Zalogowano lokalnie'}</span>
+                        <span className="text-xs uppercase font-bold text-zinc-500 block mb-1">E-mail logowania</span>
+                        <span className="text-zinc-200 break-all">{sessionEmail || authEmail || (API_BASE_URL ? '—' : 'Tryb bez API')}</span>
+                        <p className="text-[11px] text-zinc-600 mt-2 max-w-md">Adres służy do logowania. Zmiana e-maila z poziomu aplikacji nie jest jeszcze włączona — w razie potrzeby skontaktuj się z administratorem domeny.</p>
                       </div>
-                      <button className="px-4 py-2 bg-white/[0.05] hover:bg-white/[0.1] rounded-lg text-sm text-white transition-colors">Zmień Email</button>
+                      <button
+                        type="button"
+                        disabled
+                        title="Zmiana e-maila nie jest jeszcze dostępna w aplikacji."
+                        className="shrink-0 px-4 py-2 bg-white/[0.04] rounded-lg text-sm text-zinc-600 cursor-not-allowed border border-white/[0.06]"
+                      >
+                        Zmień e-mail
+                      </button>
                     </div>
 
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <span className="text-xs uppercase font-bold text-zinc-500 block mb-1">Bezpieczeństwo</span>
-                        <span className="text-zinc-200">Zmień hasło by ułatwić zarządzanie kontem.</span>
+                    <div className="flex flex-col gap-4">
+                      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+                        <div>
+                          <span className="text-xs uppercase font-bold text-zinc-500 block mb-1">Hasło</span>
+                          <span className="text-sm text-zinc-400">Użyj obecnego hasła i ustaw nowe (min. 8 znaków).</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAccountPwdOpen((o) => !o);
+                            setPwdErr('');
+                            setPwdOk('');
+                          }}
+                          disabled={!API_BASE_URL}
+                          className="shrink-0 px-4 py-2 border border-blue-500/35 text-blue-400 hover:bg-blue-500/10 rounded-lg text-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          {accountPwdOpen ? 'Anuluj zmianę hasła' : 'Zmień hasło'}
+                        </button>
                       </div>
-                      <button className="px-4 py-2 border border-blue-500/30 text-blue-400 hover:bg-blue-500/10 rounded-lg text-sm transition-colors">Zmień Hasło</button>
+
+                      {accountPwdOpen && API_BASE_URL && (
+                        <div className="rounded-xl border border-white/[0.08] bg-[#111]/80 p-4 space-y-3">
+                          {pwdOk ? <div className="text-sm text-emerald-400">{pwdOk}</div> : null}
+                          {pwdErr ? <div className="text-sm text-red-400">{pwdErr}</div> : null}
+                          <div>
+                            <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-1.5">Obecne hasło</label>
+                            <input
+                              type="password"
+                              autoComplete="current-password"
+                              value={pwdOld}
+                              onChange={(e) => setPwdOld(e.target.value)}
+                              className="w-full bg-[#151515] border border-white/[0.1] rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-[#00eeff]/40"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-1.5">Nowe hasło</label>
+                            <input
+                              type="password"
+                              autoComplete="new-password"
+                              value={pwdNew}
+                              onChange={(e) => setPwdNew(e.target.value)}
+                              className="w-full bg-[#151515] border border-white/[0.1] rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-[#00eeff]/40"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-1.5">Powtórz nowe hasło</label>
+                            <input
+                              type="password"
+                              autoComplete="new-password"
+                              value={pwdConfirm}
+                              onChange={(e) => setPwdConfirm(e.target.value)}
+                              className="w-full bg-[#151515] border border-white/[0.1] rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-[#00eeff]/40"
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => void submitAccountPasswordChange()}
+                            disabled={pwdBusy || !pwdOld || !pwdNew}
+                            className="w-full sm:w-auto px-6 py-2.5 rounded-xl bg-[#00eeff] text-black font-bold text-sm disabled:opacity-50"
+                          >
+                            {pwdBusy ? 'Zapisywanie…' : 'Zapisz nowe hasło'}
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
 
-                  <div className="pt-6 border-t border-white/[0.06]">
-                     <h4 className="text-sm font-bold text-red-500 mb-2">Strefa Zagrożenia</h4>
-                     <p className="text-xs text-zinc-500 mb-4">Trwale usuń swoje konto i wszystkie powiązane z nim dane.</p>
-                     <button className="px-4 py-2 border border-red-500/50 text-red-500 hover:bg-red-500/10 rounded-lg text-sm transition-colors">Usuń konto</button>
+                  <div className="pt-2 border-t border-white/[0.06]">
+                     <h4 className="text-sm font-bold text-red-500 mb-2">Strefa zagrożenia</h4>
+                     <p className="text-xs text-zinc-500 mb-4">Trwałe usunięcie konta nie jest jeszcze obsługiwane przez API. Skontaktuj się z administratorem, jeśli musisz zamknąć konto.</p>
+                     <button
+                       type="button"
+                       onClick={() => setSettingsError('Usuwanie konta z aplikacji nie jest jeszcze dostępne.')}
+                       className="px-4 py-2 border border-red-500/40 text-red-400/90 hover:bg-red-500/10 rounded-lg text-sm transition-colors"
+                     >
+                       Usuń konto (niedostępne)
+                     </button>
                   </div>
                 </div>
               )}
@@ -2369,6 +2574,9 @@ export default function App() {
                   >
                     Wyszukaj ponownie urządzenia
                   </button>
+                  <p className="text-sm text-zinc-500 leading-relaxed">
+                    Mikrofon, bramka ciszy oraz ustawienia ekranu (FPS / rozdzielczość) zapisują się automatycznie w tej przeglądarce i są używane przy rozmowach głosowych oraz udostępnianiu pulpitu.
+                  </p>
                 </div>
               )}
             </div>
@@ -2485,13 +2693,21 @@ export default function App() {
       )}
 
       {/* --- STRUKTURA GŁÓWNA APLIKACJI --- */}
-      <div className="flex h-full w-full bg-[#050505] rounded-[32px] border border-white/[0.08] shadow-[0_0_80px_rgba(255,255,255,0.03)] overflow-hidden relative transition-all duration-500">
+      <div
+        className={`flex h-full w-full rounded-[32px] border overflow-hidden relative transition-all duration-500 flux-shell ${
+          localTheme === 'light'
+            ? 'bg-zinc-100 border-zinc-300/90 shadow-lg shadow-black/10'
+            : 'bg-[#050505] border-white/[0.08] shadow-[0_0_80px_rgba(255,255,255,0.03)]'
+        }`}
+      >
         
         {/* --- 1. LEWY PANEL (NAV) --- */}
         {!isZenMode && (
           <aside 
             onContextMenu={(e) => handleContextMenu(e, 'workspace', null)}
-            className="w-[280px] flex flex-col shrink-0 z-30 border-r border-white/[0.04] bg-[#080808] transition-all duration-500"
+            className={`w-[280px] flex flex-col shrink-0 z-30 border-r transition-all duration-500 flux-sidebar ${
+              localTheme === 'light' ? 'bg-zinc-50 border-zinc-200' : 'border-white/[0.04] bg-[#080808]'
+            }`}
           >
             {/* Workspace Switcher */}
             <div className="relative px-4 pt-6 pb-2 z-50">
@@ -2820,7 +3036,11 @@ export default function App() {
         )}
 
         {/* --- 2. MAIN VIEW (CZAT / VOICE) --- */}
-        <main className="flex-1 flex flex-col relative bg-[#0a0a0c] overflow-hidden z-0 border-l border-white/[0.02] transition-all duration-500">
+        <main
+          className={`flex-1 flex flex-col relative overflow-hidden z-0 border-l transition-all duration-500 flux-main ${
+            localTheme === 'light' ? 'bg-zinc-100 border-zinc-200' : 'bg-[#0a0a0c] border-white/[0.02]'
+          }`}
+        >
           {activeServer === '' ? (
             <div className="flex-1 flex flex-col p-8 bg-[#0a0a0c] overflow-y-auto custom-scrollbar relative animate-in fade-in duration-300">
                <div className="absolute inset-0 bg-gradient-to-b from-[#00eeff]/[0.08] to-transparent pointer-events-none opacity-40"></div>
@@ -3504,7 +3724,11 @@ export default function App() {
 
         {/* --- 4. INTELIGENTNY PRAWY PANEL (WĄTKI, ZADANIA, PLIKI) --- */}
         {!isZenMode && (rightPanelTab || activeThread) && !(API_BASE_URL && servers.length === 0) && (
-          <aside className="w-[320px] bg-[#080808]/80 backdrop-blur-xl border-l border-white/[0.04] flex flex-col shrink-0 z-20 transition-all duration-300 shadow-2xl">
+          <aside
+            className={`w-[320px] backdrop-blur-xl border-l flex flex-col shrink-0 z-20 transition-all duration-300 shadow-2xl flux-rightbar ${
+              localTheme === 'light' ? 'bg-zinc-50/95 border-zinc-200' : 'bg-[#080808]/80 border-white/[0.04]'
+            }`}
+          >
             
             {activeThread ? (
               // WIDOK WĄTKU
