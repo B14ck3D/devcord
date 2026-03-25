@@ -1,18 +1,11 @@
 package signaling
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
-	"strconv"
-	"strings"
-	"time"
 
 	"github.com/gorilla/websocket"
 )
-
-const maxChatContentRunes = 8000
 
 func ServeWS(hub *Hub) http.HandlerFunc {
 	upgrader := websocket.Upgrader{
@@ -44,51 +37,12 @@ func (h *Hub) handleInbound(c *Client, data []byte) error {
 		return h.handleForwardSession(c, TypeAnswer, env.Payload)
 	case TypeICECandidate:
 		return h.handleForwardICE(c, env.Payload)
-	case TypeChatSend:
-		return h.handleChatSend(c, env.Payload)
 	case TypeLeave, TypeUserDisconnected:
 		h.unregister(c)
 		return nil
 	default:
 		return ErrBadPayload
 	}
-}
-
-func chatMessageID() string {
-	var b [8]byte
-	_, _ = rand.Read(b[:])
-	return strconv.FormatInt(time.Now().UnixNano(), 36) + "-" + hex.EncodeToString(b[:])
-}
-
-func (h *Hub) handleChatSend(c *Client, payload json.RawMessage) error {
-	if c.room == nil {
-		return ErrNotJoined
-	}
-	var p ChatSendPayload
-	if err := json.Unmarshal(payload, &p); err != nil {
-		return ErrBadPayload
-	}
-	content := strings.TrimSpace(p.Content)
-	if content == "" {
-		return ErrBadPayload
-	}
-	if len([]rune(content)) > maxChatContentRunes {
-		return ErrBadPayload
-	}
-	out, err := MarshalEnvelope(TypeChatMessage, ChatMessagePayload{
-		RoomID:  c.roomID,
-		UserID:  c.userID,
-		Content: content,
-		ID:      chatMessageID(),
-		TS:      time.Now().UnixMilli(),
-	})
-	if err != nil {
-		return err
-	}
-	for _, oc := range c.room.snapshotClients() {
-		oc.Send(out)
-	}
-	return nil
 }
 
 func (h *Hub) handleJoinRoom(c *Client, payload json.RawMessage) error {

@@ -1,4 +1,8 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import { useVoiceRoom } from './useVoiceRoom';
+import { useChatSocket } from './useChatSocket';
+import { iconFromKey } from './iconMap';
+import { AuthGate } from './AuthGate';
 import { 
   Send, Search, Plus, ArrowUpRight, Hash, Volume2, 
   Phone, Video, Users, UserPlus, Settings, Mic, 
@@ -8,36 +12,145 @@ import {
   ListTodo, Bold, Italic, Code as CodeIcon, Link, FileText, Image as ImageIcon,
   Command as CmdIcon, User, Moon, LogOut, 
   X, MicOff, PhoneOff, Palette, BellRing, MessageSquareShare,
-  UploadCloud, Copy, Smile, MonitorUp, Trash2, Edit2, MoreVertical, CheckSquare, Square, Download, FileAudio, FileArchive, Eye, UserCheck, UserMinus, BellOff, LogIn, Server, Link2, CopyPlus, ChevronDown, FolderPlus, Pin
+  UploadCloud, Copy, Smile, MonitorUp, Monitor, Trash2, Edit2, MoreVertical, CheckSquare, Square, Download, FileAudio, FileArchive, Eye, UserCheck, UserMinus, BellOff, LogIn, Server, Link2, CopyPlus, ChevronDown, FolderPlus, Pin
 } from 'lucide-react';
 
 // ============================================================================
 // --- 1. KONFIGURACJA API (GOTOWE DO PODPIĘCIA) ---
 // ============================================================================
 
-// Dodaj VITE_API_URL do pliku .env, np: VITE_API_URL=http://localhost:3000/api
-// Jeśli zmienna jest pusta, aplikacja działa w trybie "Mock" (lokalnie).
-const API_BASE_URL = ''; 
+// VITE_API_URL=http://localhost:3000/api — pusty = tryb mock (lokalne placeholdery).
+const API_BASE_URL = ((import.meta.env.VITE_API_URL as string | undefined) ?? '').replace(/\/$/, '');
+const DEMO_MODE = !API_BASE_URL;
 
-const apiClient = async (endpoint: string, method: string = 'GET', body?: any) => {
+function appPublicOrigin(): string {
+  const fromEnv = (import.meta.env.VITE_PUBLIC_ORIGIN as string | undefined)?.trim().replace(/\/$/, '');
+  if (fromEnv) return fromEnv;
+  if (API_BASE_URL) {
+    try {
+      return new URL(API_BASE_URL).origin;
+    } catch {
+      /* ignore */
+    }
+  }
+  if (typeof window !== 'undefined') return window.location.origin;
+  return '';
+}
+
+function readChannelsPath(): { sid: string; cid: string } | null {
+  if (typeof window === 'undefined') return null;
+  const path = (window.location.pathname || '/').replace(/\/$/, '') || '/';
+  const m = path.match(/^\/channels\/([^/]+)\/([^/]+)$/i);
+  if (!m?.[1] || !m?.[2]) return null;
+  try {
+    return { sid: decodeURIComponent(m[1]), cid: decodeURIComponent(m[2]) };
+  } catch {
+    return { sid: m[1], cid: m[2] };
+  }
+}
+
+function writeChannelsPath(sid: string, cid: string) {
+  if (typeof window === 'undefined' || !sid || !cid) return;
+  const want = `/channels/${sid}/${cid}`;
+  const cur = (window.location.pathname || '').replace(/\/$/, '') || '/';
+  if (cur === want) return;
+  window.history.replaceState({ devcord: 1 }, '', want);
+}
+
+/** Wyciąga kod / ID z pełnego URL lub surowego kodu zaproszenia. */
+function parseJoinInput(raw: string): string {
+  const t = raw.trim();
+  const m = t.match(/\/(?:join|invite)\/([^/?#]+)/i);
+  if (m?.[1]) {
+    try {
+      return decodeURIComponent(m[1].trim());
+    } catch {
+      return m[1].trim();
+    }
+  }
+  return t;
+}
+
+const AUTH_TOKEN_KEY = 'devcord_token';
+const AUTH_TOKEN_LEGACY = 'flux_token';
+const PENDING_JOIN_KEY = 'devcord_pending_join';
+const PENDING_JOIN_LEGACY = 'flux_pending_join';
+
+function getStoredAuthToken(): string {
+  if (typeof localStorage === 'undefined') return '';
+  const n = localStorage.getItem(AUTH_TOKEN_KEY);
+  if (n) return n;
+  const o = localStorage.getItem(AUTH_TOKEN_LEGACY);
+  if (o) {
+    localStorage.setItem(AUTH_TOKEN_KEY, o);
+    localStorage.removeItem(AUTH_TOKEN_LEGACY);
+    return o;
+  }
+  return '';
+}
+
+function clearStoredAuthToken() {
+  localStorage.removeItem(AUTH_TOKEN_KEY);
+  localStorage.removeItem(AUTH_TOKEN_LEGACY);
+}
+
+function peekPendingJoin(): string | null {
+  if (typeof sessionStorage === 'undefined') return null;
+  let v = sessionStorage.getItem(PENDING_JOIN_KEY);
+  if (v) return v;
+  const o = sessionStorage.getItem(PENDING_JOIN_LEGACY);
+  if (o) {
+    sessionStorage.setItem(PENDING_JOIN_KEY, o);
+    sessionStorage.removeItem(PENDING_JOIN_LEGACY);
+    return o;
+  }
+  return null;
+}
+
+function setPendingJoinCode(code: string) {
+  sessionStorage.setItem(PENDING_JOIN_KEY, code);
+}
+
+function takePendingJoinCode(): string | null {
+  const v = peekPendingJoin();
+  if (v) {
+    sessionStorage.removeItem(PENDING_JOIN_KEY);
+    sessionStorage.removeItem(PENDING_JOIN_LEGACY);
+  }
+  return v;
+}
+
+const apiClient = async (endpoint: string, method: string = 'GET', body?: unknown) => {
   if (!API_BASE_URL) {
-    // TRYB MOCK: Zwraca null po małym opóźnieniu symulującym sieć
     return new Promise((resolve) => setTimeout(() => resolve(null), 100));
   }
-
-  // TRYB PRODUKCYJNY: Prawdziwe zapytanie HTTP
   const headers: HeadersInit = { 'Content-Type': 'application/json' };
-  const token = localStorage.getItem('flux_token');
+  const token = getStoredAuthToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;
-
   const response = await fetch(`${API_BASE_URL}${endpoint}`, {
     method,
     headers,
-    body: body ? JSON.stringify(body) : undefined,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
   });
-
-  if (!response.ok) throw new Error(`Błąd API: ${response.status}`);
-  return response.json();
+  if (response.status === 204) return null;
+  if (!response.ok) {
+    let serverMsg = '';
+    try {
+      const ect = response.headers.get('content-type');
+      if (ect?.includes('application/json')) {
+        const j = (await response.json()) as { error?: string };
+        if (j?.error) serverMsg = j.error;
+      }
+    } catch {
+      /* ignore */
+    }
+    const err = new Error(serverMsg || `HTTP ${response.status}`) as Error & { status: number };
+    err.status = response.status;
+    throw err;
+  }
+  const ct = response.headers.get('content-type');
+  if (ct?.includes('application/json')) return response.json();
+  return null;
 };
 
 // ============================================================================
@@ -49,11 +162,11 @@ type Channel = { id: string; name: string; type: 'text' | 'voice'; color: string
 type ChatRow = { id: string; userId: string; time: string; content: string; isMe?: boolean; isEdited?: boolean; reactions?: { emoji: string; count: number; userReacted: boolean }[] };
 type TaskItem = { id: string; title: string; assigneeId: string; completed: boolean; sourceMsgId?: string };
 type FileItem = { id: string; name: string; size: string; type: 'image' | 'doc' | 'audio' | 'archive'; uploaderId: string; date: string };
-type ContextMenuType = 'channel'|'category'|'user'|'file'|'task'|'server'|'message'|'workspace'|'filesArea'|'tasksArea'|'chatArea'|'membersArea';
+type ContextMenuType = 'channel'|'category'|'user'|'file'|'task'|'server'|'message'|'workspace'|'filesArea'|'tasksArea'|'chatArea'|'membersArea'|'general';
 
 // --- MOCK DATA INICJALIZACYJNE ---
 const initialServers = [
-  { id: 's1', name: 'Flux_', icon: Zap, active: true, color: '#00eeff', glow: '0 0 15px rgba(0,238,255,0.4)' },
+  { id: 's1', name: 'Devcord_', icon: Zap, active: true, color: '#00eeff', glow: '0 0 15px rgba(0,238,255,0.4)' },
   { id: 's2', name: 'Projekt Alfa', icon: Code, hasNotification: true, color: '#00ffcc', glow: '0 0 15px rgba(0,255,204,0.4)' },
 ];
 const initialCategories: Category[] = [
@@ -70,7 +183,7 @@ const initialChannels: Channel[] = [
   { id: 'c4', name: 'Planowanie Sprintu', type: 'text', color: '#00ffcc', icon: Hash, categoryId: 'cat3', serverId: 's2' },
 ];
 const mockRoles = [
-  { id: 'r1', name: 'Zarząd Flux_', color: '#00eeff', bg: 'rgba(0, 238, 255, 0.08)', border: 'rgba(0, 238, 255, 0.25)', icon: Crown, glow: '0 0 12px rgba(0,238,255,0.4)' },
+  { id: 'r1', name: 'Zarząd Devcord_', color: '#00eeff', bg: 'rgba(0, 238, 255, 0.08)', border: 'rgba(0, 238, 255, 0.25)', icon: Crown, glow: '0 0 12px rgba(0,238,255,0.4)' },
   { id: 'r2', name: 'Lead Developer', color: '#00ffcc', bg: 'rgba(0, 255, 204, 0.08)', border: 'rgba(0, 255, 204, 0.25)', icon: Terminal, glow: '0 0 12px rgba(0,255,204,0.4)' },
   { id: 'r3', name: 'Design', color: '#b266ff', bg: 'rgba(178, 102, 255, 0.08)', border: 'rgba(178, 102, 255, 0.25)', icon: Sparkles, glow: '0 0 12px rgba(178,102,255,0.4)' },
   { id: 'r4', name: 'Użytkownicy', color: '#a1a1aa', bg: 'rgba(161, 161, 170, 0.05)', border: 'rgba(161, 161, 170, 0.1)', icon: Users, glow: 'none' },
@@ -92,9 +205,21 @@ const initialFiles: FileItem[] = [
 ];
 
 function guestSessionId(): string {
-  const k = 'flux_guest_id';
+  const k = 'devcord_guest_id';
+  const leg = 'flux_guest_id';
   let id = sessionStorage.getItem(k);
-  if (!id) { id = 'u1'; sessionStorage.setItem(k, id); }
+  if (!id) {
+    const o = sessionStorage.getItem(leg);
+    if (o) {
+      sessionStorage.setItem(k, o);
+      sessionStorage.removeItem(leg);
+      id = o;
+    }
+  }
+  if (!id) {
+    id = 'u1';
+    sessionStorage.setItem(k, id);
+  }
   return id;
 }
 
@@ -119,7 +244,39 @@ function useVoiceRoomMock({ enabled, roomId, userId }: { enabled: boolean, roomI
     }
   }, [enabled, roomId, userId]);
 
-  return { phase, error: null, participants, localMuted, setLocalMuted };
+  return {
+    phase,
+    error: null,
+    participants,
+    localMuted,
+    setLocalMuted,
+    speakingPeers: {} as Record<string, boolean>,
+    remoteScreenByUser: {} as Record<string, MediaStream>,
+  };
+}
+
+function useVoiceRoomMaybe(opts: {
+  apiMode: boolean;
+  enabled: boolean;
+  roomId: string | null;
+  userId: string;
+  micDeviceId: string;
+  screenStream: MediaStream | null;
+}) {
+  const real = useVoiceRoom({
+    enabled: opts.apiMode && opts.enabled,
+    roomId: opts.roomId,
+    userId: opts.userId,
+    micDeviceId: opts.micDeviceId,
+    screenStream: opts.screenStream,
+  });
+  const mock = useVoiceRoomMock({
+    enabled: !opts.apiMode && opts.enabled,
+    roomId: opts.roomId,
+    userId: opts.userId,
+    micDeviceId: opts.micDeviceId,
+  });
+  return opts.apiMode ? real : mock;
 }
 
 const createMockScreenStream = (): MediaStream => {
@@ -133,7 +290,7 @@ const createMockScreenStream = (): MediaStream => {
     if (!ctx) return;
     ctx.fillStyle = '#0a0a0c'; ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = '#00eeff'; ctx.font = 'bold 48px sans-serif'; ctx.textAlign = 'center';
-    ctx.fillText('SYMULACJA EKRANU FLUX_', canvas.width / 2, canvas.height / 2 - 30);
+    ctx.fillText('SYMULACJA EKRANU DEVCORD_', canvas.width / 2, canvas.height / 2 - 30);
     ctx.fillStyle = '#ff0055'; ctx.font = '24px sans-serif';
     ctx.fillText('Prawdziwe API zablokowane przez uprawnienia iframe.', canvas.width / 2, canvas.height / 2 + 30);
     ctx.fillStyle = '#00ffcc'; ctx.fillRect(x, canvas.height - 40, 300, 10);
@@ -148,34 +305,81 @@ const createMockScreenStream = (): MediaStream => {
   return stream;
 };
 
-const VideoPlayer = ({ stream, isLocal, className }: { stream: MediaStream | null, isLocal?: boolean, className?: string }) => {
+const VideoPlayer = ({
+  stream,
+  isLocal,
+  className,
+  volume = 1,
+  muted: mutedOverride,
+  onContextMenu,
+}: {
+  stream: MediaStream | null;
+  isLocal?: boolean;
+  className?: string;
+  volume?: number;
+  muted?: boolean;
+  onContextMenu?: (e: React.MouseEvent<HTMLVideoElement>) => void;
+}) => {
   const videoRef = useRef<HTMLVideoElement>(null);
-  useEffect(() => { if (videoRef.current && stream) videoRef.current.srcObject = stream; }, [stream]);
+  useEffect(() => {
+    const v = videoRef.current;
+    if (v && stream) v.srcObject = stream;
+  }, [stream]);
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || !stream) return;
+    if (isLocal) {
+      v.muted = true;
+      return;
+    }
+    v.volume = Math.min(1, Math.max(0, volume));
+    v.muted = mutedOverride ?? false;
+  }, [volume, mutedOverride, isLocal, stream]);
   if (!stream) return null;
-  return <video ref={videoRef} autoPlay playsInline muted={isLocal} className={`object-cover ${className}`} />;
+  const muted = isLocal ? true : (mutedOverride ?? false);
+  return (
+    <video
+      ref={videoRef}
+      autoPlay
+      playsInline
+      muted={muted}
+      className={`object-cover ${className}`}
+      onContextMenu={onContextMenu}
+    />
+  );
 };
 
 // ============================================================================
 // --- GŁÓWNY KOMPONENT APLIKACJI ---
 // ============================================================================
 export default function App() {
-  // Stany Danych
-  const [servers, setServers] = useState(initialServers);
-  const [categories, setCategories] = useState<Category[]>(initialCategories);
-  const [channels, setChannels] = useState<Channel[]>(initialChannels);
-  const [tasks, setTasks] = useState<TaskItem[]>(initialTasks);
-  const [files, setFiles] = useState<FileItem[]>(initialFiles);
-  const [messagesByChannel, setMessagesByChannel] = useState<Record<string, ChatRow[]>>({
-    'c1': [
-      { id: 'm1', userId: 'u2', time: '10:00', content: 'Siema, widzieliście nowe makiety od Ani?' },
-      { id: 'm2', userId: 'u3', time: '10:05', content: 'Wrzuciłam je do zakładki pliki 🚀', reactions: [{ emoji: '🔥', count: 2, userReacted: true }] }
-    ]
-  });
+  // Stany Danych — przy podłączonym API startujemy pusto (bez s1/c1), żeby nie strzelać w nieistniejące ID.
+  const [servers, setServers] = useState(() => (DEMO_MODE ? initialServers : []));
+  const [categories, setCategories] = useState<Category[]>(() => (DEMO_MODE ? initialCategories : []));
+  const [channels, setChannels] = useState<Channel[]>(() => (DEMO_MODE ? initialChannels : []));
+  const [tasks, setTasks] = useState<TaskItem[]>(() => (DEMO_MODE ? initialTasks : []));
+  const [files, setFiles] = useState<FileItem[]>(() => (DEMO_MODE ? initialFiles : []));
+  const [messagesByChannel, setMessagesByChannel] = useState<Record<string, ChatRow[]>>(() =>
+    DEMO_MODE
+      ? {
+          c1: [
+            { id: 'm1', userId: 'u2', time: '10:00', content: 'Siema, widzieliście nowe makiety od Ani?' },
+            {
+              id: 'm2',
+              userId: 'u3',
+              time: '10:05',
+              content: 'Wrzuciłam je do zakładki pliki 🚀',
+              reactions: [{ emoji: '🔥', count: 2, userReacted: true }],
+            },
+          ],
+        }
+      : ({} as Record<string, ChatRow[]>),
+  );
 
   // Stany Nawigacji
-  const [activeServer, setActiveServer] = useState('s1');
+  const [activeServer, setActiveServer] = useState(() => (DEMO_MODE ? 's1' : ''));
   const [isWorkspaceDropdownOpen, setIsWorkspaceDropdownOpen] = useState(false);
-  const [activeChannel, setActiveChannel] = useState('c1');
+  const [activeChannel, setActiveChannel] = useState(() => (DEMO_MODE ? 'c1' : ''));
   const [rightPanelTab, setRightPanelTab] = useState<'members' | 'files' | 'tasks' | null>('members');
   const [isZenMode, setIsZenMode] = useState(false);
   
@@ -193,12 +397,23 @@ export default function App() {
   const [cmdSearchQuery, setCmdSearchQuery] = useState('');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<'profile' | 'audio'>('profile');
-  const [localUserName, setLocalUserName] = useState('Admin');
+  const [localUserName, setLocalUserName] = useState(() => (DEMO_MODE ? 'Admin' : 'Użytkownik'));
   
   // Modale (Kanały/Serwery/Kategorie/Zadania)
   const [createServerModal, setCreateServerModal] = useState<'create' | 'join' | null>(null);
   const [newServerName, setNewServerName] = useState('');
   const [joinServerCode, setJoinServerCode] = useState('');
+  const [joinModalErr, setJoinModalErr] = useState('');
+  const [deepJoinToken, setDeepJoinToken] = useState<string | null>(null);
+  const [inviteModal, setInviteModal] = useState<{ id: string; name: string } | null>(null);
+  const [inviteListRows, setInviteListRows] = useState<
+    Array<{ id: string; code: string; usesCount: number; maxUses?: number | null; expiresAt?: string | null; createdAt: string }>
+  >([]);
+  const [inviteFormMaxUses, setInviteFormMaxUses] = useState('');
+  const [inviteFormDays, setInviteFormDays] = useState<'0' | '1' | '7' | '30'>('0');
+  const [inviteBusy, setInviteBusy] = useState(false);
+  const [inviteCreateErr, setInviteCreateErr] = useState('');
+  const [inviteCreatedUrl, setInviteCreatedUrl] = useState<string | null>(null);
 
   const [createCategoryModal, setCreateCategoryModal] = useState(false);
   const [editCategoryModal, setEditCategoryModal] = useState<Category | null>(null);
@@ -217,17 +432,40 @@ export default function App() {
   // Stany Głosowe
   const [activeVoiceChannel, setActiveVoiceChannel] = useState<string | null>(null);
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
+  const [remoteScreenWatching, setRemoteScreenWatching] = useState(false);
+  const [remoteScreenVolume, setRemoteScreenVolume] = useState(1);
+  const [remoteScreenVideoMuted, setRemoteScreenVideoMuted] = useState(false);
+  const [screenStreamContext, setScreenStreamContext] = useState<{ x: number; y: number } | null>(null);
   const [micDeviceId, setMicDeviceId] = useState('');
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
+
+  const [fluxToken, setFluxToken] = useState(() => getStoredAuthToken());
+  const [meUserId, setMeUserId] = useState('');
+  type PanelRole = (typeof mockRoles)[number];
+  const [workspaceRoles, setWorkspaceRoles] = useState<PanelRole[]>(() => (DEMO_MODE ? [...mockRoles] : []));
+  const [workspaceMembers, setWorkspaceMembers] = useState<UserInfo[]>(() => (DEMO_MODE ? [...mockUsers] : []));
+  const [typingUsers, setTypingUsers] = useState<Record<string, boolean>>({});
+  const [authMode, setAuthMode] = useState<'login' | 'register' | 'verify'>('login');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authNick, setAuthNick] = useState('');
+  const [authCode, setAuthCode] = useState('');
+  const [authErr, setAuthErr] = useState('');
 
   // Referencje
   const guestIdRef = useRef(guestSessionId());
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const initialNavSyncedRef = useRef(false);
 
   // Filtrowanie pod aktywny serwer
   const currentServerCategories = useMemo(() => categories.filter(c => c.serverId === activeServer), [categories, activeServer]);
   const currentServerChannels = useMemo(() => channels.filter(c => c.serverId === activeServer), [channels, activeServer]);
+  const currentChannelMeta = useMemo(
+    () => currentServerChannels.find((c) => c.id === activeChannel),
+    [currentServerChannels, activeChannel],
+  );
+  const currentChannelData = currentChannelMeta ?? currentServerChannels[0];
 
   useEffect(() => {
     if (currentServerChannels.length > 0 && !currentServerChannels.find(c => c.id === activeChannel)) {
@@ -236,32 +474,369 @@ export default function App() {
     }
   }, [activeServer, currentServerChannels, activeChannel]);
 
-  // Pobranie danych inicjalizacyjnych z API (Gdy podłączone)
+  useEffect(() => {
+    if (!fluxToken) initialNavSyncedRef.current = false;
+  }, [fluxToken]);
+
+  useEffect(() => {
+    if (DEMO_MODE || !API_BASE_URL || !fluxToken) return;
+    if (servers.length === 0 || channels.length === 0) return;
+    if (initialNavSyncedRef.current) return;
+    const p = readChannelsPath();
+    if (!p) {
+      initialNavSyncedRef.current = true;
+      return;
+    }
+    if (servers.some((s) => s.id === p.sid) && channels.some((c) => c.id === p.cid && c.serverId === p.sid)) {
+      setActiveServer(p.sid);
+      setActiveChannel(p.cid);
+    }
+    initialNavSyncedRef.current = true;
+  }, [servers, channels, fluxToken]);
+
+  useEffect(() => {
+    if (DEMO_MODE || !API_BASE_URL || !fluxToken) return;
+    if (!activeServer || !activeChannel) return;
+    const path = window.location.pathname || '';
+    if (/^\/(invite|join)\//i.test(path)) return;
+    writeChannelsPath(activeServer, activeChannel);
+  }, [activeServer, activeChannel, fluxToken]);
+
+  useEffect(() => {
+    if (DEMO_MODE || !API_BASE_URL || !fluxToken) return;
+    const handler = () => {
+      const p = readChannelsPath();
+      if (p && servers.some((s) => s.id === p.sid) && channels.some((c) => c.id === p.cid && c.serverId === p.sid)) {
+        setActiveServer(p.sid);
+        setActiveChannel(p.cid);
+      }
+    };
+    window.addEventListener('popstate', handler);
+    return () => window.removeEventListener('popstate', handler);
+  }, [fluxToken, servers, channels]);
+
+  useEffect(() => {
+    if (!DEMO_MODE || !activeServer || !activeChannel) return;
+    writeChannelsPath(activeServer, activeChannel);
+  }, [activeServer, activeChannel]);
+
+  useEffect(() => {
+    if (!API_BASE_URL || !fluxToken) {
+      setMeUserId('');
+      return;
+    }
+    (async () => {
+      try {
+        const me = await apiClient('/auth/me');
+        if (me && typeof me === 'object' && 'id' in me && (me as { id: string }).id) {
+          setMeUserId((me as { id: string }).id);
+          const dn = (me as { display_name?: string }).display_name;
+          if (dn) setLocalUserName(dn);
+        }
+      } catch {
+        setMeUserId('');
+      }
+    })();
+  }, [API_BASE_URL, fluxToken]);
+
+  useEffect(() => {
+    const path = window.location.pathname.replace(/\/$/, '') || '/';
+    const m = path.match(/^\/(?:join|invite)\/([^/]+)$/i);
+    if (!m?.[1]) return;
+    if (!getStoredAuthToken()) {
+      try {
+        setPendingJoinCode(decodeURIComponent(m[1]));
+      } catch {
+        /* ignore */
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!API_BASE_URL || DEMO_MODE) {
+      setDeepJoinToken(null);
+      return;
+    }
+    if (!fluxToken) {
+      setDeepJoinToken(null);
+      return;
+    }
+    const path = window.location.pathname.replace(/\/$/, '') || '/';
+    let token: string | null = null;
+    const m = path.match(/^\/(?:join|invite)\/([^/]+)$/i);
+    if (m?.[1]) token = decodeURIComponent(m[1]);
+    if (!token) {
+      try {
+        token = takePendingJoinCode();
+      } catch {
+        /* ignore */
+      }
+    }
+    if (token) {
+      setJoinModalErr('');
+      setDeepJoinToken(token);
+    } else {
+      setDeepJoinToken(null);
+    }
+  }, [API_BASE_URL, fluxToken]);
+
   useEffect(() => {
     const fetchInitialData = async () => {
       try {
-        if (!API_BASE_URL) return; // Jeśli brak URL, zostawiamy Mock Data
+        if (!API_BASE_URL || !fluxToken) return;
         const [apiServers, apiCategories, apiChannels] = await Promise.all([
           apiClient('/servers'),
           apiClient('/categories'),
-          apiClient('/channels')
+          apiClient('/channels'),
         ]);
-        if (apiServers) setServers(apiServers);
-        if (apiCategories) setCategories(apiCategories);
-        if (apiChannels) setChannels(apiChannels);
+        if (Array.isArray(apiServers)) {
+          setServers(
+            apiServers.map((s: { id: string; name: string; iconKey?: string; icon?: string; color?: string; glow?: string; active?: boolean; inviteCode?: string }) => ({
+              ...s,
+              icon: iconFromKey(s.iconKey ?? s.icon, Zap),
+              active: s.active !== false,
+              color: s.color ?? '#00eeff',
+              glow: s.glow ?? '',
+              inviteCode: s.inviteCode,
+            })) as Array<(typeof initialServers)[number] & { inviteCode?: string }>,
+          );
+        }
+        if (Array.isArray(apiCategories)) {
+          setCategories(
+            apiCategories.map((c: Category & { isExpanded?: boolean }) => ({
+              ...c,
+              isExpanded: c.isExpanded !== false,
+            })),
+          );
+        }
+        if (Array.isArray(apiChannels)) {
+          setChannels(
+            apiChannels.map((ch: Channel) => ({
+              ...ch,
+              icon: ch.type === 'voice' ? Radio : Hash,
+            })),
+          );
+        }
       } catch (err) {
-        console.error("Błąd ładowania inicjalnego API", err);
+        console.error('Błąd ładowania inicjalnego API', err);
       }
     };
-    fetchInitialData();
-  }, []);
+    void fetchInitialData();
+  }, [API_BASE_URL, fluxToken]);
+
+  useEffect(() => {
+    if (!API_BASE_URL || !fluxToken) return;
+    if (servers.length === 0) {
+      setActiveServer('');
+      setActiveChannel('');
+      setTasks([]);
+      setMessagesByChannel({});
+      setWorkspaceRoles([]);
+      setWorkspaceMembers([]);
+      return;
+    }
+    if (!activeServer || !servers.some((s) => s.id === activeServer)) {
+      setActiveServer(servers[0].id);
+    }
+  }, [API_BASE_URL, fluxToken, servers, activeServer]);
+
+  useEffect(() => {
+    if (!API_BASE_URL || !fluxToken || !activeServer) return;
+    if (!servers.some((s) => s.id === activeServer)) return;
+    (async () => {
+      try {
+        const rows = await apiClient(`/tasks?serverId=${activeServer}`);
+        if (Array.isArray(rows)) setTasks(rows as TaskItem[]);
+      } catch {
+        /* ignore */
+      }
+    })();
+  }, [API_BASE_URL, fluxToken, activeServer, servers]);
+
+  useEffect(() => {
+    if (!API_BASE_URL || !fluxToken || !activeServer) return;
+    if (!servers.some((s) => s.id === activeServer)) return;
+    (async () => {
+      try {
+        const data = await apiClient(`/members?serverId=${activeServer}`);
+        if (data && typeof data === 'object' && 'roles' in data && 'members' in data) {
+          const d = data as {
+            roles: Array<{ id: string; name: string; color: string; bg: string; border: string; glow: string; iconKey?: string }>;
+            members: UserInfo[];
+          };
+          const mappedRoles = d.roles.map((r) => ({
+            id: String(r.id ?? ''),
+            name: r.name,
+            color: r.color,
+            bg: r.bg,
+            border: r.border,
+            glow: r.glow,
+            icon: iconFromKey(r.iconKey, Users),
+          }));
+          const roleIdSet = new Set(mappedRoles.map((r) => r.id).filter(Boolean));
+          const fallbackRoleId =
+            mappedRoles.find((r) => r.name === 'Member')?.id ??
+            mappedRoles[mappedRoles.length - 1]?.id ??
+            '';
+          let mapped = (d.members as UserInfo[]).map((m) => {
+            const mid = String(m.id ?? '');
+            let rid = m.roleId != null && String(m.roleId).length > 0 ? String(m.roleId) : fallbackRoleId;
+            if (rid && !roleIdSet.has(rid)) rid = fallbackRoleId || mappedRoles[0]?.id || '';
+            return { ...m, id: mid, roleId: rid };
+          });
+          let rolesOut = mappedRoles;
+          if (mappedRoles.length === 0 && mapped.length > 0) {
+            rolesOut = [
+              {
+                id: '__devcord_members',
+                name: 'Członkowie',
+                color: '#a1a1aa',
+                bg: 'rgba(161, 161, 170, 0.05)',
+                border: 'rgba(161, 161, 170, 0.1)',
+                glow: 'none',
+                icon: Users,
+              },
+            ];
+            mapped = mapped.map((u) => ({ ...u, roleId: '__devcord_members' }));
+          }
+          const selfRid =
+            rolesOut.find((r) => r.name === 'Member')?.id ??
+            rolesOut[rolesOut.length - 1]?.id ??
+            rolesOut[0]?.id ??
+            '__devcord_members';
+          if (meUserId && !mapped.some((x) => x.id === meUserId)) {
+            mapped = [...mapped, { id: meUserId, name: localUserName, roleId: selfRid, status: 'online' as const }];
+          }
+          setWorkspaceRoles(rolesOut);
+          setWorkspaceMembers(mapped);
+        }
+      } catch {
+        /* ignore */
+      }
+    })();
+  }, [API_BASE_URL, fluxToken, activeServer, servers, meUserId, localUserName]);
+
+  useEffect(() => {
+    if (!API_BASE_URL || !fluxToken || !activeChannel) return;
+    if (!channels.some((c) => c.id === activeChannel)) return;
+    (async () => {
+      try {
+        const rows = await apiClient(`/channels/${activeChannel}/messages`);
+        if (!Array.isArray(rows)) return;
+        setMessagesByChannel((prev) => ({
+          ...prev,
+          [activeChannel]: rows.map((r: { id: string; userId: string; time: string; content: string; isEdited?: boolean }) => ({
+            id: r.id,
+            userId: r.userId,
+            time: r.time,
+            content: r.content,
+            isEdited: r.isEdited,
+            isMe: r.userId === meUserId,
+          })),
+        }));
+      } catch {
+        /* ignore */
+      }
+    })();
+  }, [API_BASE_URL, fluxToken, activeChannel, meUserId, channels]);
+
+  useEffect(() => {
+    setTypingUsers({});
+  }, [activeChannel]);
 
   const messages = messagesByChannel[activeChannel] ?? [];
-  const myUserId = guestIdRef.current;
-  
-  const { phase: voicePhase, participants: voiceParticipants, localMuted, setLocalMuted } = useVoiceRoomMock({
-    enabled: !!activeVoiceChannel, roomId: activeVoiceChannel, userId: myUserId, micDeviceId,
+  const myUserId = API_BASE_URL ? meUserId : guestIdRef.current;
+
+  const mergeChatMessage = useCallback(
+    (row: { channelId: string; id: string; userId: string; content: string; time: string; isEdited?: boolean }) => {
+      const ch = row.channelId;
+      if (!ch) return;
+      setMessagesByChannel((prev) => {
+        const list = [...(prev[ch] ?? [])];
+        const i = list.findIndex((m) => m.id === row.id);
+        const entry: ChatRow = {
+          id: row.id,
+          userId: row.userId,
+          time: row.time,
+          content: row.content,
+          isEdited: row.isEdited,
+          isMe: row.userId === meUserId,
+        };
+        if (i >= 0) {
+          list[i] = { ...list[i], ...entry };
+        } else {
+          const tmpIdx = list.findIndex(
+            (m) => m.id.startsWith('tmp_') && m.userId === row.userId && m.content === row.content,
+          );
+          if (tmpIdx >= 0) list[tmpIdx] = entry;
+          else list.push(entry);
+        }
+        return { ...prev, [ch]: list };
+      });
+    },
+    [meUserId],
+  );
+
+  const { sendTyping } = useChatSocket({
+    apiBase: API_BASE_URL,
+    token: fluxToken || null,
+    channelId: activeChannel,
+    onMessage: mergeChatMessage,
+    onTyping: (ev) => {
+      if (ev.channelId !== activeChannel) return;
+      if (ev.userId === meUserId) return;
+      setTypingUsers((t) => {
+        const next = { ...t };
+        if (ev.typing) next[ev.userId] = true;
+        else delete next[ev.userId];
+        return next;
+      });
+    },
   });
+
+  useEffect(() => {
+    if (!API_BASE_URL || !fluxToken || !isInputFocused) return;
+    if (currentChannelMeta?.type !== 'text') return;
+    if (!inputValue.trim()) {
+      sendTyping(false);
+      return;
+    }
+    sendTyping(true);
+    const tid = window.setTimeout(() => sendTyping(false), 2800);
+    return () => clearTimeout(tid);
+  }, [inputValue, isInputFocused, currentChannelMeta?.type, API_BASE_URL, fluxToken, sendTyping]);
+
+  const {
+    phase: voicePhase,
+    participants: voiceParticipants,
+    localMuted,
+    setLocalMuted,
+    speakingPeers,
+    remoteScreenByUser,
+  } = useVoiceRoomMaybe({
+    apiMode: !!API_BASE_URL,
+    enabled: !!activeVoiceChannel,
+    roomId: activeVoiceChannel,
+    userId: myUserId,
+    micDeviceId,
+    screenStream,
+  });
+
+  const remoteScreenPeers = useMemo(
+    () => Object.entries(remoteScreenByUser).filter(([id]) => id !== myUserId),
+    [remoteScreenByUser, myUserId],
+  );
+  const primaryRemoteScreen = remoteScreenPeers[0] ?? null;
+  const primaryRemoteSharerId = primaryRemoteScreen?.[0] ?? null;
+  const primaryRemoteStream = primaryRemoteScreen?.[1] ?? null;
+  const voiceHasScreenActivity = !!screenStream || remoteScreenPeers.length > 0;
+
+  useEffect(() => {
+    if (!primaryRemoteStream) {
+      setRemoteScreenWatching(false);
+      setScreenStreamContext(null);
+    }
+  }, [primaryRemoteStream]);
 
   const refreshAudioDevices = async () => {
     try {
@@ -277,9 +852,11 @@ export default function App() {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); setIsCmdPaletteOpen(prev => !prev); }
       if (e.key === 'Escape') {
-        setIsCmdPaletteOpen(false); setIsSettingsOpen(false); setIsAIPromptOpen(false); 
+        setIsCmdPaletteOpen(false); setIsSettingsOpen(false); setIsAIPromptOpen(false);
+        setScreenStreamContext(null);
         setCreateChannelModal(null); setCreateTaskModal({ isOpen: false }); setContextMenu(null);
         setCreateServerModal(null); setCreateCategoryModal(false); setEditCategoryModal(null);
+        setDeepJoinToken(null); setJoinModalErr(''); setInviteModal(null); setInviteCreateErr('');
       }
     };
     window.addEventListener('keydown', handleGlobalKeyDown);
@@ -287,7 +864,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const closeMenu = () => setContextMenu(null);
+    const closeMenu = () => {
+      setContextMenu(null);
+      setScreenStreamContext(null);
+    };
     window.addEventListener('click', closeMenu);
     return () => window.removeEventListener('click', closeMenu);
   }, []);
@@ -315,34 +895,235 @@ export default function App() {
     if (!newServerName.trim()) return;
     try {
       const payload = { name: newServerName.trim(), icon: 'Zap', active: true, color: '#00eeff', glow: '0 0 15px rgba(0,238,255,0.4)' };
-      const res = await apiClient('/servers', 'POST', payload);
-      
+      const res = (await apiClient('/servers', 'POST', payload)) as { id?: string; name?: string; iconKey?: string; color?: string; glow?: string } | null;
+      if (API_BASE_URL && res?.id) {
+        setServers((prev) => [
+          ...prev,
+          {
+            id: res.id!,
+            name: res.name ?? newServerName.trim(),
+            icon: iconFromKey(res.iconKey ?? 'Zap', Zap),
+            color: res.color ?? '#00eeff',
+            glow: res.glow ?? payload.glow,
+            active: true,
+            inviteCode: (res as { inviteCode?: string }).inviteCode,
+          },
+        ]);
+        const apiCategories = await apiClient('/categories');
+        const apiChannels = await apiClient('/channels');
+        if (Array.isArray(apiCategories)) {
+          setCategories(apiCategories.map((c: Category & { isExpanded?: boolean }) => ({ ...c, isExpanded: c.isExpanded !== false })));
+        }
+        if (Array.isArray(apiChannels)) {
+          setChannels(apiChannels.map((ch: Channel) => ({ ...ch, icon: ch.type === 'voice' ? Radio : Hash })));
+          const fc = (apiChannels as Channel[]).find((x) => x.serverId === res.id && x.type === 'text');
+          if (fc) setActiveChannel(fc.id);
+        }
+        setCreateServerModal(null);
+        setNewServerName('');
+        setActiveServer(res.id!);
+        return;
+      }
       const newSrvId = res?.id || `s_${Date.now()}`;
       const defaultCatId = `cat_${Date.now()}`;
       const defaultChanId = `c_${Date.now()}`;
-
       setServers([...servers, { ...payload, id: newSrvId, icon: Zap }]);
       setCategories([...categories, { id: defaultCatId, name: 'Ogólne', isExpanded: true, serverId: newSrvId }]);
       setChannels([...channels, { id: defaultChanId, name: 'powitania', type: 'text', color: '#00eeff', icon: Hash, categoryId: defaultCatId, serverId: newSrvId }]);
-      
-      setCreateServerModal(null); setNewServerName(''); 
-      setActiveServer(newSrvId); setActiveChannel(defaultChanId);
-    } catch (e) { console.error(e); }
+      setCreateServerModal(null);
+      setNewServerName('');
+      setActiveServer(newSrvId);
+      setActiveChannel(defaultChanId);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const finishJoinSuccess = async (res: {
+    id: string;
+    name?: string;
+    iconKey?: string;
+    color?: string;
+    glow?: string;
+    inviteCode?: string;
+  }) => {
+    if (!API_BASE_URL) return;
+    setServers((prev) => {
+      if (prev.some((s) => s.id === res.id)) return prev;
+      return [
+        ...prev,
+        {
+          id: res.id,
+          name: res.name || 'Serwer',
+          icon: iconFromKey(res.iconKey ?? '', Compass),
+          color: res.color ?? '#b266ff',
+          glow: res.glow ?? '0 0 15px rgba(178,102,255,0.4)',
+          active: true,
+          inviteCode: res.inviteCode,
+        },
+      ];
+    });
+    const apiCategories = await apiClient('/categories');
+    const apiChannels = await apiClient('/channels');
+    if (Array.isArray(apiCategories)) {
+      setCategories(apiCategories.map((c: Category & { isExpanded?: boolean }) => ({ ...c, isExpanded: c.isExpanded !== false })));
+    }
+    let firstCh = '';
+    if (Array.isArray(apiChannels)) {
+      setChannels(apiChannels.map((ch: Channel) => ({ ...ch, icon: ch.type === 'voice' ? Radio : Hash })));
+      const fc = (apiChannels as Channel[]).find((x) => x.serverId === res.id && x.type === 'text');
+      if (fc) {
+        firstCh = fc.id;
+        setActiveChannel(fc.id);
+      }
+    }
+    setCreateServerModal(null);
+    setJoinServerCode('');
+    setJoinModalErr('');
+    setDeepJoinToken(null);
+    setActiveServer(res.id);
+    const path = window.location.pathname || '';
+    if (path.match(/^\/(?:join|invite)\//i)) {
+      if (firstCh) window.history.replaceState({ devcord: 1 }, '', `/channels/${res.id}/${firstCh}`);
+      else window.history.replaceState({ devcord: 1 }, '', '/');
+    } else if (firstCh) {
+      writeChannelsPath(res.id, firstCh);
+    }
+  };
+
+  const joinServerWithCode = async (raw: string) => {
+    const code = parseJoinInput(raw);
+    if (!code) return false;
+    setJoinModalErr('');
+    try {
+      const res = (await apiClient('/servers/join', 'POST', { code })) as {
+        id?: string;
+        name?: string;
+        iconKey?: string;
+        color?: string;
+        glow?: string;
+        inviteCode?: string;
+      } | null;
+      if (res?.id) {
+        await finishJoinSuccess(res as { id: string; name?: string; iconKey?: string; color?: string; glow?: string; inviteCode?: string });
+        return true;
+      }
+    } catch (e) {
+      const er = e as Error & { status?: number };
+      const st = er.status ?? 0;
+      if (st === 400 && /not a server invite/i.test(er.message)) {
+        setJoinModalErr(
+          'To nie jest zaproszenie do serwera — użyj „Zaproś” z menu serwera (PPM na ikonie). Kanały nie mają osobnego linku dołączenia.',
+        );
+      } else if (/invite expired/i.test(er.message)) {
+        setJoinModalErr('To zaproszenie wygasło.');
+      } else if (/invite exhausted/i.test(er.message)) {
+        setJoinModalErr('Wykorzystano limit użyć tego zaproszenia.');
+      } else if (st === 404 || /invalid invite/i.test(er.message)) {
+        setJoinModalErr(
+          'Nie znaleziono serwera — zły kod lub serwer nie istnieje w tej bazie. Poproś o nowy link (/invite/…).',
+        );
+      } else {
+        setJoinModalErr(er.message || 'Nie udało się dołączyć.');
+      }
+    }
+    return false;
   };
 
   const handleJoinServer = async () => {
     if (!joinServerCode.trim()) return;
+    if (API_BASE_URL) {
+      await joinServerWithCode(joinServerCode);
+      return;
+    }
     try {
-      const res = await apiClient('/servers/join', 'POST', { code: joinServerCode });
+      const res = null as {
+        id?: string;
+        name?: string;
+        iconKey?: string;
+        color?: string;
+        glow?: string;
+      } | null;
       const newSrvId = res?.id || `s_${Date.now()}`;
-      const newSrv = { id: newSrvId, name: res?.name || `Serwer: ${joinServerCode.replace('https://flux.app/join/', '')}`, icon: Compass, active: true, color: '#b266ff', glow: '0 0 15px rgba(178,102,255,0.4)' };
-      
+      const newSrv = {
+        id: newSrvId,
+        name: res?.name || `Serwer: ${joinServerCode.replace(/.*\/join\//i, '')}`,
+        icon: Compass,
+        active: true,
+        color: '#b266ff',
+        glow: '0 0 15px rgba(178,102,255,0.4)',
+      };
       setServers([...servers, newSrv]);
       setCategories([...categories, { id: `cat_${Date.now()}`, name: 'Nowe Połączenie', isExpanded: true, serverId: newSrvId }]);
       setChannels([...channels, { id: `c_${Date.now()}`, name: 'witaj', type: 'text', color: '#b266ff', icon: Hash, serverId: newSrvId }]);
-      
-      setCreateServerModal(null); setJoinServerCode(''); setActiveServer(newSrvId);
-    } catch (e) { console.error(e); }
+      setCreateServerModal(null);
+      setJoinServerCode('');
+      setJoinModalErr('');
+      setActiveServer(newSrvId);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const loadInvitesForServer = async (serverId: string) => {
+    if (!API_BASE_URL) return;
+    try {
+      const rows = await apiClient(`/servers/${serverId}/invites`);
+      if (Array.isArray(rows)) {
+        setInviteListRows(
+          rows as Array<{
+            id: string;
+            code: string;
+            usesCount: number;
+            maxUses?: number | null;
+            expiresAt?: string | null;
+            createdAt: string;
+          }>,
+        );
+      } else setInviteListRows([]);
+    } catch {
+      setInviteListRows([]);
+    }
+  };
+
+  const openInviteModal = (s: { id: string; name: string }) => {
+    setInviteModal(s);
+    setInviteCreateErr('');
+    setInviteCreatedUrl(null);
+    setInviteFormMaxUses('');
+    setInviteFormDays('0');
+    void loadInvitesForServer(s.id);
+  };
+
+  const submitCreateInvite = async () => {
+    if (!inviteModal || !API_BASE_URL) return;
+    setInviteBusy(true);
+    setInviteCreateErr('');
+    try {
+      const body: { maxUses?: number; expiresInDays?: number } = {};
+      const mu = inviteFormMaxUses.trim();
+      if (mu !== '') {
+        const n = parseInt(mu, 10);
+        if (!Number.isNaN(n) && n > 0) body.maxUses = n;
+      }
+      if (inviteFormDays !== '0') body.expiresInDays = parseInt(inviteFormDays, 10);
+      const res = (await apiClient(`/servers/${inviteModal.id}/invites`, 'POST', body)) as { code?: string };
+      if (res?.code) {
+        setInviteCreatedUrl(`${appPublicOrigin()}/invite/${encodeURIComponent(res.code)}`);
+        await loadInvitesForServer(inviteModal.id);
+      }
+    } catch (e) {
+      const er = e as Error & { status?: number };
+      const msg = er.message || '';
+      if (/invite_create_failed/i.test(msg)) {
+        setInviteCreateErr('Nie udało się zapisać zaproszenia (baza). Jeśli to świeży deploy, uruchom migrację 002_server_invites.sql.');
+      } else {
+        setInviteCreateErr(msg || 'Nie udało się utworzyć zaproszenia.');
+      }
+      console.error(e);
+    } finally {
+      setInviteBusy(false);
+    }
   };
 
   const leaveServer = async (id: string) => {
@@ -350,7 +1131,16 @@ export default function App() {
       await apiClient(`/servers/${id}/leave`, 'POST');
       const updated = servers.filter(s => s.id !== id);
       setServers(updated);
-      if (activeServer === id && updated.length > 0) setActiveServer(updated[0].id);
+      if (activeServer === id) {
+        if (updated.length > 0) setActiveServer(updated[0].id);
+        else {
+          setActiveServer('');
+          setActiveChannel('');
+          setTasks([]);
+          setWorkspaceRoles([]);
+          setWorkspaceMembers([]);
+        }
+      }
       setContextMenu(null);
     } catch(e) { console.error(e); }
   };
@@ -406,7 +1196,7 @@ export default function App() {
     try {
       await apiClient(`/channels/${id}`, 'DELETE');
       setChannels(channels.filter(c => c.id !== id));
-      if (activeChannel === id) setActiveChannel(currentServerChannels.find(c => c.type === 'text')?.id || 'c1');
+      if (activeChannel === id) setActiveChannel(currentServerChannels.find((c) => c.type === 'text')?.id ?? '');
       setContextMenu(null);
     } catch(e) { console.error(e); }
   };
@@ -421,7 +1211,6 @@ export default function App() {
     if (!inputValue.trim() && !isAIPromptOpen) return;
     const isAI = isAIPromptOpen; const content = inputValue.trim();
     const timeString = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    const msgId = `m_${Date.now()}`;
 
     if (isAI) {
       setIsAILoading(true); setInputValue(''); setIsAIPromptOpen(false);
@@ -429,8 +1218,8 @@ export default function App() {
         setIsAILoading(false);
         setMessagesByChannel((prev) => ({
           ...prev, [activeChannel]: [...(prev[activeChannel] ?? []), { 
-            id: `ai_${Date.now()}`, userId: 'flux_ai', time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), 
-            content: `**Flux AI:** Przeanalizowałem Twoje zapytanie: "${content}". Gotowe rozwiązanie:\n\n\`\`\`javascript\nconst fluxNode = new FluxNode();\nfluxNode.connect();\n\`\`\``, 
+            id: `ai_${Date.now()}`, userId: 'devcord_ai', time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), 
+            content: `**Devcord AI:** Przeanalizowałem Twoje zapytanie: "${content}". Gotowe rozwiązanie:\n\n\`\`\`javascript\nconst devcordNode = new DevcordNode();\ndevcordNode.connect();\n\`\`\``, 
             isMe: false 
           }],
         }));
@@ -439,13 +1228,24 @@ export default function App() {
     }
 
     try {
-      // Optymistyczny update (UI uaktualnia się bez czekania)
-      setMessagesByChannel((prev) => ({ ...prev, [activeChannel]: [...(prev[activeChannel] ?? []), { id: msgId, userId: myUserId, time: timeString, content: content, isMe: true }] }));
+      const tempId = `tmp_${Date.now()}`;
+      setMessagesByChannel((prev) => ({
+        ...prev,
+        [activeChannel]: [...(prev[activeChannel] ?? []), { id: tempId, userId: myUserId, time: timeString, content, isMe: true }],
+      }));
       setInputValue('');
-      
-      // Zapis w tle
-      await apiClient(`/channels/${activeChannel}/messages`, 'POST', { content });
-    } catch(e) { console.error(e); }
+      const res = (await apiClient(`/channels/${activeChannel}/messages`, 'POST', { content })) as { id?: string; userId?: string; time?: string } | null;
+      if (res?.id) {
+        setMessagesByChannel((prev) => ({
+          ...prev,
+          [activeChannel]: (prev[activeChannel] ?? []).map((m) =>
+            m.id === tempId ? { ...m, id: res.id!, userId: res.userId ?? myUserId, time: res.time ?? m.time } : m,
+          ),
+        }));
+      }
+    } catch (e) {
+      console.error(e);
+    }
   };
 
   const deleteMessage = async (msgId: string) => {
@@ -509,6 +1309,8 @@ export default function App() {
   // --- Voice & Screen ---
   const disconnectVoice = () => {
     setActiveVoiceChannel(null);
+    setRemoteScreenWatching(false);
+    setScreenStreamContext(null);
     if (screenStream) { screenStream.getTracks().forEach(track => track.stop()); setScreenStream(null); }
     const currentViewType = currentServerChannels.find(c => c.id === activeChannel)?.type;
     if (currentViewType === 'voice') setActiveChannel(currentServerChannels.find(c => c.type === 'text')?.id || currentServerChannels[0]?.id || '');
@@ -517,10 +1319,21 @@ export default function App() {
     if (screenStream) { screenStream.getTracks().forEach(track => track.stop()); setScreenStream(null); } 
     else {
       try {
-        const stream = await navigator.mediaDevices.getDisplayMedia({ video: { cursor: "always" } as any, audio: false });
+        let stream: MediaStream;
+        try {
+          stream = await navigator.mediaDevices.getDisplayMedia({
+            video: { cursor: 'always' } as MediaTrackConstraints,
+            audio: true,
+          });
+        } catch {
+          stream = await navigator.mediaDevices.getDisplayMedia({
+            video: { cursor: 'always' } as MediaTrackConstraints,
+            audio: false,
+          });
+        }
         stream.getVideoTracks()[0].onended = () => setScreenStream(null);
         setScreenStream(stream);
-      } catch (err) {
+      } catch {
         const mockStream = createMockScreenStream();
         mockStream.getVideoTracks()[0].onended = () => setScreenStream(null);
         setScreenStream(mockStream);
@@ -541,12 +1354,35 @@ export default function App() {
 
   // --- Getters ---
   const getUser = (id: string): UserInfo => {
-    if (id === 'flux_ai') return { id: 'flux_ai', name: 'Flux AI', roleId: 'r1', status: 'online' };
-    if (id === myUserId) return { id, name: localUserName, roleId: 'r1', status: 'online' };
-    const u = mockUsers.find((x) => x.id === id); if (u) return u;
-    return { id, name: `Gość·${id.slice(-6)}`, roleId: 'r4', status: 'online' };
+    if (id === 'devcord_ai') return { id: 'devcord_ai', name: 'Devcord AI', roleId: 'r1', status: 'online' };
+    if (id === myUserId) return { id, name: localUserName, roleId: workspaceRoles[0]?.id ?? 'r1', status: 'online' };
+    const u = workspaceMembers.find((x) => x.id === id);
+    if (u) return u;
+    if (DEMO_MODE) {
+      const u2 = mockUsers.find((x) => x.id === id);
+      if (u2) return u2;
+    }
+    return {
+      id,
+      name: `Użytkownik·${id.slice(-4)}`,
+      roleId: workspaceRoles[workspaceRoles.length - 1]?.id ?? 'r4',
+      status: 'online' as const,
+    };
   };
-  const getRole = (roleId: string) => mockRoles.find((r) => r.id === roleId) ?? mockRoles[3];
+  const getRole = (roleId: string) => {
+    const r = workspaceRoles.find((x) => x.id === roleId);
+    if (r) return r;
+    if (DEMO_MODE) return mockRoles[3];
+    return {
+      id: roleId,
+      name: 'Członek',
+      color: '#a1a1aa',
+      bg: 'rgba(161, 161, 170, 0.05)',
+      border: 'rgba(161, 161, 170, 0.1)',
+      icon: Users,
+      glow: 'none' as const,
+    };
+  };
   const userIdsOnVoiceChannel = (channelId: string) => activeVoiceChannel === channelId ? voiceParticipants : [];
   const getFileIcon = (type: FileItem['type']) => {
     switch(type) { case 'image': return <ImageIcon size={16} />; case 'doc': return <FileText size={16} />; case 'audio': return <FileAudio size={16} />; case 'archive': return <FileArchive size={16} />; }
@@ -574,9 +1410,33 @@ export default function App() {
     });
   };
 
-  const currentChannelData = currentServerChannels.find(c => c.id === activeChannel) || currentServerChannels[0];
   const isMainViewVoice = currentChannelData?.type === 'voice';
   const uncategorizedChannels = currentServerChannels.filter(c => !c.categoryId);
+
+  if (API_BASE_URL && !fluxToken) {
+    return (
+      <AuthGate
+        apiBase={API_BASE_URL}
+        mode={authMode}
+        setMode={setAuthMode}
+        email={authEmail}
+        setEmail={setAuthEmail}
+        password={authPassword}
+        setPassword={setAuthPassword}
+        nick={authNick}
+        setNick={setAuthNick}
+        code={authCode}
+        setCode={setAuthCode}
+        err={authErr}
+        setErr={setAuthErr}
+        onToken={(t) => {
+          localStorage.setItem(AUTH_TOKEN_KEY, t);
+          localStorage.removeItem(AUTH_TOKEN_LEGACY);
+          setFluxToken(t);
+        }}
+      />
+    );
+  }
 
   return (
     <div className="flex h-screen w-full bg-[#000000] p-2 md:p-4 text-zinc-200 font-sans overflow-hidden selection:bg-[#00eeff]/30 selection:text-white relative"
@@ -616,6 +1476,18 @@ export default function App() {
               <button onClick={() => { setCreateServerModal('join'); setContextMenu(null); }} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-[#00eeff] hover:bg-[#00eeff]/10 rounded-lg transition-colors w-full text-left"><LogIn size={14}/> Dołącz do serwera</button>
               <div className="h-px bg-white/[0.05] my-1"></div>
               <button onClick={() => { setIsSettingsOpen(true); setContextMenu(null); }} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-white/[0.05] rounded-lg transition-colors w-full text-left"><Settings size={14}/> Ustawienia aplikacji</button>
+              {API_BASE_URL ? (
+                <button
+                  onClick={() => {
+                    clearStoredAuthToken();
+                    setFluxToken('');
+                    setContextMenu(null);
+                  }}
+                  className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors w-full text-left"
+                >
+                  <LogOut size={14} /> Wyloguj
+                </button>
+              ) : null}
             </>
           )}
           {contextMenu.type === 'membersArea' && (
@@ -648,7 +1520,16 @@ export default function App() {
           {contextMenu.type === 'server' && (
             <>
               <div className="px-3 py-2 text-xs font-bold text-zinc-500 uppercase tracking-widest border-b border-white/[0.05] mb-1 truncate">{contextMenu.data.name}</div>
-              <button onClick={() => copyToClipboard(`https://flux.app/join/${contextMenu.data.id}`)} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-white/[0.05] rounded-lg transition-colors w-full text-left"><Link2 size={14}/> Kopiuj zaproszenie</button>
+              <button
+                onClick={() => {
+                  const d = contextMenu.data as { id: string; name: string };
+                  openInviteModal({ id: d.id, name: d.name });
+                  setContextMenu(null);
+                }}
+                className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-white/[0.05] rounded-lg transition-colors w-full text-left"
+              >
+                <Link2 size={14} /> Zaproś do serwera
+              </button>
               <button onClick={() => { setIsSettingsOpen(true); setContextMenu(null); }} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-white/[0.05] rounded-lg transition-colors w-full text-left"><Settings size={14}/> Ustawienia serwera</button>
               <div className="h-px bg-white/[0.05] my-1"></div>
               <button onClick={() => leaveServer(contextMenu.data.id)} className="flex items-center gap-2 px-3 py-2 text-sm text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded-lg transition-colors w-full text-left"><LogOut size={14}/> Opuść serwer</button>
@@ -695,14 +1576,14 @@ export default function App() {
               <button className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-white/[0.05] rounded-lg transition-colors w-full text-left"><MessageSquare size={14}/> Wyślij wiadomość</button>
               <button className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-white/[0.05] rounded-lg transition-colors w-full text-left"><UserCheck size={14}/> Zmień rolę</button>
               <div className="h-px bg-white/[0.05] my-1"></div>
-              <button className="flex items-center gap-2 px-3 py-2 text-sm text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded-lg transition-colors w-full text-left"><UserMinus size={14}/> Wyrzuć z Flux_</button>
+              <button className="flex items-center gap-2 px-3 py-2 text-sm text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded-lg transition-colors w-full text-left"><UserMinus size={14}/> Wyrzuć z Devcord_</button>
             </>
           )}
           {contextMenu.type === 'file' && (
             <>
               <div className="px-3 py-2 text-xs font-bold text-zinc-500 uppercase tracking-widest border-b border-white/[0.05] mb-1 truncate">{contextMenu.data.name}</div>
               <button className="flex items-center gap-2 px-3 py-2 text-sm text-[#00eeff] hover:text-[#00eeff] hover:bg-[#00eeff]/10 rounded-lg transition-colors w-full text-left"><Download size={14}/> Pobierz plik</button>
-              <button onClick={() => copyToClipboard(`https://flux.app/files/${contextMenu.data.id}`)} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-white/[0.05] rounded-lg transition-colors w-full text-left"><Link size={14}/> Kopiuj link</button>
+              <button onClick={() => copyToClipboard(`${appPublicOrigin()}/files/${contextMenu.data.id}`)} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-white/[0.05] rounded-lg transition-colors w-full text-left"><Link size={14}/> Kopiuj link</button>
               <div className="h-px bg-white/[0.05] my-1"></div>
               <button onClick={() => deleteFile(contextMenu.data.id)} className="flex items-center gap-2 px-3 py-2 text-sm text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded-lg transition-colors w-full text-left"><Trash2 size={14}/> Usuń plik</button>
             </>
@@ -725,10 +1606,17 @@ export default function App() {
           <div className="w-full max-w-md bg-[#0c0c0e] border border-white/[0.1] rounded-3xl shadow-[0_0_80px_rgba(0,0,0,1)] p-6">
             <div className="flex justify-between items-center mb-6">
               <h3 className="text-xl font-bold text-white">{createServerModal === 'create' ? 'Utwórz nowy serwer' : 'Dołącz do serwera'}</h3>
-              <button onClick={() => setCreateServerModal(null)} className="text-zinc-500 hover:text-white"><X size={20}/></button>
+              <button onClick={() => { setCreateServerModal(null); setJoinModalErr(''); }} className="text-zinc-500 hover:text-white"><X size={20}/></button>
             </div>
             <div className="mb-6">
-              <label className="block text-xs font-bold uppercase tracking-widest text-zinc-500 mb-2">{createServerModal === 'create' ? 'Nazwa serwera' : 'Kod zaproszenia (np. flux.app/join/xyz)'}</label>
+              <label className="block text-xs font-bold uppercase tracking-widest text-zinc-500 mb-2">
+                {createServerModal === 'create'
+                  ? 'Nazwa serwera'
+                  : `Link /invite/… lub kod (np. ${appPublicOrigin() || '…'}/invite/KOD)`}
+              </label>
+              {createServerModal === 'join' && joinModalErr ? (
+                <p className="mb-3 text-sm text-red-400">{joinModalErr}</p>
+              ) : null}
               <div className="relative flex items-center bg-[#151515] border border-white/[0.1] rounded-xl focus-within:border-[#00eeff]/50 transition-colors px-3">
                 {createServerModal === 'create' ? <Server size={16} className="text-zinc-500"/> : <Link2 size={16} className="text-zinc-500"/>}
                 <input 
@@ -736,18 +1624,295 @@ export default function App() {
                   value={createServerModal === 'create' ? newServerName : joinServerCode} 
                   onChange={e => createServerModal === 'create' ? setNewServerName(e.target.value) : setJoinServerCode(e.target.value)} 
                   onKeyDown={e => {if(e.key==='Enter') createServerModal === 'create' ? handleCreateServer() : handleJoinServer()}} 
-                  placeholder={createServerModal === 'create' ? 'Mój super serwer' : 'https://flux.app/...'} 
+                  placeholder={
+                    createServerModal === 'create'
+                      ? 'Mój super serwer'
+                      : `${appPublicOrigin() || 'https://…'}/invite/… lub sam kod`
+                  } 
                   className="w-full bg-transparent outline-none py-3 px-3 text-sm text-white placeholder-zinc-600" 
                 />
               </div>
             </div>
             <div className="flex justify-end gap-3">
-              <button onClick={() => setCreateServerModal(null)} className="px-5 py-2.5 rounded-xl text-sm font-medium text-zinc-400 hover:bg-white/[0.05] transition-colors">Anuluj</button>
+              <button onClick={() => { setCreateServerModal(null); setJoinModalErr(''); }} className="px-5 py-2.5 rounded-xl text-sm font-medium text-zinc-400 hover:bg-white/[0.05] transition-colors">Anuluj</button>
               <button onClick={createServerModal === 'create' ? handleCreateServer : handleJoinServer} disabled={createServerModal === 'create' ? !newServerName.trim() : !joinServerCode.trim()} className={`px-5 py-2.5 rounded-xl text-sm font-bold transition-all ${(createServerModal === 'create' ? newServerName.trim() : joinServerCode.trim()) ? 'bg-[#00eeff] text-black shadow-[0_0_15px_rgba(0,238,255,0.4)]' : 'bg-white/[0.05] text-zinc-600 cursor-not-allowed'}`}>
                 {createServerModal === 'create' ? 'Utwórz' : 'Dołącz'}
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {deepJoinToken && API_BASE_URL && fluxToken && (
+        <div
+          className="fixed inset-0 z-[160] flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm animate-in fade-in duration-200"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="w-full max-w-md bg-[#0c0c0e] border border-white/[0.1] rounded-3xl shadow-[0_0_80px_rgba(0,0,0,1)] p-6">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-xl font-bold text-white">Zaproszenie do serwera</h3>
+              <button
+                type="button"
+                onClick={() => {
+                  setDeepJoinToken(null);
+                  setJoinModalErr('');
+                  if (window.location.pathname.match(/^\/(?:join|invite)\//i)) window.history.replaceState({ devcord: 1 }, '', '/');
+                }}
+                className="text-zinc-500 hover:text-white"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <p className="text-sm text-zinc-400 mb-2">
+              Dołączyć jako <span className="font-semibold text-zinc-200">{localUserName}</span>?
+            </p>
+            <p className="text-xs text-zinc-600 font-mono truncate mb-4" title={deepJoinToken}>
+              {deepJoinToken}
+            </p>
+            {joinModalErr ? <p className="text-sm text-red-400 mb-4">{joinModalErr}</p> : null}
+            <div className="flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setDeepJoinToken(null);
+                  setJoinModalErr('');
+                  if (window.location.pathname.match(/^\/(?:join|invite)\//i)) window.history.replaceState({ devcord: 1 }, '', '/');
+                }}
+                className="px-5 py-2.5 rounded-xl text-sm font-medium text-zinc-400 hover:bg-white/[0.05] transition-colors"
+              >
+                Anuluj
+              </button>
+              <button
+                type="button"
+                onClick={() => void joinServerWithCode(deepJoinToken)}
+                className="px-5 py-2.5 rounded-xl text-sm font-bold bg-[#00eeff] text-black shadow-[0_0_15px_rgba(0,238,255,0.4)]"
+              >
+                Dołącz
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {inviteModal && API_BASE_URL && (
+        <div
+          className="fixed inset-0 z-[165] flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm animate-in fade-in duration-200"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="w-full max-w-lg bg-[#0c0c0e] border border-white/[0.1] rounded-3xl shadow-[0_0_80px_rgba(0,0,0,1)] p-6 max-h-[90vh] overflow-y-auto custom-scrollbar">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-xl font-bold text-white">Zaproś — {inviteModal.name}</h3>
+              <button
+                type="button"
+                onClick={() => { setInviteModal(null); setInviteCreateErr(''); }}
+                className="text-zinc-500 hover:text-white"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            {inviteCreateErr ? <p className="text-sm text-red-400 mb-3">{inviteCreateErr}</p> : null}
+            <p className="text-xs text-zinc-500 mb-4">
+              Link zaproszenia: <span className="font-mono text-zinc-400">{appPublicOrigin()}/invite/KOD</span>. Możesz ograniczyć liczbę użyć i czas ważności.
+            </p>
+            <div className="grid gap-3 mb-4">
+              <div>
+                <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-1.5">Maks. użyć (puste = bez limitu)</label>
+                <input
+                  type="number"
+                  min={1}
+                  value={inviteFormMaxUses}
+                  onChange={(e) => setInviteFormMaxUses(e.target.value)}
+                  placeholder="np. 10"
+                  className="w-full bg-[#151515] border border-white/[0.1] rounded-xl px-3 py-2.5 text-sm text-white outline-none focus:border-[#00eeff]/40"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-1.5">Wygasa</label>
+                <select
+                  value={inviteFormDays}
+                  onChange={(e) => setInviteFormDays(e.target.value as '0' | '1' | '7' | '30')}
+                  className="w-full bg-[#151515] border border-white/[0.1] rounded-xl px-3 py-2.5 text-sm text-white outline-none focus:border-[#00eeff]/40"
+                >
+                  <option value="0">Nigdy</option>
+                  <option value="1">Po 1 dniu</option>
+                  <option value="7">Po 7 dniach</option>
+                  <option value="30">Po 30 dniach</option>
+                </select>
+              </div>
+            </div>
+            <button
+              type="button"
+              disabled={inviteBusy}
+              onClick={() => void submitCreateInvite()}
+              className="w-full py-2.5 rounded-xl text-sm font-bold bg-[#00eeff] text-black shadow-[0_0_15px_rgba(0,238,255,0.3)] disabled:opacity-50"
+            >
+              {inviteBusy ? 'Tworzenie…' : 'Utwórz zaproszenie'}
+            </button>
+            {inviteCreatedUrl ? (
+              <div className="mt-4 p-3 rounded-xl bg-[#151515] border border-white/[0.08]">
+                <span className="text-[10px] uppercase tracking-widest text-zinc-500">Nowy link</span>
+                <div className="flex gap-2 mt-2">
+                  <input readOnly value={inviteCreatedUrl} className="flex-1 bg-black/40 border border-white/[0.06] rounded-lg px-2 py-1.5 text-xs text-zinc-300 font-mono truncate" />
+                  <button
+                    type="button"
+                    onClick={() => copyToClipboard(inviteCreatedUrl)}
+                    className="shrink-0 px-3 py-1.5 rounded-lg bg-white/[0.06] text-xs text-zinc-300 hover:text-white"
+                  >
+                    Kopiuj
+                  </button>
+                </div>
+              </div>
+            ) : null}
+            <div className="mt-5 pt-4 border-t border-white/[0.06]">
+              <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Aktywne zaproszenia</span>
+              <div className="mt-2 space-y-2 max-h-40 overflow-y-auto custom-scrollbar">
+                {inviteListRows.length === 0 ? (
+                  <p className="text-xs text-zinc-600">Brak — utwórz pierwsze powyżej.</p>
+                ) : (
+                  inviteListRows.map((row) => (
+                    <div key={row.id} className="text-xs text-zinc-400 flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <code className="text-[#00eeff] font-mono">{row.code}</code>
+                      <span>
+                        użyć {row.usesCount}
+                        {row.maxUses != null && row.maxUses !== undefined ? ` / ${row.maxUses}` : ' / ∞'}
+                      </span>
+                      <span className="text-zinc-600">
+                        {row.expiresAt ? `do ${new Date(row.expiresAt).toLocaleString()}` : 'bez wygaśnięcia'}
+                      </span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isSettingsOpen && (
+        <div
+          className="fixed inset-0 z-[400] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200"
+          onClick={() => setIsSettingsOpen(false)}
+          role="presentation"
+        >
+          <div
+            className="w-full max-w-md bg-[#0c0c0e] border border-white/[0.1] rounded-3xl shadow-[0_0_80px_rgba(0,0,0,1)] p-6"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-labelledby="settings-title"
+          >
+            <div className="flex justify-between items-center mb-5">
+              <h2 id="settings-title" className="text-xl font-bold text-white">
+                Ustawienia
+              </h2>
+              <button
+                type="button"
+                onClick={() => setIsSettingsOpen(false)}
+                className="text-zinc-500 hover:text-white p-1 rounded-lg hover:bg-white/[0.06]"
+              >
+                <X size={22} />
+              </button>
+            </div>
+            <div className="flex gap-2 p-1 rounded-xl bg-black/40 border border-white/[0.06] mb-6">
+              <button
+                type="button"
+                onClick={() => setSettingsTab('profile')}
+                className={`flex-1 py-2.5 rounded-lg text-xs font-bold uppercase tracking-wider transition-colors ${
+                  settingsTab === 'profile' ? 'bg-[#00eeff]/15 text-[#00eeff] border border-[#00eeff]/30' : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                Profil
+              </button>
+              <button
+                type="button"
+                onClick={() => setSettingsTab('audio')}
+                className={`flex-1 py-2.5 rounded-lg text-xs font-bold uppercase tracking-wider transition-colors ${
+                  settingsTab === 'audio' ? 'bg-[#00eeff]/15 text-[#00eeff] border border-[#00eeff]/30' : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                Dźwięk
+              </button>
+            </div>
+            {settingsTab === 'profile' ? (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">
+                    Wyświetlana nazwa
+                  </label>
+                  <input
+                    value={localUserName}
+                    onChange={(e) => setLocalUserName(e.target.value)}
+                    className="w-full bg-[#151515] border border-white/[0.1] rounded-xl px-3 py-2.5 text-sm text-white outline-none focus:border-[#00eeff]/40"
+                    placeholder="Twój nick"
+                  />
+                </div>
+                {API_BASE_URL && authEmail ? (
+                  <p className="text-xs text-zinc-500">
+                    Konto: <span className="text-zinc-400 font-mono">{authEmail}</span>
+                  </p>
+                ) : null}
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">
+                    Mikrofon
+                  </label>
+                  <select
+                    value={micDeviceId}
+                    onChange={(e) => setMicDeviceId(e.target.value)}
+                    className="w-full bg-[#151515] border border-white/[0.1] rounded-xl px-3 py-2.5 text-sm text-white outline-none focus:border-[#00eeff]/40"
+                  >
+                    <option value="">Domyślny</option>
+                    {audioInputs.map((d) => (
+                      <option key={d.deviceId} value={d.deviceId}>
+                        {d.label || d.deviceId || 'Wejście audio'}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void refreshAudioDevices()}
+                  className="w-full py-2.5 rounded-xl text-sm font-semibold border border-white/[0.1] text-zinc-300 hover:bg-white/[0.05] transition-colors"
+                >
+                  Odśwież listę urządzeń
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {screenStreamContext && remoteScreenWatching && primaryRemoteStream && (
+        <div
+          className="fixed z-[380] w-56 rounded-xl border border-white/[0.1] bg-[#0c0c0e]/95 backdrop-blur-xl p-3 shadow-[0_20px_60px_rgba(0,0,0,0.9)]"
+          style={{
+            top: Math.min(screenStreamContext.y, window.innerHeight - 180),
+            left: Math.min(screenStreamContext.x, window.innerWidth - 230),
+          }}
+          onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <div className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">Dźwięk streamu</div>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            value={Math.round(remoteScreenVolume * 100)}
+            onChange={(e) => setRemoteScreenVolume(Number(e.target.value) / 100)}
+            className="w-full accent-[#00eeff] h-2"
+          />
+          <div className="flex justify-between text-[10px] text-zinc-600 mt-1">
+            <span>0</span>
+            <span>{Math.round(remoteScreenVolume * 100)}%</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setRemoteScreenVideoMuted((m) => !m)}
+            className="mt-3 w-full py-2 rounded-lg text-xs font-bold uppercase tracking-wide bg-white/[0.06] hover:bg-white/[0.1] text-zinc-200 border border-white/[0.08] transition-colors"
+          >
+            {remoteScreenVideoMuted ? 'Wyłącz wyciszenie' : 'Wycisz stream'}
+          </button>
         </div>
       )}
 
@@ -837,47 +2002,113 @@ export default function App() {
           >
             {/* Workspace Switcher */}
             <div className="relative px-4 pt-6 pb-2 z-50">
-              {(() => {
-                const activeServerData = servers.find(s => s.id === activeServer) || servers[0];
-                if (!activeServerData) return null;
-                return (
-                  <>
-                    <button onClick={() => setIsWorkspaceDropdownOpen(!isWorkspaceDropdownOpen)} className="w-full flex items-center gap-3 p-2.5 rounded-2xl border transition-all duration-300 group hover:brightness-125 bg-black/50 backdrop-blur-md" style={{ borderColor: `${activeServerData.color}30`, boxShadow: isWorkspaceDropdownOpen ? activeServerData.glow : `0 0 15px ${activeServerData.color}10` }}>
-                      <div className="w-10 h-10 rounded-xl flex items-center justify-center transition-all" style={{ backgroundColor: `${activeServerData.color}20`, color: activeServerData.color }}><activeServerData.icon size={20} /></div>
-                      <div className="flex flex-col items-start flex-1 min-w-0">
-                        <span className="text-[15px] font-bold truncate w-full text-left tracking-wide" style={{ color: activeServerData.color, textShadow: `0 0 10px ${activeServerData.color}40` }}>{activeServerData.name}</span>
-                        <span className="text-[10px] text-zinc-500 font-medium uppercase tracking-widest mt-0.5">Przestrzeń robocza</span>
-                      </div>
-                      <ChevronsUpDown size={16} className="text-zinc-600 group-hover:text-zinc-300 transition-colors mr-1" />
-                    </button>
-                    {isWorkspaceDropdownOpen && (
-                      <div className="absolute top-[calc(100%-4px)] left-4 right-4 mt-2 bg-[#0c0c0e]/95 backdrop-blur-3xl border border-white/[0.1] rounded-2xl shadow-[0_20px_60px_rgba(0,0,0,0.9)] p-2 flex flex-col gap-1 z-50">
-                        {servers.map(server => (
-                          <button 
-                            key={server.id} 
-                            onClick={() => { setActiveServer(server.id); setIsWorkspaceDropdownOpen(false); }} 
-                            onContextMenu={(e) => handleContextMenu(e, 'server', server)}
-                            className="w-full flex items-center gap-3 p-2 rounded-xl transition-all duration-200 hover:bg-white/[0.05] group"
+              {API_BASE_URL && servers.length === 0 ? (
+                <div className="rounded-2xl border border-white/[0.08] bg-black/40 p-4">
+                  <p className="text-xs text-zinc-500 uppercase tracking-widest font-bold mb-3">Serwery</p>
+                  <p className="text-sm text-zinc-400 mb-4 leading-relaxed">Utwórz pierwszą przestrzeń albo dołącz kodem.</p>
+                  <button
+                    type="button"
+                    onClick={() => setCreateServerModal('create')}
+                    className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-[#00eeff] text-black font-bold text-sm shadow-[0_0_16px_rgba(0,238,255,0.25)]"
+                  >
+                    <Plus size={18} />
+                    Utwórz serwer
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCreateServerModal('join')}
+                    className="w-full mt-2 flex items-center justify-center gap-2 py-3 rounded-xl border border-white/[0.1] text-zinc-200 text-sm font-semibold hover:bg-white/[0.05]"
+                  >
+                    <LogIn size={16} />
+                    Dołącz do serwera
+                  </button>
+                </div>
+              ) : (
+                (() => {
+                  const activeServerData = servers.find((s) => s.id === activeServer) || servers[0];
+                  if (!activeServerData) return null;
+                  return (
+                    <>
+                      <button
+                        onClick={() => setIsWorkspaceDropdownOpen(!isWorkspaceDropdownOpen)}
+                        className="w-full flex items-center gap-3 p-2.5 rounded-2xl border transition-all duration-300 group hover:brightness-125 bg-black/50 backdrop-blur-md"
+                        style={{
+                          borderColor: `${activeServerData.color}30`,
+                          boxShadow: isWorkspaceDropdownOpen ? activeServerData.glow : `0 0 15px ${activeServerData.color}10`,
+                        }}
+                      >
+                        <div
+                          className="w-10 h-10 rounded-xl flex items-center justify-center transition-all"
+                          style={{ backgroundColor: `${activeServerData.color}20`, color: activeServerData.color }}
+                        >
+                          <activeServerData.icon size={20} />
+                        </div>
+                        <div className="flex flex-col items-start flex-1 min-w-0">
+                          <span
+                            className="text-[15px] font-bold truncate w-full text-left tracking-wide"
+                            style={{ color: activeServerData.color, textShadow: `0 0 10px ${activeServerData.color}40` }}
                           >
-                            <div className="w-8 h-8 rounded-lg flex items-center justify-center transition-transform group-hover:scale-105" style={{ color: server.color, backgroundColor: `${server.color}15`, border: `1px solid ${server.color}30` }}><server.icon size={14} /></div>
-                            <span className="text-sm font-semibold tracking-wide" style={{ color: server.color }}>{server.name}</span>
-                            {activeServer === server.id && <Check size={16} className="ml-auto" style={{ color: server.color }} />}
+                            {activeServerData.name}
+                          </span>
+                          <span className="text-[10px] text-zinc-500 font-medium uppercase tracking-widest mt-0.5">Przestrzeń robocza</span>
+                        </div>
+                        <ChevronsUpDown size={16} className="text-zinc-600 group-hover:text-zinc-300 transition-colors mr-1" />
+                      </button>
+                      {isWorkspaceDropdownOpen && (
+                        <div className="absolute top-[calc(100%-4px)] left-4 right-4 mt-2 bg-[#0c0c0e]/95 backdrop-blur-3xl border border-white/[0.1] rounded-2xl shadow-[0_20px_60px_rgba(0,0,0,0.9)] p-2 flex flex-col gap-1 z-50">
+                          {servers.map((server) => (
+                            <button
+                              key={server.id}
+                              onClick={() => {
+                                setActiveServer(server.id);
+                                setIsWorkspaceDropdownOpen(false);
+                              }}
+                              onContextMenu={(e) => handleContextMenu(e, 'server', server)}
+                              className="w-full flex items-center gap-3 p-2 rounded-xl transition-all duration-200 hover:bg-white/[0.05] group"
+                            >
+                              <div
+                                className="w-8 h-8 rounded-lg flex items-center justify-center transition-transform group-hover:scale-105"
+                                style={{ color: server.color, backgroundColor: `${server.color}15`, border: `1px solid ${server.color}30` }}
+                              >
+                                <server.icon size={14} />
+                              </div>
+                              <span className="text-sm font-semibold tracking-wide" style={{ color: server.color }}>
+                                {server.name}
+                              </span>
+                              {activeServer === server.id && <Check size={16} className="ml-auto" style={{ color: server.color }} />}
+                            </button>
+                          ))}
+                          <div className="h-px bg-white/[0.05] my-1 mx-2"></div>
+                          <button
+                            onClick={() => {
+                              setCreateServerModal('create');
+                              setIsWorkspaceDropdownOpen(false);
+                            }}
+                            className="w-full flex items-center gap-3 p-2 rounded-xl transition-all duration-200 hover:bg-white/[0.05] text-zinc-400 hover:text-[#00eeff]"
+                          >
+                            <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-white/[0.02] border border-white/[0.05]">
+                              <Plus size={14} />
+                            </div>
+                            <span className="text-sm font-semibold tracking-wide">Utwórz serwer</span>
                           </button>
-                        ))}
-                        <div className="h-px bg-white/[0.05] my-1 mx-2"></div>
-                        <button onClick={() => { setCreateServerModal('create'); setIsWorkspaceDropdownOpen(false); }} className="w-full flex items-center gap-3 p-2 rounded-xl transition-all duration-200 hover:bg-white/[0.05] text-zinc-400 hover:text-[#00eeff]">
-                          <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-white/[0.02] border border-white/[0.05]"><Plus size={14} /></div>
-                          <span className="text-sm font-semibold tracking-wide">Utwórz serwer</span>
-                        </button>
-                        <button onClick={() => { setCreateServerModal('join'); setIsWorkspaceDropdownOpen(false); }} className="w-full flex items-center gap-3 p-2 rounded-xl transition-all duration-200 hover:bg-white/[0.05] text-zinc-400 hover:text-[#00eeff]">
-                          <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-white/[0.02] border border-white/[0.05]"><LogIn size={14} /></div>
-                          <span className="text-sm font-semibold tracking-wide">Dołącz do serwera</span>
-                        </button>
-                      </div>
-                    )}
-                  </>
-                );
-              })()}
+                          <button
+                            onClick={() => {
+                              setCreateServerModal('join');
+                              setIsWorkspaceDropdownOpen(false);
+                            }}
+                            className="w-full flex items-center gap-3 p-2 rounded-xl transition-all duration-200 hover:bg-white/[0.05] text-zinc-400 hover:text-[#00eeff]"
+                          >
+                            <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-white/[0.02] border border-white/[0.05]">
+                              <LogIn size={14} />
+                            </div>
+                            <span className="text-sm font-semibold tracking-wide">Dołącz do serwera</span>
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  );
+                })()
+              )}
             </div>
 
             {/* LISTA KANAŁÓW I KATEGORII */}
@@ -912,7 +2143,7 @@ export default function App() {
                         {isVoice && participantsOnChannel.length > 0 && (
                           <div className="ml-8 mt-1.5 mb-1 flex flex-col gap-1.5">
                             {participantsOnChannel.map((uid) => {
-                              const u = getUser(uid); const isMe = uid === guestIdRef.current;
+                              const u = getUser(uid); const isMe = uid === myUserId;
                               return (
                                 <div key={uid} onContextMenu={(e) => handleContextMenu(e, 'user', u)} className="flex items-center gap-2 text-xs text-zinc-400 py-1 px-2 rounded-md hover:bg-white/[0.05] cursor-pointer transition-colors border border-transparent hover:border-white/[0.05]">
                                   <div className="relative shrink-0">
@@ -977,7 +2208,7 @@ export default function App() {
                               {isVoice && participantsOnChannel.length > 0 && (
                                 <div className="ml-8 mt-1.5 mb-1 flex flex-col gap-1.5">
                                   {participantsOnChannel.map((uid) => {
-                                    const u = getUser(uid); const isMe = uid === guestIdRef.current;
+                                    const u = getUser(uid); const isMe = uid === myUserId;
                                     return (
                                       <div key={uid} onContextMenu={(e) => handleContextMenu(e, 'user', u)} className="flex items-center gap-2 text-xs text-zinc-400 py-1 px-2 rounded-md hover:bg-white/[0.05] cursor-pointer transition-colors border border-transparent hover:border-white/[0.05]">
                                         <div className="relative shrink-0">
@@ -1008,7 +2239,7 @@ export default function App() {
                 </div>
                 <div className="flex flex-col overflow-hidden">
                   <span className="text-xs font-bold text-white truncate leading-tight">{localUserName}</span>
-                  <span className="text-[10px] text-zinc-500 truncate leading-tight">Ty (Gość)</span>
+                  <span className="text-[10px] text-zinc-500 truncate leading-tight">{API_BASE_URL ? 'Zalogowany' : 'Ty (Gość)'}</span>
                 </div>
               </div>
               <div className="flex items-center gap-0.5 text-zinc-500">
@@ -1020,12 +2251,50 @@ export default function App() {
 
         {/* --- 2. MAIN VIEW (CZAT / VOICE) --- */}
         <main className="flex-1 flex flex-col relative bg-[#0a0a0c] overflow-hidden z-0 border-l border-white/[0.02] transition-all duration-500">
+          {API_BASE_URL && servers.length === 0 ? (
+            <div className="flex-1 flex flex-col items-center justify-center p-10 text-center">
+              <div className="w-20 h-20 rounded-3xl bg-[#00eeff]/10 border border-[#00eeff]/25 flex items-center justify-center mb-8">
+                <Server size={40} className="text-[#00eeff]" />
+              </div>
+              <h1 className="text-2xl font-bold text-white mb-2 tracking-tight">Zacznij od serwera</h1>
+              <p className="text-zinc-500 text-sm max-w-md mb-8 leading-relaxed">
+                Nie należysz jeszcze do żadnej przestrzeni. Utwórz własną — dostaniesz kanał „powitania” — albo wpisz kod zaproszenia.
+              </p>
+              <div className="flex flex-wrap gap-3 justify-center">
+                <button
+                  type="button"
+                  onClick={() => setCreateServerModal('create')}
+                  className="px-6 py-3 rounded-xl bg-[#00eeff] text-black font-bold text-sm shadow-[0_0_20px_rgba(0,238,255,0.35)] hover:scale-[1.02] transition-transform"
+                >
+                  Utwórz serwer
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCreateServerModal('join')}
+                  className="px-6 py-3 rounded-xl border border-white/[0.12] text-zinc-200 font-semibold text-sm hover:bg-white/[0.05] transition-colors"
+                >
+                  Dołącz do serwera
+                </button>
+              </div>
+            </div>
+          ) : API_BASE_URL && servers.length > 0 && !currentChannelData ? (
+            <div className="flex-1 flex items-center justify-center p-8 text-center text-zinc-500 text-sm">
+              Brak kanału tekstowego. Dodaj kategorię / kanał z menu kontekstowego albo odśwież stronę.
+            </div>
+          ) : (
+          <>
           <header className="h-16 flex items-center justify-between px-6 border-b border-white/[0.04] bg-[#0a0a0c]/80 backdrop-blur-md shrink-0 z-10 transition-all">
             <div className="flex items-center gap-3 text-sm font-medium">
               {currentChannelData && <currentChannelData.icon size={20} style={{ color: currentChannelData.color }} />}
               <span className="tracking-tight font-bold text-lg" style={{ color: currentChannelData?.color, textShadow: `0 0 15px ${currentChannelData?.color}40` }}>{currentChannelData?.name}</span>
               <div className="w-[1px] h-4 bg-white/[0.1] mx-2 hidden md:block"></div>
-              <span className="text-xs text-zinc-500 hidden md:block font-normal">{isMainViewVoice ? 'Aktywna komunikacja głosowa.' : 'System operacyjny Flux_.'}</span>
+              <span className="text-xs text-zinc-500 hidden md:block font-normal">
+                {isMainViewVoice
+                  ? 'Aktywna komunikacja głosowa.'
+                  : Object.keys(typingUsers).filter((u) => u !== myUserId).length > 0
+                    ? 'Ktoś pisze…'
+                    : 'System operacyjny Devcord_.'}
+              </span>
             </div>
             
             <div className="flex items-center gap-2 text-zinc-400">
@@ -1052,18 +2321,60 @@ export default function App() {
               <div className="flex-1 p-6 sm:p-10 flex flex-col overflow-auto custom-scrollbar relative z-10">
                 {activeVoiceChannel === currentChannelData?.id ? (
                   <div className="w-full max-w-7xl mx-auto flex flex-col pb-24">
+                    <div className="flex flex-col gap-10 mb-12 w-full">
                     {screenStream && (
-                      <div className="w-full aspect-video rounded-3xl border border-[#00eeff]/20 bg-black/80 p-2 shadow-[0_0_80px_rgba(0,238,255,0.1)] relative mb-12 group transition-all duration-700">
+                      <div className="w-full aspect-video rounded-3xl border border-[#00eeff]/20 bg-black/80 p-2 shadow-[0_0_80px_rgba(0,238,255,0.1)] relative group transition-all duration-700">
                         <div className="absolute top-0 left-0 w-12 h-12 border-t-2 border-l-2 border-[#00eeff]/80 rounded-tl-3xl z-10 transition-all duration-500 group-hover:w-16 group-hover:h-16 shadow-[-5px_-5px_15px_rgba(0,238,255,0.2)]"></div>
                         <div className="absolute top-0 right-0 w-12 h-12 border-t-2 border-r-2 border-[#00eeff]/80 rounded-tr-3xl z-10 transition-all duration-500 group-hover:w-16 group-hover:h-16 shadow-[5px_-5px_15px_rgba(0,238,255,0.2)]"></div>
                         <div className="absolute bottom-0 left-0 w-12 h-12 border-b-2 border-l-2 border-[#00eeff]/80 rounded-bl-3xl z-10 transition-all duration-500 group-hover:w-16 group-hover:h-16 shadow-[-5px_5px_15px_rgba(0,238,255,0.2)]"></div>
                         <div className="absolute bottom-0 right-0 w-12 h-12 border-b-2 border-r-2 border-[#00eeff]/80 rounded-br-3xl z-10 transition-all duration-500 group-hover:w-16 group-hover:h-16 shadow-[5px_5px_15px_rgba(0,238,255,0.2)]"></div>
                         <div className="w-full h-full rounded-2xl overflow-hidden relative">
                           <VideoPlayer stream={screenStream} isLocal={true} className="w-full h-full object-contain bg-[#030303]" />
-                          <div className="absolute top-4 left-4 px-3 py-1.5 bg-black/60 backdrop-blur-md rounded-lg text-[10px] uppercase tracking-widest font-black text-white border border-[#00eeff]/30 flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-[#00eeff] animate-pulse shadow-[0_0_8px_#00eeff]"></span>Strumień Ekranu</div>
+                          <div className="absolute top-4 left-4 px-3 py-1.5 bg-black/60 backdrop-blur-md rounded-lg text-[10px] uppercase tracking-widest font-black text-white border border-[#00eeff]/30 flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-[#00eeff] animate-pulse shadow-[0_0_8px_#00eeff]"></span>Twój ekran</div>
                         </div>
                       </div>
                     )}
+                    {primaryRemoteStream && primaryRemoteSharerId && API_BASE_URL && (
+                      <div className="w-full aspect-video rounded-3xl border border-white/[0.12] bg-[#0a0a0c] p-2 shadow-[0_0_60px_rgba(0,0,0,0.5)] relative group transition-all duration-700 overflow-hidden">
+                        <div className="w-full h-full rounded-2xl overflow-hidden relative bg-[#121214] min-h-[200px] flex items-center justify-center">
+                          {remoteScreenWatching ? (
+                            <VideoPlayer
+                              stream={primaryRemoteStream}
+                              volume={remoteScreenVolume}
+                              muted={remoteScreenVideoMuted}
+                              className="w-full h-full object-contain bg-[#030303]"
+                              onContextMenu={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                setScreenStreamContext({ x: e.clientX, y: e.clientY });
+                              }}
+                            />
+                          ) : (
+                            <div className="absolute inset-0 flex flex-col items-center justify-center gap-6 p-8">
+                              <button
+                                type="button"
+                                onClick={() => setRemoteScreenWatching(true)}
+                                className="px-8 py-3.5 rounded-2xl bg-white/[0.08] hover:bg-white/[0.12] border border-white/[0.1] text-white text-sm font-bold tracking-wide transition-colors"
+                              >
+                                Obejrzyj stream
+                              </button>
+                              <p className="text-[11px] text-zinc-600 text-center max-w-sm">Połączenie WebRTC — dźwięk z ekranu zależy od przeglądarki i wybranego źródła udostępniania.</p>
+                            </div>
+                          )}
+                          <div className="absolute bottom-4 left-4 flex items-center gap-2 px-3 py-1.5 rounded-xl bg-black/75 border border-white/[0.08] text-white text-xs font-semibold pointer-events-none">
+                            <Monitor size={14} className="text-[#00eeff] shrink-0" />
+                            <span className="truncate max-w-[12rem]">{getUser(primaryRemoteSharerId).name}</span>
+                          </div>
+                          {remoteScreenWatching && (
+                            <div className="absolute top-4 left-4 px-3 py-1.5 bg-black/60 backdrop-blur-md rounded-lg text-[10px] uppercase tracking-widest font-black text-white border border-white/[0.12] flex items-center gap-2 pointer-events-none">
+                              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_#34d399]"></span>
+                              Oglądasz
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                    </div>
                     <div className="flex items-center gap-3 mb-8 px-2">
                       <div className="h-px flex-1 bg-gradient-to-r from-transparent via-white/[0.1] to-transparent"></div>
                       <span className="text-[10px] uppercase tracking-[0.3em] font-bold text-zinc-500">Węzły Komunikacyjne ({voiceParticipants.length})</span>
@@ -1071,21 +2382,30 @@ export default function App() {
                     </div>
                     <div className="flex flex-wrap justify-center gap-6">
                       {voiceParticipants.map((uid) => {
-                        const u = getUser(uid); const isSelf = uid === guestIdRef.current; const isSpeaking = isSelf && !localMuted; 
+                        const u = getUser(uid); const isSelf = uid === myUserId; const isSpeaking = !!speakingPeers[uid];
+                        const isScreenSharing = (isSelf && !!screenStream) || !!remoteScreenByUser[uid];
                         return (
                           <div 
                             key={uid} 
                             onContextMenu={(e) => handleContextMenu(e, 'user', u)}
-                            className={`group flex items-center gap-4 p-2.5 pr-6 rounded-full bg-gradient-to-r from-black/90 to-[#0a0a0c] border backdrop-blur-xl transition-all duration-500 shadow-xl cursor-pointer ${isSpeaking ? 'border-[#00eeff]/50 shadow-[0_0_30px_rgba(0,238,255,0.15)] scale-105' : 'border-white/[0.05] hover:border-white/[0.15]'} ${screenStream ? 'w-64' : 'w-72 sm:w-80'}`}
+                            className={`group flex items-center gap-4 p-2.5 pr-6 rounded-full bg-gradient-to-r from-black/90 to-[#0a0a0c] border backdrop-blur-xl transition-all duration-500 shadow-xl cursor-pointer ${isSpeaking ? 'border-[#00eeff]/50 shadow-[0_0_30px_rgba(0,238,255,0.15)] scale-105' : 'border-white/[0.05] hover:border-white/[0.15]'} ${voiceHasScreenActivity ? 'w-64' : 'w-72 sm:w-80'}`}
                           >
                             <div className="relative shrink-0">
                               <div className={`absolute inset-0 rounded-full blur-md transition-all duration-500 ${isSpeaking ? 'bg-[#00eeff] opacity-50 animate-pulse' : 'opacity-0'}`}></div>
                               <div className={`w-14 h-14 relative z-10 rounded-full flex items-center justify-center text-xl font-black transition-colors duration-500 ${isSpeaking ? 'bg-[#000] border-2 border-[#00eeff] text-[#00eeff]' : 'bg-[#151515] border border-white/[0.1] text-zinc-400'}`}>{u.name.charAt(0)}</div>
                               <div className={`absolute bottom-0 right-0 w-4 h-4 rounded-full border-2 border-[#050505] flex items-center justify-center z-20 ${isSelf && localMuted ? 'bg-red-500' : 'bg-emerald-500'}`}>{isSelf && localMuted && <MicOff size={8} className="text-black" />}</div>
+                              {isScreenSharing && (
+                                <div className="absolute -top-0.5 -left-0.5 z-30 w-5 h-5 rounded-md bg-[#00eeff]/20 border border-[#00eeff]/50 flex items-center justify-center" title="Udostępnia ekran">
+                                  <Monitor size={10} className="text-[#00eeff]" />
+                                </div>
+                              )}
                             </div>
                             <div className="flex flex-col flex-1 min-w-0 justify-center">
                               <span className={`text-[15px] font-bold truncate transition-colors duration-300 ${isSpeaking ? 'text-[#00eeff] drop-shadow-[0_0_8px_rgba(0,238,255,0.4)]' : 'text-zinc-200'}`}>{u.name}</span>
-                              <span className="text-[10px] text-zinc-500 uppercase tracking-widest font-semibold flex items-center gap-1 mt-0.5">{isSelf && localMuted ? 'Wyciszony' : 'Połączony'}</span>
+                              <span className="text-[10px] text-zinc-500 uppercase tracking-widest font-semibold flex items-center gap-1 mt-0.5">
+                                {isScreenSharing ? <><Monitor size={10} className="text-[#00eeff]" /> Ekran · </> : null}
+                                {isSelf && localMuted ? 'Wyciszony' : 'Połączony'}
+                              </span>
                             </div>
                             {isSpeaking && (
                               <div className="flex items-center gap-1 h-4 opacity-80 shrink-0">
@@ -1129,29 +2449,35 @@ export default function App() {
                 onContextMenu={(e) => handleContextMenu(e, 'chatArea', null)}
                 className="flex-1 overflow-y-auto px-6 pt-6 pb-44 custom-scrollbar flex flex-col relative transition-all duration-500"
               >
-                <div className={`${isZenMode ? 'max-w-3xl' : 'max-w-4xl'} mx-auto w-full flex flex-col gap-6 mt-auto transition-all duration-500`}>
+                <div className={`${isZenMode ? 'max-w-3xl' : 'max-w-4xl'} mx-auto w-full flex flex-col mt-auto transition-all duration-500`}>
                   
-                  <div className="pb-6 border-b border-white/[0.05] mb-4 flex flex-col items-start mt-8">
+                  <div className="pb-6 border-b border-white/[0.05] mb-6 flex flex-col items-start mt-8">
                     <div className="w-16 h-16 rounded-3xl border flex items-center justify-center mb-6 shadow-lg" style={{ backgroundColor: `${currentChannelData?.color}10`, borderColor: `${currentChannelData?.color}30`, boxShadow: `0 0 30px ${currentChannelData?.color}20` }}>
                       {currentChannelData && <currentChannelData.icon size={32} style={{ color: currentChannelData.color }} />}
                     </div>
-                    <h1 className="text-3xl font-bold tracking-tighter mb-2" style={{ color: currentChannelData?.color, textShadow: `0 0 20px ${currentChannelData?.color}40` }}>Witaj na {currentChannelData?.name || 'pustym serwerze'}!</h1>
-                    <p className="text-zinc-500 text-sm">Prywatna instancja Flux_. Tutaj pomysły płyną szybciej.</p>
+                    <h1 className="text-3xl font-bold tracking-tighter mb-2" style={{ color: currentChannelData?.color, textShadow: `0 0 20px ${currentChannelData?.color}40` }}>Witaj na #{currentChannelData?.name || 'kanale'}!</h1>
+                    <p className="text-zinc-500 text-sm">
+                      {DEMO_MODE ? 'Prywatna instancja Devcord_. Tutaj pomysły płyną szybciej.' : 'To jest początek kanału — napisz pierwszą wiadomość poniżej.'}
+                    </p>
                   </div>
 
+                  <div className="flex flex-col">
                   {messages.map((msg, idx, arr) => {
                     const showHeader = idx === 0 || arr[idx - 1].userId !== msg.userId;
                     const user = getUser(msg.userId);
                     const role = getRole(user.roleId);
-                    const isAI = msg.userId === 'flux_ai';
+                    const isAI = msg.userId === 'devcord_ai';
+                    const groupTop =
+                      idx === 0 ? '' : showHeader ? 'mt-6' : 'mt-1.5';
+                    const rowPad = showHeader ? 'py-2' : 'py-0.5';
                     
                     return (
                       <div 
                         key={msg.id} 
                         onContextMenu={(e) => handleContextMenu(e, 'message', msg)}
-                        className={`group flex gap-4 hover:bg-white/[0.02] -mx-4 px-4 py-3 rounded-xl transition-colors relative ${activeThread?.id === msg.id ? 'bg-white/[0.04] border border-white/[0.05]' : 'border border-transparent'}`}
+                        className={`group flex gap-4 hover:bg-white/[0.02] -mx-4 px-4 ${rowPad} ${groupTop} rounded-xl transition-colors relative ${activeThread?.id === msg.id ? 'bg-white/[0.04] border border-white/[0.05]' : 'border border-transparent'}`}
                       >
-                        <div className="w-10 shrink-0 flex justify-center mt-1">
+                        <div className={`w-10 shrink-0 flex justify-center ${showHeader ? 'mt-1' : 'mt-0'}`}>
                           {showHeader ? (
                             <div 
                               onContextMenu={(e) => { if(!isAI) handleContextMenu(e, 'user', user); }}
@@ -1174,7 +2500,7 @@ export default function App() {
                               >
                                 {user.name}
                               </span>
-                              {!isAI && role.id !== 'r4' && (
+                              {!isAI && role.name !== 'Member' && role.id !== 'r4' && (
                                 <div className="flex items-center gap-1.5 px-1.5 py-[2px] rounded text-[9px] font-bold uppercase tracking-wider border shadow-sm backdrop-blur-sm" style={{ backgroundColor: role.bg, borderColor: role.border, color: role.color, boxShadow: role.glow !== 'none' ? `0 0 8px ${role.bg}` : 'none' }}>
                                   <role.icon size={10} strokeWidth={2.5} /><span>{role.name}</span>
                                 </div>
@@ -1214,6 +2540,7 @@ export default function App() {
                       </div>
                     );
                   })}
+                  </div>
                   
                   {/* AI LOADING INDICATOR */}
                   {isAILoading && (
@@ -1225,7 +2552,7 @@ export default function App() {
                         <div className="w-1.5 h-1.5 bg-[#00eeff] rounded-full loader-dot"></div>
                         <div className="w-1.5 h-1.5 bg-[#00eeff] rounded-full loader-dot"></div>
                         <div className="w-1.5 h-1.5 bg-[#00eeff] rounded-full loader-dot"></div>
-                        <span className="ml-3 text-sm text-[#00eeff]/70 font-medium">Flux AI analizuje...</span>
+                        <span className="ml-3 text-sm text-[#00eeff]/70 font-medium">Devcord AI analizuje...</span>
                       </div>
                     </div>
                   )}
@@ -1242,7 +2569,7 @@ export default function App() {
                     {isAIPromptOpen && (
                       <div className="px-4 py-3 bg-[#00eeff]/5 border-b border-[#00eeff]/20 flex items-center gap-3 animate-in slide-in-from-top-2 fade-in duration-200">
                         <Sparkles size={18} className="text-[#00eeff] animate-pulse" />
-                        <input autoFocus value={inputValue} onChange={(e) => setInputValue(e.target.value)} onKeyDown={handleKeyDown} placeholder="Poproś Flux AI o pomoc, podsumowanie lub kod..." className="flex-1 bg-transparent text-sm font-medium text-[#00eeff] outline-none placeholder-[#00eeff]/50" />
+                        <input autoFocus value={inputValue} onChange={(e) => setInputValue(e.target.value)} onKeyDown={handleKeyDown} placeholder="Poproś Devcord AI o pomoc, podsumowanie lub kod..." className="flex-1 bg-transparent text-sm font-medium text-[#00eeff] outline-none placeholder-[#00eeff]/50" />
                         <button onClick={() => setIsAIPromptOpen(false)} className="text-[#00eeff]/50 hover:text-[#00eeff] transition-colors"><X size={16}/></button>
                       </div>
                     )}
@@ -1255,7 +2582,7 @@ export default function App() {
                         <button className="p-1 text-zinc-500 hover:text-[#00eeff] rounded transition-colors" title="Dodaj blok kodu"><CodeIcon size={14} /></button>
                         <button className="p-1 text-zinc-500 hover:text-white rounded transition-colors"><Link size={14} /></button>
                         <div className="ml-auto flex items-center">
-                          <button onClick={() => setIsAIPromptOpen(true)} className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-[#00eeff]/10 text-[#00eeff] hover:bg-[#00eeff]/20 text-[10px] font-bold uppercase tracking-widest transition-colors"><Sparkles size={10} /> FLUX AI</button>
+                          <button onClick={() => setIsAIPromptOpen(true)} className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-[#00eeff]/10 text-[#00eeff] hover:bg-[#00eeff]/20 text-[10px] font-bold uppercase tracking-widest transition-colors"><Sparkles size={10} /> DEVCORD AI</button>
                         </div>
                       </div>
                     )}
@@ -1300,17 +2627,19 @@ export default function App() {
               })()}
             </div>
           )}
+          </>
+          )}
         </main>
 
         {/* --- 4. INTELIGENTNY PRAWY PANEL (WĄTKI, ZADANIA, PLIKI) --- */}
-        {!isZenMode && (rightPanelTab || activeThread) && (
+        {!isZenMode && (rightPanelTab || activeThread) && !(API_BASE_URL && servers.length === 0) && (
           <aside className="w-[320px] bg-[#080808]/80 backdrop-blur-xl border-l border-white/[0.04] flex flex-col shrink-0 z-20 transition-all duration-300 shadow-2xl">
             
             {activeThread ? (
               // WIDOK WĄTKU
               <>
                 <div className="h-16 border-b border-white/[0.04] flex items-center justify-between px-5 bg-black/20">
-                  <div className="flex items-center gap-2"><MessageSquareShare size={16} className="text-[#00eeff]" /><span className="text-sm font-semibold tracking-wide text-white">Wątek Flux</span></div>
+                  <div className="flex items-center gap-2"><MessageSquareShare size={16} className="text-[#00eeff]" /><span className="text-sm font-semibold tracking-wide text-white">Wątek Devcord</span></div>
                   <button onClick={() => setActiveThread(null)} className="p-1.5 text-zinc-500 hover:text-white hover:bg-white/[0.1] rounded-lg transition-colors"><X size={16} /></button>
                 </div>
                 <div className="flex-1 overflow-y-auto custom-scrollbar flex flex-col relative">
@@ -1352,8 +2681,8 @@ export default function App() {
                       className="p-4 space-y-6 flex-1 min-h-full"
                       onContextMenu={(e) => handleContextMenu(e, 'membersArea', null)}
                     >
-                      {mockRoles.map(role => {
-                        const usersInRole = mockUsers.filter(u => u.roleId === role.id && u.status !== 'offline');
+                      {workspaceRoles.map(role => {
+                        const usersInRole = workspaceMembers.filter((u) => u.roleId === role.id);
                         if (usersInRole.length === 0) return null;
                         return (
                           <div key={role.id}>
@@ -1372,7 +2701,7 @@ export default function App() {
                                 >
                                   <div className="relative">
                                     <div className="w-8 h-8 rounded-xl bg-black border border-white/[0.08] flex items-center justify-center text-xs font-bold transition-all duration-300" style={{ color: role.color }}>{user.name.charAt(0)}</div>
-                                    <div className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-[#0a0a0c] ${user.status === 'online' ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]' : user.status === 'idle' ? 'bg-amber-400' : 'bg-red-500'}`}></div>
+                                    <div className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-[#0a0a0c] ${user.status === 'online' ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]' : user.status === 'idle' ? 'bg-amber-400' : user.status === 'dnd' ? 'bg-red-500' : 'bg-zinc-600'}`}></div>
                                   </div>
                                   <span className="text-[13px] font-semibold truncate transition-all tracking-wide" style={{ color: role.color, textShadow: role.glow !== 'none' ? `0 0 12px ${role.color}40` : 'none' }}>{user.name}</span>
                                 </div>

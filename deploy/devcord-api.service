@@ -1,0 +1,16 @@
+[Unit]
+Description=Devcord HTTP API (REST + chat WebSocket)
+After=network.target postgresql.service redis-server.service
+Wants=postgresql.service redis-server.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/disc/backend
+EnvironmentFile=/root/disc/deploy/.env
+ExecStart=/root/disc/backend/bin/devcord-api
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
