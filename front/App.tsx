@@ -3,7 +3,10 @@ import { useVoiceRoom } from './useVoiceRoom';
 import { loadFluxLocalSettings, saveFluxLocalSettings } from './fluxLocalSettings';
 import { resizeImageFileToDataUrl } from './resizeAvatarImage';
 import { SettingsGlowDropdown } from './SettingsGlowDropdown';
-import { useChatSocket } from './useChatSocket';
+import { useChatSocket, type ChatUserUpdatedPayload } from './useChatSocket';
+import { NickLabel } from './nickAppearance';
+import { buildNickGlowJson, NICK_FONT_STACKS } from './nickGlowPresets';
+import { dmThreadKey, loadDmStore, saveDmStore, type DmRow } from './dmStorage';
 import { iconFromKey } from './iconMap';
 import { AuthGate } from './AuthGate';
 import { 
@@ -346,7 +349,28 @@ const VideoPlayer = ({
   const videoRef = useRef<HTMLVideoElement>(null);
   useEffect(() => {
     const v = videoRef.current;
-    if (v && stream) v.srcObject = stream;
+    if (!v) return;
+    if (!stream) {
+      v.srcObject = null;
+      return;
+    }
+    v.srcObject = stream;
+    const onDead = () => {
+      if (!mediaStreamHasLiveVideo(stream)) {
+        v.srcObject = null;
+      }
+    };
+    const cleanups: Array<() => void> = [];
+    for (const t of stream.getVideoTracks()) {
+      const fn = () => onDead();
+      t.addEventListener('ended', fn);
+      t.addEventListener('mute', fn);
+      cleanups.push(() => {
+        t.removeEventListener('ended', fn);
+        t.removeEventListener('mute', fn);
+      });
+    }
+    return () => cleanups.forEach((c) => c());
   }, [stream]);
   useEffect(() => {
     const v = videoRef.current;
@@ -371,6 +395,38 @@ const VideoPlayer = ({
     />
   );
 };
+
+function voiceVolumeUiLabel(linearGain: number): string {
+  const pct = Math.round(linearGain * 100);
+  if (linearGain <= 1.001) return `${pct}% — poziom bazowy`;
+  return `${pct}% — boost (+${pct - 100}%)`;
+}
+
+/** Spójny avatar (lub inicjał) wszędzie w UI — `className` ustawia rozmiar i np. rounded-full. */
+function UserAvatarBubble({
+  user,
+  className = 'w-8 h-8',
+}: {
+  user: Pick<UserInfo, 'name' | 'avatarUrl'>;
+  className?: string;
+}) {
+  if (user.avatarUrl?.trim()) {
+    return (
+      <img
+        src={user.avatarUrl}
+        alt=""
+        className={`${className} object-cover border border-white/[0.08] shrink-0 bg-black`}
+      />
+    );
+  }
+  return (
+    <div
+      className={`${className} bg-zinc-800 border border-white/[0.08] flex items-center justify-center text-[10px] font-bold text-white shrink-0 overflow-hidden`}
+    >
+      {user.name.charAt(0)}
+    </div>
+  );
+}
 
 // ============================================================================
 // --- GŁÓWNY KOMPONENT APLIKACJI ---
@@ -491,6 +547,28 @@ export default function App() {
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
   const [voicePeersByChannel, setVoicePeersByChannel] = useState<Record<string, string[]>>({});
   const [voiceMixPanelOpen, setVoiceMixPanelOpen] = useState(false);
+
+  const [dmPeerId, setDmPeerId] = useState<string | null>(null);
+  const [dmInputValue, setDmInputValue] = useState('');
+  const [dmMessagesByThread, setDmMessagesByThread] = useState<Record<string, DmRow[]>>(() => loadDmStore());
+  const [profileCardUser, setProfileCardUser] = useState<UserInfo | null>(null);
+  const [pvCall, setPvCall] = useState<{ peerId: string; status: 'ringing' | 'connected' } | null>(null);
+  const remoteScreenHostRef = useRef<HTMLDivElement | null>(null);
+
+  const [nickStudioFx, setNickStudioFx] = useState<'gradient' | 'gradient_neon' | 'neon_pulse' | 'shimmer' | 'double_outline'>(
+    'gradient_neon',
+  );
+  const [nickStudioG1, setNickStudioG1] = useState('#00eeff');
+  const [nickStudioG2, setNickStudioG2] = useState('#ff00aa');
+  const [nickStudioFontId, setNickStudioFontId] = useState('outfit');
+
+  useEffect(() => {
+    saveDmStore(dmMessagesByThread);
+  }, [dmMessagesByThread]);
+
+  useEffect(() => {
+    if (activeServer !== '') setDmPeerId(null);
+  }, [activeServer]);
 
   useEffect(() => {
     saveFluxLocalSettings({
@@ -876,6 +954,34 @@ export default function App() {
     [meUserId],
   );
 
+  const mergeUserFromWs = useCallback(
+    (p: ChatUserUpdatedPayload) => {
+      const uid = p.user_id;
+      setWorkspaceMembers((prev) => {
+        const i = prev.findIndex((m) => m.id === uid);
+        if (i < 0) return prev;
+        const cur = prev[i];
+        const next: UserInfo = {
+          ...cur,
+          name: p.name ?? cur.name,
+          avatarUrl: p.avatar_url !== undefined ? p.avatar_url : cur.avatarUrl,
+          nickColor: p.nick_color !== undefined ? p.nick_color : cur.nickColor,
+          nickGlow: p.nick_glow !== undefined ? p.nick_glow : cur.nickGlow,
+        };
+        const copy = [...prev];
+        copy[i] = next;
+        return copy;
+      });
+      if (uid === meUserId) {
+        if (p.name) setLocalUserName(p.name);
+        if (p.avatar_url !== undefined) setLocalUserAvatar(p.avatar_url);
+        if (p.nick_color) setLocalUserColor(p.nick_color);
+        if (p.nick_glow !== undefined) setLocalUserGlow(p.nick_glow);
+      }
+    },
+    [meUserId],
+  );
+
   const { sendTyping } = useChatSocket({
     apiBase: API_BASE_URL,
     token: fluxToken || null,
@@ -891,6 +997,7 @@ export default function App() {
         return next;
       });
     },
+    onUserUpdated: API_BASE_URL && fluxToken ? mergeUserFromWs : undefined,
   });
 
   useEffect(() => {
@@ -1955,19 +2062,49 @@ export default function App() {
           )}
           {contextMenu.type === 'user' && (
             <>
-              <div className="px-3 py-2 text-xs font-bold text-zinc-500 uppercase tracking-widest border-b border-white/[0.05] mb-1 truncate">{contextMenu.data.name}</div>
-              <button className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-white/[0.05] rounded-lg transition-colors w-full text-left"><Eye size={14}/> Pokaż profil</button>
-              <button className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-white/[0.05] rounded-lg transition-colors w-full text-left"><MessageSquare size={14}/> Wyślij wiadomość</button>
+              <div className="px-3 py-2.5 flex items-center gap-2 border-b border-white/[0.05] mb-1 min-w-0">
+                <UserAvatarBubble user={contextMenu.data as UserInfo} className="w-8 h-8 rounded-lg shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <NickLabel
+                    user={contextMenu.data as UserInfo}
+                    fallbackColor="#fafafa"
+                    className="text-sm font-bold truncate block"
+                  />
+                  <span className="text-[9px] text-zinc-500 uppercase tracking-widest">Użytkownik</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setProfileCardUser(contextMenu.data as UserInfo);
+                  setContextMenu(null);
+                }}
+                className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-white/[0.05] rounded-lg transition-colors w-full text-left"
+              >
+                <Eye size={14}/> Karta użytkownika
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveServer('');
+                  setDmPeerId(String((contextMenu.data as UserInfo).id));
+                  setContextMenu(null);
+                }}
+                className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-white/[0.05] rounded-lg transition-colors w-full text-left"
+              >
+                <MessageSquare size={14}/> Wiadomość (DM)
+              </button>
               {activeVoiceChannel && (
                   <div
                     className="px-3 py-2 flex flex-col gap-2 w-full border-y border-white/[0.05] mt-1 pt-2 pb-2"
                     onMouseDown={(e) => e.stopPropagation()}
                     onClick={(e) => e.stopPropagation()}
                   >
+                    <div className="flex flex-col gap-1 w-full">
                     <div className="flex items-center gap-2 w-full">
                       <Volume2 size={14} className="text-zinc-500 shrink-0" />
-                      <span className="text-[10px] text-zinc-500 tabular-nums shrink-0 w-10 text-right">
-                        {Math.round((userVolumes[contextMenu.data.id] ?? 1) * 100)}%
+                      <span className="text-[9px] text-zinc-400 tabular-nums shrink-0 min-w-[7.5rem] text-right leading-tight">
+                        {voiceVolumeUiLabel(userVolumes[contextMenu.data.id] ?? 1)}
                       </span>
                       <input
                         type="range"
@@ -1983,6 +2120,8 @@ export default function App() {
                         }}
                         className="flex-1 min-w-0 h-1 rounded-full appearance-none bg-white/[0.1] accent-[#00eeff]"
                       />
+                    </div>
+                    <p className="text-[9px] text-zinc-600 px-0.5 leading-snug">Do 100% — normalna głośność; wyżej — cyfrowy boost (ciche mikrofony).</p>
                     </div>
                     <button
                       type="button"
@@ -2263,7 +2402,7 @@ export default function App() {
           role="presentation"
         >
           <div
-            className="w-full max-w-2xl bg-[#0c0c0e] border border-white/[0.1] rounded-3xl shadow-[0_0_80px_rgba(0,0,0,1)] flex overflow-hidden max-h-[85vh]"
+            className="w-full max-w-2xl bg-[#0c0c0e] border border-white/[0.1] rounded-3xl shadow-[0_0_80px_rgba(0,0,0,1),0_0_40px_rgba(0,238,255,0.08)] ring-1 ring-[#00eeff]/15 flex overflow-hidden max-h-[85vh]"
             onClick={(e) => e.stopPropagation()}
             role="dialog"
             aria-labelledby="settings-title"
@@ -2422,14 +2561,71 @@ export default function App() {
                     <div>
                         <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">Poświata nicku</label>
                         <SettingsGlowDropdown value={localUserGlow} onChange={setLocalUserGlow} disabled={settingsBusy} />
-                        <p className="text-[11px] text-zinc-600 mt-2">Wybierz gotowy styl — bez wpisywania CSS.</p>
+                        <p className="text-[11px] text-zinc-600 mt-2">Presety Nitro (gradient, puls, shimmer) lub klasyka — kolory i czcionka w studio poniżej.</p>
+                    </div>
+
+                    <div className="p-4 rounded-xl border border-[#00eeff]/15 bg-gradient-to-br from-black/60 to-[#00eeff]/[0.04] space-y-3">
+                      <div className="text-[10px] font-bold uppercase tracking-widest text-[#00eeff]/80">Studio stylu Nitro</div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-[9px] text-zinc-500 mb-1">Efekt</label>
+                          <select
+                            value={nickStudioFx}
+                            onChange={(e) => setNickStudioFx(e.target.value as typeof nickStudioFx)}
+                            className="w-full bg-[#151515] border border-white/[0.1] rounded-lg px-2 py-2 text-xs text-white outline-none focus:border-[#00eeff]/40"
+                          >
+                            <option value="gradient">Gradient</option>
+                            <option value="gradient_neon">Gradient + puls</option>
+                            <option value="neon_pulse">Pulsujący neon</option>
+                            <option value="shimmer">Shimmer</option>
+                            <option value="double_outline">Podwójna obwódka</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-[9px] text-zinc-500 mb-1">Czcionka nicku</label>
+                          <select
+                            value={nickStudioFontId}
+                            onChange={(e) => setNickStudioFontId(e.target.value)}
+                            className="w-full bg-[#151515] border border-white/[0.1] rounded-lg px-2 py-2 text-xs text-white outline-none focus:border-[#00eeff]/40"
+                          >
+                            {NICK_FONT_STACKS.map((f) => (
+                              <option key={f.id} value={f.id}>
+                                {f.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                      <div className="flex gap-4 flex-wrap items-center">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[9px] text-zinc-500">Kolor A</span>
+                          <input type="color" value={nickStudioG1} onChange={(e) => setNickStudioG1(e.target.value)} className="w-9 h-9 rounded-lg cursor-pointer border-0 bg-transparent p-0" />
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[9px] text-zinc-500">Kolor B</span>
+                          <input type="color" value={nickStudioG2} onChange={(e) => setNickStudioG2(e.target.value)} className="w-9 h-9 rounded-lg cursor-pointer border-0 bg-transparent p-0" />
+                        </div>
+                        <button
+                          type="button"
+                          disabled={settingsBusy}
+                          onClick={() => {
+                            const stack = NICK_FONT_STACKS.find((x) => x.id === nickStudioFontId)?.stack ?? '';
+                            setLocalUserGlow(buildNickGlowJson({ fx: nickStudioFx, g1: nickStudioG1, g2: nickStudioG2, fontStack: stack }));
+                          }}
+                          className="ml-auto px-4 py-2 rounded-xl border border-[#00eeff]/35 text-[#00eeff] text-xs font-bold hover:bg-[#00eeff]/10 transition-colors disabled:opacity-40"
+                        >
+                          Zastosuj studio → nick
+                        </button>
+                      </div>
                     </div>
                     
                     <div className="mt-4 p-4 rounded-xl border border-white/[0.06] bg-black/40">
                       <span className="text-xs text-zinc-500 mb-2 block uppercase font-bold tracking-widest">Podgląd na czacie:</span>
-                      <span className="font-semibold text-[15px] tracking-wide" style={{ color: localUserColor, textShadow: localUserGlow !== 'none' ? localUserGlow : 'none' }}>
-                        {localUserName || 'Anonim'}
-                      </span>
+                      <NickLabel
+                        user={{ nickGlow: localUserGlow, nickColor: localUserColor, name: localUserName || 'Anonim' }}
+                        fallbackColor="#a1a1aa"
+                        className="font-semibold text-[15px] tracking-wide"
+                      />
                     </div>
                   </div>
 
@@ -2908,33 +3104,61 @@ export default function App() {
 
             {/* LISTA KANAŁÓW I KATEGORII */}
             {activeServer === '' ? (
-              <div className="flex-1 overflow-y-auto custom-scrollbar py-4 px-4 flex flex-col gap-2 relative">
+              <div className="flex-1 overflow-y-auto custom-scrollbar py-4 px-4 flex flex-col gap-2 relative min-h-0">
                 <div className="absolute inset-0 bg-[#00eeff]/[0.01] pointer-events-none rounded-xl"></div>
-                <div className="text-[10px] uppercase font-bold tracking-[0.2em] text-zinc-500 mb-2 px-2 flex items-center justify-between mt-2">
-                  <span>Wiadomości Bezpośrednie</span>
-                  <Plus size={14} className="hover:text-[#00eeff] cursor-pointer" title="Nowa wiadomość DM" />
+                <div className="text-[10px] uppercase font-bold tracking-[0.2em] text-zinc-500 mb-2 px-2 flex items-center justify-between mt-2 relative z-10">
+                  <span>Wiadomości bezpośrednie</span>
                 </div>
-                {/* Mock DMs */}
-                <button className="flex items-center gap-3 p-2 hover:bg-[#00eeff]/10 hover:border-[#00eeff]/20 rounded-xl border border-transparent transition-colors text-zinc-300 hover:text-white w-full text-left group">
-                  <div className="relative shrink-0">
-                    <div className="w-8 h-8 rounded-[10px] bg-black border border-white/[0.1] flex items-center justify-center text-xs font-bold text-white group-hover:border-[#00eeff]/30 transition-colors">AK</div>
-                    <div className="absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full bg-emerald-500 border-[3px] border-[#080808]"></div>
-                  </div>
-                  <div className="flex flex-col min-w-0 flex-1">
-                    <span className="text-sm font-semibold truncate text-zinc-200 group-hover:text-[#00eeff] transition-colors">Anna K.</span>
-                    <span className="text-[10px] text-zinc-500 truncate">Może jutro o 15:00?</span>
-                  </div>
-                </button>
-                <button className="flex items-center gap-3 p-2 hover:bg-[#00eeff]/10 hover:border-[#00eeff]/20 rounded-xl border border-transparent transition-colors text-zinc-300 hover:text-white w-full text-left group">
-                  <div className="relative shrink-0">
-                    <div className="w-8 h-8 rounded-[10px] bg-black border border-white/[0.1] flex items-center justify-center text-xs font-bold text-white group-hover:border-[#00eeff]/30 transition-colors">MT</div>
-                    <div className="absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full border-[3px] border-[#080808] bg-zinc-600"></div>
-                  </div>
-                  <div className="flex flex-col min-w-0 flex-1">
-                    <span className="text-sm font-semibold truncate text-zinc-200 group-hover:text-[#00eeff] transition-colors">Michał (AI Team)</span>
-                    <span className="text-[10px] text-zinc-500 truncate">Widziałeś nowe pull requesty?</span>
-                  </div>
-                </button>
+                {!API_BASE_URL ? (
+                  <p className="text-xs text-zinc-500 px-2 leading-relaxed relative z-10">
+                    Tryb lokalny — DM używa identyfikatora gościa; wiadomości zapisują się w tej przeglądarce.
+                  </p>
+                ) : !meUserId ? (
+                  <p className="text-xs text-zinc-500 px-2 leading-relaxed relative z-10">Zaloguj się, aby pisać z członkami zespołu.</p>
+                ) : workspaceMembers.filter((m) => m.id !== meUserId).length === 0 ? (
+                  <p className="text-xs text-zinc-500 px-2 relative z-10">Brak innych członków — dołącz do serwera, aby zobaczyć kontakty.</p>
+                ) : (
+                  workspaceMembers
+                    .filter((m) => m.id !== meUserId)
+                    .map((m) => {
+                      const key = dmThreadKey(myUserId, m.id);
+                      const last = (dmMessagesByThread[key] ?? []).slice(-1)[0];
+                      const active = dmPeerId === m.id;
+                      return (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => setDmPeerId(m.id)}
+                          className={`relative z-10 flex items-center gap-3 p-2 rounded-xl border transition-colors text-zinc-300 hover:text-white w-full text-left group ${
+                            active
+                              ? 'bg-[#00eeff]/12 border-[#00eeff]/25'
+                              : 'hover:bg-[#00eeff]/10 border-transparent hover:border-[#00eeff]/15'
+                          }`}
+                        >
+                          <div className="relative shrink-0">
+                            {m.avatarUrl?.trim() ? (
+                              <img src={m.avatarUrl} alt="" className="w-8 h-8 rounded-[10px] object-cover border border-white/[0.1] group-hover:border-[#00eeff]/30 transition-colors" />
+                            ) : (
+                              <div className="w-8 h-8 rounded-[10px] bg-black border border-white/[0.1] flex items-center justify-center text-xs font-bold text-white group-hover:border-[#00eeff]/30 transition-colors">
+                                {m.name.charAt(0)}
+                              </div>
+                            )}
+                            <div className="absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full bg-emerald-500 border-[3px] border-[#080808]" />
+                          </div>
+                          <div className="flex flex-col min-w-0 flex-1">
+                            <NickLabel
+                              user={m}
+                              fallbackColor="#e4e4e7"
+                              className="text-sm font-semibold truncate group-hover:text-[#00eeff] transition-colors"
+                            />
+                            <span className="text-[10px] text-zinc-500 truncate">
+                              {last ? last.content : 'Rozpocznij rozmowę…'}
+                            </span>
+                          </div>
+                        </button>
+                      );
+                    })
+                )}
               </div>
             ) : (
             <div className="flex-1 overflow-y-auto custom-scrollbar py-2 px-4 flex flex-col gap-6">
@@ -2989,7 +3213,11 @@ export default function App() {
                                     {sidebarVoiceVad && speakingPeers[uid] ? (
                                       <span className="w-1.5 h-1.5 rounded-full bg-[#00eeff] shadow-[0_0_6px_#00eeff] animate-pulse shrink-0" aria-hidden />
                                     ) : null}
-                                    {u.name}
+                                    <NickLabel
+                                      user={u}
+                                      fallbackColor={isMe ? '#00eeff' : '#a1a1aa'}
+                                      className="truncate font-medium"
+                                    />
                                   </span>
                                 </div>
                               );
@@ -3069,7 +3297,11 @@ export default function App() {
                                           {sidebarVoiceVad && speakingPeers[uid] ? (
                                             <span className="w-1.5 h-1.5 rounded-full bg-[#00eeff] shadow-[0_0_6px_#00eeff] animate-pulse shrink-0" aria-hidden />
                                           ) : null}
-                                          {u.name}
+                                          <NickLabel
+                                            user={u}
+                                            fallbackColor={isMe ? '#00eeff' : '#a1a1aa'}
+                                            className="truncate font-medium"
+                                          />
                                         </span>
                                       </div>
                                     );
@@ -3181,11 +3413,19 @@ export default function App() {
             <div className="h-16 border-t border-white/[0.04] bg-black/40 p-2 flex items-center z-50">
               <div onClick={() => setIsSettingsOpen(true)} className="flex items-center gap-2 flex-1 hover:bg-white/[0.05] p-1.5 rounded-lg cursor-pointer transition-colors">
                 <div className="relative">
-                  <div className="w-8 h-8 rounded-lg bg-black border border-white/[0.1] text-white flex items-center justify-center font-bold text-sm shadow-[0_0_15px_rgba(255,255,255,0.1)]">{localUserName.charAt(0)}</div>
+                  {localUserAvatar?.trim() ? (
+                    <img src={localUserAvatar} alt="" className="w-8 h-8 rounded-lg object-cover border border-white/[0.1] shadow-[0_0_15px_rgba(255,255,255,0.08)]" />
+                  ) : (
+                    <div className="w-8 h-8 rounded-lg bg-black border border-white/[0.1] text-white flex items-center justify-center font-bold text-sm shadow-[0_0_15px_rgba(255,255,255,0.1)]">{localUserName.charAt(0)}</div>
+                  )}
                   <div className="absolute -bottom-1 -right-1 w-3 h-3 bg-emerald-500 border-2 border-[#080808] rounded-full shadow-[0_0_10px_rgba(16,185,129,0.5)]"></div>
                 </div>
-                <div className="flex flex-col overflow-hidden">
-                  <span className="text-xs font-bold text-white truncate leading-tight">{localUserName}</span>
+                <div className="flex flex-col overflow-hidden min-w-0">
+                  <NickLabel
+                    user={{ name: localUserName, nickColor: localUserColor, nickGlow: localUserGlow }}
+                    fallbackColor="#fff"
+                    className="text-xs font-bold truncate leading-tight block"
+                  />
                   <span className="text-[10px] text-zinc-500 truncate leading-tight">{API_BASE_URL ? 'Zalogowany' : 'Ty (Gość)'}</span>
                 </div>
               </div>
@@ -3203,54 +3443,192 @@ export default function App() {
           }`}
         >
           {activeServer === '' ? (
-            <div className="flex-1 flex flex-col p-8 bg-[#0a0a0c] overflow-y-auto custom-scrollbar relative animate-in fade-in duration-300">
-               <div className="absolute inset-0 bg-gradient-to-b from-[#00eeff]/[0.08] to-transparent pointer-events-none opacity-40"></div>
-               <div className="max-w-5xl mx-auto w-full pt-10">
-                 <div className="flex items-center gap-4 mb-3">
-                   <div className="w-14 h-14 rounded-2xl bg-[#00eeff]/10 border border-[#00eeff]/20 flex items-center justify-center shadow-[0_0_20px_rgba(0,238,255,0.15)]"><Terminal size={26} className="text-[#00eeff]" /></div>
-                   <div>
-                     <h1 className="text-3xl font-bold text-white tracking-tight">Przegląd Systemu</h1>
-                     <p className="text-zinc-400 text-sm">Twój osobisty terminal i wiadomości prywatne</p>
-                   </div>
-                 </div>
-                 
-                 <div className="h-px w-full bg-gradient-to-r from-white/[0.1] to-transparent mb-10"></div>
-                 
-                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <div className="bg-[#0f0f12] border border-white/[0.06] p-6 rounded-3xl relative overflow-hidden group hover:border-white/[0.1] hover:bg-white/[0.02] transition-all">
-                      <div className="absolute -top-10 -right-10 w-40 h-40 bg-[#00eeff]/5 rounded-full blur-2xl group-hover:bg-[#00eeff]/10 transition-colors"></div>
-                      <div className="flex items-center gap-3 mb-6 relative z-10">
-                        <Coffee size={20} className="text-[#00eeff]" />
-                        <h2 className="text-lg font-bold text-white tracking-wide">Daily Sync</h2>
-                        <span className="ml-auto text-[10px] uppercase font-bold text-[#00eeff] bg-[#00eeff]/10 px-2 py-1 rounded-md">Za 22 minuty</span>
+            dmPeerId && myUserId ? (
+              <div className="flex-1 flex flex-col bg-[#0a0a0c] relative overflow-hidden min-h-0">
+                <div className="absolute inset-0 bg-gradient-to-b from-[#00eeff]/[0.06] to-transparent pointer-events-none opacity-50" />
+                {(() => {
+                  const dmPeer = workspaceMembers.find((m) => m.id === dmPeerId) ?? getUser(dmPeerId);
+                  const tKey = dmThreadKey(myUserId, dmPeerId);
+                  const dms = dmMessagesByThread[tKey] ?? [];
+                  return (
+                    <>
+                      <header className="shrink-0 h-16 flex items-center justify-between px-6 border-b border-white/[0.06] bg-[#0a0a0c]/90 backdrop-blur-md z-10">
+                        <div className="flex items-center gap-3 min-w-0">
+                          <button
+                            type="button"
+                            onClick={() => setDmPeerId(null)}
+                            className="text-xs text-zinc-500 hover:text-[#00eeff] font-semibold uppercase tracking-widest shrink-0"
+                          >
+                            ← Terminal
+                          </button>
+                          <div className="w-px h-6 bg-white/[0.08]" />
+                          {dmPeer.avatarUrl?.trim() ? (
+                            <img src={dmPeer.avatarUrl} alt="" className="w-9 h-9 rounded-xl object-cover border border-white/[0.08]" />
+                          ) : (
+                            <div className="w-9 h-9 rounded-xl bg-black border border-white/[0.08] flex items-center justify-center text-xs font-bold text-white">
+                              {dmPeer.name.charAt(0)}
+                            </div>
+                          )}
+                          <div className="min-w-0">
+                            <NickLabel user={dmPeer} fallbackColor="#f4f4f5" className="font-bold text-base truncate block" />
+                            <p className="text-[10px] text-zinc-500 uppercase tracking-widest">Wiadomość bezpośrednia</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            title="Rozmowa głosowa PV"
+                            onClick={() => setPvCall({ peerId: dmPeerId, status: 'ringing' })}
+                            className="p-2.5 rounded-xl text-zinc-400 hover:text-[#00eeff] hover:bg-[#00eeff]/10 border border-transparent hover:border-[#00eeff]/25 transition-all"
+                          >
+                            <Phone size={18} />
+                          </button>
+                          <button
+                            type="button"
+                            title="Rozmowa wideo PV"
+                            onClick={() => setPvCall({ peerId: dmPeerId, status: 'ringing' })}
+                            className="p-2.5 rounded-xl text-zinc-400 hover:text-[#00eeff] hover:bg-[#00eeff]/10 border border-transparent hover:border-[#00eeff]/25 transition-all"
+                          >
+                            <Video size={18} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setProfileCardUser(dmPeer)}
+                            className="p-2.5 rounded-xl text-zinc-400 hover:text-white hover:bg-white/[0.06] border border-white/[0.06] transition-all ml-1"
+                          >
+                            <User size={18} />
+                          </button>
+                        </div>
+                      </header>
+                      <div className="flex-1 overflow-y-auto custom-scrollbar px-6 py-6 relative z-10">
+                        <div className="max-w-3xl mx-auto w-full flex flex-col gap-3 pb-28">
+                          {dms.length === 0 ? (
+                            <div className="rounded-2xl border border-dashed border-white/[0.1] bg-black/30 p-8 text-center text-zinc-500 text-sm">
+                              Zacznij rozmowę z <span className="text-zinc-300 font-semibold">{dmPeer.name}</span>. Historia jest zapisana lokalnie w tej przeglądarce.
+                            </div>
+                          ) : (
+                            dms.map((row) => {
+                              const isMe = row.userId === myUserId;
+                              const u = getUser(row.userId);
+                              return (
+                                <div
+                                  key={row.id}
+                                  className={`flex gap-3 ${isMe ? 'flex-row-reverse' : ''}`}
+                                >
+                                  <div className="w-8 h-8 shrink-0 rounded-lg border border-white/[0.08] overflow-hidden bg-black flex items-center justify-center text-[10px] font-bold text-zinc-400">
+                                    {u.avatarUrl?.trim() ? (
+                                      <img src={u.avatarUrl} alt="" className="w-full h-full object-cover" />
+                                    ) : (
+                                      u.name.charAt(0)
+                                    )}
+                                  </div>
+                                  <div
+                                    className={`max-w-[min(85%,520px)] rounded-2xl px-4 py-2.5 text-sm leading-relaxed border ${
+                                      isMe
+                                        ? 'bg-[#00eeff]/15 border-[#00eeff]/25 text-zinc-100'
+                                        : 'bg-white/[0.04] border-white/[0.08] text-zinc-200'
+                                    }`}
+                                  >
+                                    {row.content}
+                                    <div className="text-[9px] text-zinc-500 mt-1.5 tabular-nums">{row.time}</div>
+                                  </div>
+                                </div>
+                              );
+                            })
+                          )}
+                        </div>
                       </div>
-                      <p className="text-sm text-zinc-400 relative z-10 leading-relaxed mb-6">Rozpoczyna się spotkanie w kanele głosowym <b>Wyspa Devcord</b> ze wszystkimi współpracownikami.</p>
-                      <button className="px-5 py-2 bg-black/50 text-[#00eeff] font-bold border border-[#00eeff]/30 rounded-xl text-sm transition-all hover:bg-[#00eeff]/10 hover:shadow-[0_0_15px_rgba(0,238,255,0.15)] relative z-10 w-max shadow-lg">
-                        Dołącz teraz
+                      <div className="shrink-0 absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-[#0a0a0c] via-[#0a0a0c] to-transparent z-20">
+                        <div className="max-w-3xl mx-auto flex gap-2 items-end bg-[#111]/95 border border-white/[0.08] rounded-2xl p-2 backdrop-blur-xl shadow-[0_20px_50px_rgba(0,0,0,0.6)]">
+                          <textarea
+                            value={dmInputValue}
+                            onChange={(e) => setDmInputValue(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && !e.shiftKey) {
+                                e.preventDefault();
+                                if (!dmInputValue.trim()) return;
+                                const row: DmRow = {
+                                  id: `dm_${Date.now()}`,
+                                  userId: myUserId,
+                                  time: new Date().toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }),
+                                  content: dmInputValue.trim(),
+                                };
+                                setDmMessagesByThread((prev) => ({
+                                  ...prev,
+                                  [tKey]: [...(prev[tKey] ?? []), row],
+                                }));
+                                setDmInputValue('');
+                              }
+                            }}
+                            placeholder={`Wiadomość do ${dmPeer.name}…`}
+                            rows={1}
+                            className="flex-1 bg-transparent text-zinc-100 placeholder-zinc-600 px-3 py-3 outline-none resize-none text-[15px] max-h-32 custom-scrollbar"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!dmInputValue.trim()) return;
+                              const row: DmRow = {
+                                id: `dm_${Date.now()}`,
+                                userId: myUserId,
+                                time: new Date().toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }),
+                                content: dmInputValue.trim(),
+                              };
+                              setDmMessagesByThread((prev) => ({
+                                ...prev,
+                                [tKey]: [...(prev[tKey] ?? []), row],
+                              }));
+                              setDmInputValue('');
+                            }}
+                            className="h-11 w-11 shrink-0 rounded-xl bg-[#00eeff] text-black flex items-center justify-center shadow-[0_0_20px_rgba(0,238,255,0.35)] disabled:opacity-40"
+                            disabled={!dmInputValue.trim()}
+                          >
+                            <ArrowUpRight size={20} />
+                          </button>
+                        </div>
+                      </div>
+                    </>
+                  );
+                })()}
+              </div>
+            ) : (
+              <div className="flex-1 flex flex-col p-6 md:p-10 bg-[#0a0a0c] overflow-y-auto custom-scrollbar relative animate-in fade-in duration-300">
+                <div className="absolute inset-0 bg-gradient-to-b from-[#00eeff]/[0.08] to-transparent pointer-events-none opacity-40" />
+                <div className="max-w-3xl mx-auto w-full pt-6 md:pt-10 relative z-10 space-y-8">
+                  <div className="flex items-start gap-4">
+                    <div className="w-14 h-14 rounded-2xl bg-[#00eeff]/10 border border-[#00eeff]/20 flex items-center justify-center shadow-[0_0_20px_rgba(0,238,255,0.15)] shrink-0">
+                      <Terminal size={26} className="text-[#00eeff]" />
+                    </div>
+                    <div>
+                      <h1 className="text-2xl md:text-3xl font-bold text-white tracking-tight">Terminal osobisty</h1>
+                      <p className="text-zinc-400 text-sm mt-1 leading-relaxed">
+                        Skrót do DM i szybkiego podglądu — wybierz rozmówę na liście po lewej albo przejdź do serwera z górnego menu.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="rounded-3xl border border-white/[0.08] bg-[#0f0f12] p-6 md:p-8 shadow-[0_0_40px_rgba(0,0,0,0.45)] ring-1 ring-[#00eeff]/10 space-y-4">
+                    <h2 className="text-sm font-bold text-[#00eeff] uppercase tracking-[0.2em]">Jak zacząć</h2>
+                    <ol className="list-decimal list-inside space-y-3 text-sm text-zinc-400 leading-relaxed">
+                      <li>Otwórz przestrzeń roboczą serwera (ikonka nad listą kanałów).</li>
+                      <li>Wróć tutaj — w sekcji „Wiadomości bezpośrednie” zobaczysz członków zespołu.</li>
+                      <li>
+                        Wiadomości PV są przechowywane lokalnie (ta przeglądarka). Połączenia głosowe PV używają tego samego stylu co reszta
+                        aplikacji; pełny most WebRTC dla DM wymaga osobnej usługi sygnalizacji na backendzie.
+                      </li>
+                    </ol>
+                    {servers.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setActiveServer(servers[0].id)}
+                        className="mt-4 px-5 py-2.5 rounded-xl bg-[#00eeff]/15 border border-[#00eeff]/30 text-[#00eeff] text-sm font-bold hover:bg-[#00eeff]/25 transition-colors"
+                      >
+                        Przejdź do ostatniego serwera
                       </button>
-                    </div>
-                    
-                    <div className="bg-[#0f0f12] border border-white/[0.06] p-6 rounded-3xl relative overflow-hidden group hover:border-white/[0.1] hover:bg-white/[0.02] transition-all">
-                      <div className="absolute -top-10 -right-10 w-40 h-40 bg-emerald-500/5 rounded-full blur-2xl group-hover:bg-emerald-500/10 transition-colors"></div>
-                      <div className="flex items-center gap-3 mb-6 relative z-10">
-                        <CheckSquare size={20} className="text-emerald-400" />
-                        <h2 className="text-lg font-bold text-white tracking-wide">Szybkie zadania</h2>
-                        <span className="ml-auto text-[10px] uppercase font-bold text-zinc-500 bg-white/[0.05] px-2 py-1 rounded-md">Globale</span>
-                      </div>
-                      <ul className="text-sm text-zinc-400 space-y-3 relative z-10">
-                        <li className="flex items-start gap-4 p-3 rounded-xl bg-black border border-white/[0.04] group-hover:border-white/[0.08] transition-colors">
-                          <div className="mt-1 flex items-center justify-center"><div className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.8)]"></div></div> 
-                          <span className="leading-tight text-zinc-300 font-medium tracking-wide">Przejrzeć pull-requesty z nowego brancha UI Settings</span>
-                        </li>
-                        <li className="flex items-start gap-4 p-3 rounded-xl bg-black border border-white/[0.04] group-hover:border-white/[0.08] transition-colors">
-                          <div className="mt-1 flex items-center justify-center"><div className="w-2 h-2 rounded-full bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.8)]"></div></div> 
-                          <span className="leading-tight text-zinc-300 font-medium tracking-wide">Aktualizacja bazy migracji 003_user_profiles.sql</span>
-                        </li>
-                      </ul>
-                    </div>
-                 </div>
-               </div>
-            </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )
           ) : API_BASE_URL && servers.length === 0 ? (
             <div className="flex-1 flex flex-col items-center justify-center p-10 text-center">
               <div className="w-20 h-20 rounded-3xl bg-[#00eeff]/10 border border-[#00eeff]/25 flex items-center justify-center mb-8">
@@ -3402,8 +3780,12 @@ export default function App() {
                                 </>
                               )
                             ) : (
-                              <div className="w-full h-full rounded-2xl overflow-hidden relative bg-[#121214] min-h-[200px] flex items-center justify-center">
+                              <div
+                                ref={remoteScreenHostRef}
+                                className="w-full h-full rounded-2xl overflow-hidden relative bg-[#121214] min-h-[200px] flex items-center justify-center group/fs"
+                              >
                                 {remoteScreenWatching ? (
+                                  <>
                                   <VideoPlayer
                                     stream={maximized.stream}
                                     volume={remoteScreenVolume}
@@ -3413,14 +3795,40 @@ export default function App() {
                                       e.preventDefault(); e.stopPropagation(); setScreenStreamContext({ x: e.clientX, y: e.clientY });
                                     }}
                                   />
+                                  <button
+                                    type="button"
+                                    title="Pełny ekran"
+                                    onClick={() => {
+                                      const n = remoteScreenHostRef.current;
+                                      if (!n) return;
+                                      void (document.fullscreenElement
+                                        ? document.exitFullscreen()
+                                        : n.requestFullscreen?.());
+                                    }}
+                                    className="absolute top-4 right-4 z-40 p-2.5 rounded-xl bg-black/70 border border-white/[0.12] text-white opacity-90 hover:opacity-100 hover:border-[#00eeff]/40 transition-all shadow-lg"
+                                  >
+                                    <Maximize2 size={18} />
+                                  </button>
+                                  </>
                                 ) : (
                                   <div className="absolute inset-0 flex flex-col items-center justify-center gap-6 p-8">
                                     <button onClick={() => setRemoteScreenWatching(true)} className="px-8 py-3.5 rounded-2xl bg-white/[0.08] hover:bg-white/[0.12] border border-white/[0.1] text-white text-sm font-bold tracking-wide transition-colors">Obejrzyj stream</button>
                                   </div>
                                 )}
-                                <div className="absolute bottom-4 left-4 flex items-center gap-2 px-3 py-1.5 rounded-xl bg-black/75 border border-white/[0.08] text-white text-xs font-semibold pointer-events-none">
+                                <div className="absolute bottom-4 left-4 flex items-center gap-2 px-3 py-1.5 rounded-xl bg-black/75 border border-white/[0.08] text-white text-xs font-semibold pointer-events-none max-w-[min(92%,20rem)] min-w-0">
                                   <Monitor size={14} className="text-[#00eeff] shrink-0" />
-                                  <span className="truncate max-w-[12rem]">{getUser(maximized.id).name}</span>
+                                  {maximized.isLocal ? (
+                                    <span className="truncate">{maximized.kind === 'camera' ? 'Kamera' : 'Twój ekran'}</span>
+                                  ) : (
+                                    <>
+                                      <UserAvatarBubble user={getUser(maximized.id)} className="w-7 h-7 rounded-lg" />
+                                      <NickLabel
+                                        user={getUser(maximized.id)}
+                                        fallbackColor="#fafafa"
+                                        className="truncate text-xs font-semibold min-w-0"
+                                      />
+                                    </>
+                                  )}
                                 </div>
                                 {remoteScreenWatching && (
                                   <div className="absolute top-4 left-4 px-3 py-1.5 bg-black/60 backdrop-blur-md rounded-lg text-[10px] uppercase tracking-widest font-black text-white border border-white/[0.12] flex items-center gap-2 pointer-events-none">
@@ -3437,10 +3845,23 @@ export default function App() {
                               {others.map(s => (
                                 <div key={s.id} onClick={() => setMaximizedScreenId(s.id)} className="w-64 aspect-video rounded-2xl border border-white/[0.1] bg-[#0a0a0c] overflow-hidden cursor-pointer hover:border-[#00eeff]/50 hover:shadow-[0_0_20px_rgba(0,238,255,0.15)] transition-all relative group">
                                   <VideoPlayer stream={s.stream} isLocal={s.isLocal} className="w-full h-full object-cover opacity-60 group-hover:opacity-100 transition-opacity" />
-                                  <div className="absolute bottom-2 left-2 flex items-center gap-1.5 px-2 py-1 rounded-lg bg-black/80 text-white text-[10px] font-semibold border border-white/[0.05]">
-                                    {s.kind === 'camera' ? <Video size={10} className="text-emerald-400" /> : <Monitor size={10} className="text-[#00eeff]" />}
-                                    <span className="truncate max-w-[100px]">
-                                      {s.kind === 'camera' && s.isLocal ? 'Kamera' : s.isLocal ? 'Twój ekran' : getUser(s.id).name}
+                                  <div className="absolute bottom-2 left-2 flex items-center gap-1.5 px-2 py-1 rounded-lg bg-black/80 text-white text-[10px] font-semibold border border-white/[0.05] min-w-0 max-w-[95%]">
+                                    {s.kind === 'camera' ? <Video size={10} className="text-emerald-400 shrink-0" /> : <Monitor size={10} className="text-[#00eeff] shrink-0" />}
+                                    <span className="truncate flex items-center gap-1 min-w-0">
+                                      {s.kind === 'camera' && s.isLocal ? (
+                                        'Kamera'
+                                      ) : s.isLocal ? (
+                                        'Twój ekran'
+                                      ) : (
+                                        <>
+                                          <UserAvatarBubble user={getUser(s.id)} className="w-4 h-4 rounded-md" />
+                                          <NickLabel
+                                            user={getUser(s.id)}
+                                            fallbackColor="#fafafa"
+                                            className="truncate font-semibold text-[10px] min-w-0"
+                                          />
+                                        </>
+                                      )}
                                     </span>
                                   </div>
                                 </div>
@@ -3478,7 +3899,11 @@ export default function App() {
                           >
                             <div className="relative shrink-0">
                               <div className={`absolute inset-0 rounded-full blur-md transition-all duration-500 ${isSpeaking ? 'bg-[#00eeff] opacity-50 animate-pulse' : 'opacity-0'}`}></div>
-                              <div className={`w-14 h-14 relative z-10 rounded-full flex items-center justify-center text-xl font-black transition-colors duration-500 overflow-hidden ${isSpeaking ? 'bg-[#000] border-2 border-[#00eeff] text-[#00eeff]' : 'bg-[#151515] border border-white/[0.1] text-zinc-400'}`}>
+                              <div
+                                className={`w-14 h-14 relative z-10 rounded-full flex items-center justify-center text-xl font-black transition-colors duration-500 overflow-hidden shrink-0 ${
+                                  isSpeaking ? 'bg-[#000] border-2 border-[#00eeff] text-[#00eeff]' : 'bg-[#151515] border border-white/[0.1] text-zinc-400'
+                                }`}
+                              >
                                 {u.avatarUrl?.trim() ? (
                                   <img src={u.avatarUrl} alt="" className="w-full h-full object-cover" />
                                 ) : (
@@ -3495,7 +3920,15 @@ export default function App() {
                               )}
                             </div>
                             <div className="flex flex-col flex-1 min-w-0 justify-center">
-                              <span className={`text-[15px] font-bold truncate transition-colors duration-300 ${isSpeaking ? 'text-[#00eeff] drop-shadow-[0_0_8px_rgba(0,238,255,0.4)]' : 'text-zinc-200'}`}>{u.name}</span>
+                              <span
+                                className={`text-[15px] font-bold truncate block transition-colors duration-300 ${isSpeaking ? 'drop-shadow-[0_0_8px_rgba(0,238,255,0.4)]' : ''}`}
+                              >
+                                <NickLabel
+                                  user={u}
+                                  fallbackColor={isSpeaking ? '#00eeff' : '#e4e4e7'}
+                                  className="font-bold truncate"
+                                />
+                              </span>
                               <span className="text-[10px] text-zinc-500 uppercase tracking-widest font-semibold flex items-center gap-1 mt-0.5">
                                 {isScreenSharing ? <><Monitor size={10} className="text-[#00eeff]" /> Ekran · </> : null}
                                 {statusLine}
@@ -3566,7 +3999,10 @@ export default function App() {
                               return (
                                 <li key={uid} className="flex flex-col gap-1.5 rounded-xl bg-white/[0.03] border border-white/[0.06] px-3 py-2">
                                   <div className="flex items-center justify-between gap-2 min-w-0">
-                                    <span className="text-sm font-semibold text-zinc-200 truncate">{u.name}</span>
+                                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                                      <UserAvatarBubble user={u} className="w-8 h-8 rounded-full" />
+                                      <NickLabel user={u} fallbackColor="#e4e4e7" className="text-sm font-semibold truncate min-w-0" />
+                                    </div>
                                     <button
                                       type="button"
                                       title={outMuted ? 'Włącz odsłuch' : 'Wycisz odsłuch'}
@@ -3580,21 +4016,26 @@ export default function App() {
                                       {outMuted ? <VolumeX size={18} /> : <Volume2 size={18} />}
                                     </button>
                                   </div>
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-[10px] text-zinc-500 tabular-nums w-9 text-right shrink-0">{Math.round(vol * 100)}%</span>
-                                    <input
-                                      type="range"
-                                      min="0.25"
-                                      max="4"
-                                      step="0.05"
-                                      value={vol}
-                                      onChange={(e) => {
-                                        const v = parseFloat(e.target.value);
-                                        setUserVolumes((prev) => ({ ...prev, [uid]: v }));
-                                        setUserVolume(uid, v);
-                                      }}
-                                      className="flex-1 min-w-0 h-1.5 rounded-full appearance-none bg-white/[0.1] accent-[#00eeff]"
-                                    />
+                                  <div className="flex flex-col gap-1">
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-[9px] text-zinc-400 tabular-nums min-w-[9rem] text-right shrink-0 leading-tight">
+                                        {voiceVolumeUiLabel(vol)}
+                                      </span>
+                                      <input
+                                        type="range"
+                                        min="0.25"
+                                        max="4"
+                                        step="0.05"
+                                        value={vol}
+                                        onChange={(e) => {
+                                          const v = parseFloat(e.target.value);
+                                          setUserVolumes((prev) => ({ ...prev, [uid]: v }));
+                                          setUserVolume(uid, v);
+                                        }}
+                                        className="flex-1 min-w-0 h-1.5 rounded-full appearance-none bg-white/[0.1] accent-[#00eeff]"
+                                      />
+                                    </div>
+                                    <span className="text-[9px] text-zinc-600">100% = poziom bazowy, powyżej = boost.</span>
                                   </div>
                                 </li>
                               );
@@ -3683,7 +4124,13 @@ export default function App() {
                               onContextMenu={(e) => { if(!isAI) handleContextMenu(e, 'user', user); }}
                               className={`w-10 h-10 rounded-xl border flex items-center justify-center font-bold text-sm shadow-inner overflow-hidden transition-opacity ${!isAI ? 'cursor-pointer hover:opacity-80' : ''} ${isAI ? 'bg-[#00eeff]/20 border-[#00eeff]/50 text-[#00eeff]' : 'bg-black border-white/[0.08] text-zinc-300'}`}
                             >
-                              {isAI ? <Sparkles size={18}/> : user.name.charAt(0)}
+                              {isAI ? (
+                                <Sparkles size={18}/>
+                              ) : user.avatarUrl?.trim() ? (
+                                <img src={user.avatarUrl} alt="" className="w-full h-full object-cover" />
+                              ) : (
+                                user.name.charAt(0)
+                              )}
                             </div>
                           ) : (
                             <div className="w-10 text-[9px] text-zinc-600 opacity-0 group-hover:opacity-100 text-center leading-[24px]">{msg.time}</div>
@@ -3693,12 +4140,24 @@ export default function App() {
                         <div className="flex-1 flex flex-col min-w-0">
                           {showHeader && (
                             <div className="flex items-baseline gap-2 mb-1.5">
-                              <span 
-                                onContextMenu={(e) => { if(!isAI) handleContextMenu(e, 'user', user); }}
-                                className={`font-semibold text-[14px] tracking-wide ${!isAI ? 'cursor-pointer hover:underline' : ''}`} 
-                                style={{ color: isAI ? '#00eeff' : role.color, textShadow: isAI || role.glow !== 'none' ? `0 0 15px ${isAI ? '#00eeff' : role.color}60` : 'none' }}
+                              <span
+                                onContextMenu={(e) => {
+                                  if (!isAI) handleContextMenu(e, 'user', user);
+                                }}
+                                className={`font-semibold text-[14px] tracking-wide ${!isAI ? 'cursor-pointer hover:underline' : ''}`}
                               >
-                                {user.name}
+                                {isAI ? (
+                                  <span
+                                    style={{
+                                      color: '#00eeff',
+                                      textShadow: '0 0 15px #00eeff60',
+                                    }}
+                                  >
+                                    {user.name}
+                                  </span>
+                                ) : (
+                                  <NickLabel user={user} fallbackColor={role.color} />
+                                )}
                               </span>
                               {!isAI && role.name !== 'Member' && role.id !== 'r4' && (
                                 <div className="flex items-center gap-1.5 px-1.5 py-[2px] rounded text-[9px] font-bold uppercase tracking-wider border shadow-sm backdrop-blur-sm" style={{ backgroundColor: role.bg, borderColor: role.border, color: role.color, boxShadow: role.glow !== 'none' ? `0 0 8px ${role.bg}` : 'none' }}>
@@ -3836,7 +4295,10 @@ export default function App() {
                                 return (
                                   <li key={uid} className="flex flex-col gap-1 rounded-lg bg-white/[0.04] border border-white/[0.06] px-2 py-1.5">
                                     <div className="flex items-center justify-between gap-1 min-w-0">
-                                      <span className="text-xs font-semibold text-zinc-200 truncate">{u.name}</span>
+                                      <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                                        <UserAvatarBubble user={u} className="w-6 h-6 rounded-full" />
+                                        <NickLabel user={u} fallbackColor="#e4e4e7" className="text-xs font-semibold truncate min-w-0" />
+                                      </div>
                                       <button
                                         type="button"
                                         onClick={() => {
@@ -3849,21 +4311,25 @@ export default function App() {
                                         {outMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}
                                       </button>
                                     </div>
-                                    <div className="flex items-center gap-1.5">
-                                      <span className="text-[9px] text-zinc-500 tabular-nums w-8 text-right shrink-0">{Math.round(vol * 100)}%</span>
-                                      <input
-                                        type="range"
-                                        min="0.25"
-                                        max="4"
-                                        step="0.05"
-                                        value={vol}
-                                        onChange={(e) => {
-                                          const v = parseFloat(e.target.value);
-                                          setUserVolumes((prev) => ({ ...prev, [uid]: v }));
-                                          setUserVolume(uid, v);
-                                        }}
-                                        className="flex-1 min-w-0 h-1 rounded-full appearance-none bg-white/[0.1] accent-[#00eeff]"
-                                      />
+                                    <div className="flex flex-col gap-0.5">
+                                      <div className="flex items-center gap-1.5">
+                                        <span className="text-[8px] text-zinc-400 tabular-nums min-w-[8rem] text-right shrink-0 leading-tight">
+                                          {voiceVolumeUiLabel(vol)}
+                                        </span>
+                                        <input
+                                          type="range"
+                                          min="0.25"
+                                          max="4"
+                                          step="0.05"
+                                          value={vol}
+                                          onChange={(e) => {
+                                            const v = parseFloat(e.target.value);
+                                            setUserVolumes((prev) => ({ ...prev, [uid]: v }));
+                                            setUserVolume(uid, v);
+                                          }}
+                                          className="flex-1 min-w-0 h-1 rounded-full appearance-none bg-white/[0.1] accent-[#00eeff]"
+                                        />
+                                      </div>
                                     </div>
                                   </li>
                                 );
@@ -3927,10 +4393,14 @@ export default function App() {
                 </div>
                 <div className="flex-1 overflow-y-auto custom-scrollbar flex flex-col relative">
                   <div className="p-5 border-b border-white/[0.02] bg-white/[0.01]">
-                    <div className="flex items-center gap-2 mb-3">
-                      <div className="w-6 h-6 rounded-md bg-black border border-white/[0.1] flex items-center justify-center text-[10px] font-bold text-zinc-300">{getUser(activeThread.userId).name.charAt(0)}</div>
-                      <span className="text-xs font-semibold text-white">{getUser(activeThread.userId).name}</span>
-                      <span className="text-[10px] text-zinc-600">{activeThread.time}</span>
+                    <div className="flex items-center gap-2 mb-3 min-w-0">
+                      <UserAvatarBubble user={getUser(activeThread.userId)} className="w-6 h-6 rounded-md" />
+                      <NickLabel
+                        user={getUser(activeThread.userId)}
+                        fallbackColor="#fafafa"
+                        className="text-xs font-semibold truncate min-w-0"
+                      />
+                      <span className="text-[10px] text-zinc-600 shrink-0">{activeThread.time}</span>
                     </div>
                     <div className="text-[13px] text-zinc-300 leading-relaxed">{renderMessageContent(activeThread.content)}</div>
                   </div>
@@ -3983,10 +4453,14 @@ export default function App() {
                                   style={{ '--hover-bg': role.bg, '--hover-border': role.border } as any}
                                 >
                                   <div className="relative">
-                                    <div className="w-8 h-8 rounded-xl bg-black border border-white/[0.08] flex items-center justify-center text-xs font-bold transition-all duration-300" style={{ color: role.color }}>{user.name.charAt(0)}</div>
+                                    {user.avatarUrl?.trim() ? (
+                                      <img src={user.avatarUrl} alt="" className="w-8 h-8 rounded-xl object-cover border border-white/[0.08]" />
+                                    ) : (
+                                      <div className="w-8 h-8 rounded-xl bg-black border border-white/[0.08] flex items-center justify-center text-xs font-bold transition-all duration-300" style={{ color: role.color }}>{user.name.charAt(0)}</div>
+                                    )}
                                     <div className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-[#0a0a0c] ${user.status === 'online' ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]' : user.status === 'idle' ? 'bg-amber-400' : user.status === 'dnd' ? 'bg-red-500' : 'bg-zinc-600'}`}></div>
                                   </div>
-                                  <span className="text-[13px] font-semibold truncate transition-all tracking-wide" style={{ color: role.color, textShadow: role.glow !== 'none' ? `0 0 12px ${role.color}40` : 'none' }}>{user.name}</span>
+                                  <NickLabel user={user} fallbackColor={role.color} className="text-[13px] font-semibold truncate tracking-wide" />
                                 </div>
                               ))}
                             </div>
@@ -4016,10 +4490,11 @@ export default function App() {
                             </div>
                             <div className="flex flex-col flex-1 min-w-0">
                               <span className="text-[13px] font-semibold text-zinc-200 truncate group-hover:text-white transition-colors">{file.name}</span>
-                              <div className="flex items-center gap-2 mt-1 text-[10px] text-zinc-500">
+                              <div className="flex items-center gap-2 mt-1 text-[10px] text-zinc-500 min-w-0">
                                 <span>{file.size}</span>
-                                <span className="w-1 h-1 bg-zinc-700 rounded-full"></span>
-                                <span className="truncate">{uploader.name}</span>
+                                <span className="w-1 h-1 bg-zinc-700 rounded-full shrink-0" />
+                                <UserAvatarBubble user={uploader} className="w-4 h-4 rounded-md shrink-0" />
+                                <NickLabel user={uploader} fallbackColor="#a1a1aa" className="truncate min-w-0 text-[10px]" />
                               </div>
                             </div>
                             <button className="opacity-0 group-hover:opacity-100 p-1.5 text-zinc-400 hover:text-[#00eeff] transition-all"><Download size={14}/></button>
@@ -4054,7 +4529,11 @@ export default function App() {
                                 <span className={`text-sm font-medium leading-tight mb-2 transition-colors ${task.completed ? 'text-emerald-500/70 line-through' : 'text-zinc-200 group-hover:text-white'}`}>{task.title}</span>
                                 <div className="flex items-center gap-2 text-[10px]">
                                   {task.sourceMsgId && <span className="px-1.5 py-0.5 rounded bg-[#00eeff]/10 text-[#00eeff] font-semibold border border-[#00eeff]/20">Z czatu</span>}
-                                  <span className="flex items-center gap-1 text-zinc-500 bg-white/[0.05] px-1.5 py-0.5 rounded border border-white/[0.05]"><User size={10}/> {assignee.name}</span>
+                                  <span className="flex items-center gap-1.5 text-zinc-500 bg-white/[0.05] px-1.5 py-0.5 rounded border border-white/[0.05] min-w-0 max-w-full">
+                                    <User size={10} className="shrink-0 opacity-70" />
+                                    <UserAvatarBubble user={assignee} className="w-4 h-4 rounded-md shrink-0" />
+                                    <NickLabel user={assignee} fallbackColor="#a1a1aa" className="truncate text-[10px] min-w-0" />
+                                  </span>
                                 </div>
                               </div>
                             </div>
@@ -4070,6 +4549,132 @@ export default function App() {
           </aside>
         )}
       </div>
+
+      {profileCardUser && (
+        <div
+          className="fixed inset-0 z-[460] flex items-center justify-center p-4 bg-black/75 backdrop-blur-md"
+          role="presentation"
+          onClick={() => setProfileCardUser(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-3xl border border-white/[0.1] bg-[#0c0c0e] shadow-[0_0_80px_rgba(0,0,0,1),0_0_40px_rgba(0,238,255,0.1)] ring-1 ring-[#00eeff]/15 overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+          >
+            <div className="h-28 bg-gradient-to-r from-[#00eeff]/25 via-transparent to-fuchsia-500/20 relative">
+              <button
+                type="button"
+                aria-label="Zamknij"
+                onClick={() => setProfileCardUser(null)}
+                className="absolute top-3 right-3 p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-white/[0.08] transition-colors"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="px-6 pb-6 -mt-10 flex flex-col items-center text-center">
+              {profileCardUser.avatarUrl?.trim() ? (
+                <img
+                  src={profileCardUser.avatarUrl}
+                  alt=""
+                  className="w-24 h-24 rounded-2xl object-cover border-4 border-[#0c0c0e] shadow-xl"
+                />
+              ) : (
+                <div className="w-24 h-24 rounded-2xl border-4 border-[#0c0c0e] bg-black flex items-center justify-center text-3xl font-black text-zinc-200 shadow-xl">
+                  {profileCardUser.name.charAt(0)}
+                </div>
+              )}
+              <NickLabel
+                user={profileCardUser}
+                fallbackColor="#fafafa"
+                className="text-xl font-bold mt-4 block"
+              />
+              <p className="text-[10px] text-zinc-500 uppercase tracking-[0.25em] mt-2">Profil</p>
+              <div className="flex flex-wrap gap-2 justify-center mt-6 w-full">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveServer('');
+                    setDmPeerId(profileCardUser.id);
+                    setProfileCardUser(null);
+                  }}
+                  className="flex-1 min-w-[120px] py-2.5 rounded-xl bg-[#00eeff] text-black text-sm font-bold shadow-[0_0_20px_rgba(0,238,255,0.3)]"
+                >
+                  Wiadomość
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPvCall({ peerId: profileCardUser.id, status: 'ringing' });
+                    setProfileCardUser(null);
+                  }}
+                  className="flex-1 min-w-[120px] py-2.5 rounded-xl border border-white/[0.12] text-sm font-semibold text-zinc-200 hover:border-[#00eeff]/35 hover:text-[#00eeff] transition-colors"
+                >
+                  Zadzwoń
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pvCall && (
+        <div
+          className="fixed inset-0 z-[470] flex items-center justify-center p-4 bg-black/85 backdrop-blur-lg"
+          role="presentation"
+          onClick={() => setPvCall(null)}
+        >
+          <div
+            className="w-full max-w-lg rounded-3xl border border-[#00eeff]/20 bg-[#0a0a0c] p-8 shadow-[0_0_60px_rgba(0,238,255,0.12)]"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+          >
+            {(() => {
+              const peer = workspaceMembers.find((m) => m.id === pvCall.peerId) ?? getUser(pvCall.peerId);
+              return (
+                <>
+                  <div className="flex flex-col items-center text-center gap-2">
+                    <div className="w-20 h-20 rounded-full bg-[#00eeff]/10 border border-[#00eeff]/30 flex items-center justify-center text-2xl font-bold text-[#00eeff] animate-pulse">
+                      {peer.avatarUrl?.trim() ? (
+                        <img src={peer.avatarUrl} alt="" className="w-full h-full rounded-full object-cover" />
+                      ) : (
+                        peer.name.charAt(0)
+                      )}
+                    </div>
+                    <NickLabel user={peer} fallbackColor="#fff" className="text-lg font-bold" />
+                    <p className="text-sm text-zinc-500">
+                      {pvCall.status === 'ringing' ? 'Łączenie (PV)…' : 'Połączono (lokalny interfejs UI)'}
+                    </p>
+                    <p className="text-xs text-zinc-600 leading-relaxed max-w-sm mt-2">
+                      Pełny przekaz audio/wideo między użytkownikami wymaga sygnalizacji na serwerze. Tutaj masz spójny z Devcord_ ekran rozmowy; backend PV można dołożyć pod ten sam motyw.
+                    </p>
+                  </div>
+                  <div className="flex justify-center gap-3 mt-8">
+                    <button
+                      type="button"
+                      onClick={() => setPvCall(null)}
+                      className="px-6 py-3 rounded-full bg-red-500/20 text-red-400 border border-red-500/40 text-sm font-bold hover:bg-red-500/30 transition-colors"
+                    >
+                      Rozłącz
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPvCall((c) => (c ? { ...c, status: 'connected' } : c))}
+                      className={`px-6 py-3 rounded-full text-sm font-bold border transition-colors ${
+                        pvCall.status === 'connected'
+                          ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
+                          : 'bg-[#00eeff]/15 text-[#00eeff] border-[#00eeff]/35 hover:bg-[#00eeff]/25'
+                      }`}
+                    >
+                      {pvCall.status === 'connected' ? 'Aktywne' : 'Symuluj odebranie'}
+                    </button>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

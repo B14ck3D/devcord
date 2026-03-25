@@ -121,6 +121,10 @@ export function useVoiceRoom(opts: {
   const iceQueuesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   const remoteAudioCombinedRef = useRef<Map<string, MediaStream>>(new Map());
   const audioElsRef = useRef(new Map<string, HTMLAudioElement>());
+  /** GainNode: przy >100% to „boost” — element audio w przeglądarce i tak ma max. głośność 1. */
+  const remoteAudioGraphRef = useRef(
+    new Map<string, { ctx: AudioContext; gain: GainNode; src: MediaElementAudioSourceNode }>(),
+  );
   const remoteVadStopRef = useRef(new Map<string, () => void>());
   const remoteVolRef = useRef(new Map<string, number>());
   const remoteMuteRef = useRef(new Map<string, boolean>());
@@ -152,6 +156,17 @@ export function useVoiceRoom(opts: {
   const disposeRemotePlayback = useCallback((peerId: string) => {
     remoteVadStopRef.current.get(peerId)?.();
     remoteVadStopRef.current.delete(peerId);
+    const graph = remoteAudioGraphRef.current.get(peerId);
+    if (graph) {
+      try {
+        graph.src.disconnect();
+        graph.gain.disconnect();
+        void graph.ctx.close();
+      } catch {
+        /* ignore */
+      }
+      remoteAudioGraphRef.current.delete(peerId);
+    }
     const el = audioElsRef.current.get(peerId);
     if (el) {
       el.srcObject = null;
@@ -172,10 +187,21 @@ export function useVoiceRoom(opts: {
       el.autoplay = true;
       el.setAttribute('playsinline', '');
       el.srcObject = combined;
-      el.volume = Math.min(1, Math.max(0, remoteVolRef.current.get(peerId) ?? 1));
+      el.volume = 1;
       el.muted = localDeafenedRef.current || !!remoteMuteRef.current.get(peerId);
       document.body.appendChild(el);
       audioElsRef.current.set(peerId, el);
+      const AC =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const ctx = new AC();
+      void ctx.resume().catch(() => {});
+      const source = ctx.createMediaElementSource(el);
+      const gainNode = ctx.createGain();
+      const g = remoteVolRef.current.get(peerId) ?? 1;
+      gainNode.gain.value = Math.min(4, Math.max(0, g));
+      source.connect(gainNode).connect(ctx.destination);
+      remoteAudioGraphRef.current.set(peerId, { ctx, gain: gainNode, src: source });
       void el.play().catch(() => {});
       const stopVad = createSpeakingLevelMonitor(
         combined,
@@ -192,16 +218,31 @@ export function useVoiceRoom(opts: {
     for (const peerId of audioElsRef.current.keys()) {
       const el = audioElsRef.current.get(peerId);
       if (!el) continue;
-      el.volume = Math.min(1, Math.max(0, remoteVolRef.current.get(peerId) ?? 1));
+      const graph = remoteAudioGraphRef.current.get(peerId);
+      const g = remoteVolRef.current.get(peerId) ?? 1;
+      if (graph) {
+        graph.gain.gain.value = Math.min(4, Math.max(0, g));
+      } else {
+        el.volume = Math.min(1, Math.max(0, g));
+      }
       el.muted = localDeafenedRef.current || !!remoteMuteRef.current.get(peerId);
     }
   }, []);
 
   const setUserVolume = useCallback((peerId: string, linearGain: number) => {
     remoteVolRef.current.set(peerId, linearGain);
+    const g = Math.min(4, Math.max(0, linearGain));
+    const graph = remoteAudioGraphRef.current.get(peerId);
+    if (graph) {
+      graph.gain.gain.value = g;
+    } else {
+      const el = audioElsRef.current.get(peerId);
+      if (el) {
+        el.volume = Math.min(1, g);
+      }
+    }
     const el = audioElsRef.current.get(peerId);
     if (el) {
-      el.volume = Math.min(1, Math.max(0, linearGain));
       el.muted = localDeafenedRef.current || !!remoteMuteRef.current.get(peerId);
     }
   }, []);
@@ -211,7 +252,13 @@ export function useVoiceRoom(opts: {
     const el = audioElsRef.current.get(peerId);
     if (el) {
       el.muted = localDeafenedRef.current || muted;
-      el.volume = Math.min(1, Math.max(0, remoteVolRef.current.get(peerId) ?? 1));
+      const g = remoteVolRef.current.get(peerId) ?? 1;
+      const graph = remoteAudioGraphRef.current.get(peerId);
+      if (graph) {
+        graph.gain.gain.value = Math.min(4, Math.max(0, g));
+      } else {
+        el.volume = Math.min(1, Math.max(0, g));
+      }
     }
   }, []);
 

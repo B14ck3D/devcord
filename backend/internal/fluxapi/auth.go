@@ -444,14 +444,32 @@ func (a *App) handleUpdateMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	payload, _ := json.Marshal(map[string]interface{}{
+	payload := map[string]interface{}{
 		"type": "user_updated",
 		"payload": map[string]interface{}{
 			"user_id": strconv.FormatInt(uid, 10),
 		},
-	})
+	}
+	var displayName string
+	var avatarURL, nickColor, nickGlow *string
+	if err := a.pool.QueryRow(ctx,
+		`SELECT COALESCE(display_name, ''), avatar_url, nick_color, nick_glow FROM users WHERE id = $1`, uid,
+	).Scan(&displayName, &avatarURL, &nickColor, &nickGlow); err == nil {
+		pl := payload["payload"].(map[string]interface{})
+		pl["name"] = displayName
+		if avatarURL != nil {
+			pl["avatar_url"] = *avatarURL
+		}
+		if nickColor != nil {
+			pl["nick_color"] = *nickColor
+		}
+		if nickGlow != nil {
+			pl["nick_glow"] = *nickGlow
+		}
+	}
+	raw, _ := json.Marshal(payload)
 	if a.chathub != nil {
-		a.chathub.BroadcastGlobal(payload)
+		a.chathub.BroadcastGlobal(raw)
 	}
 
 	jsonWrite(w, http.StatusOK, map[string]string{"status": "ok"})

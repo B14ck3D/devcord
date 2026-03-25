@@ -7,6 +7,14 @@ function chatWsUrl(apiBase: string, token: string): string {
   return `${wsProto}//${u.host}${u.pathname}/ws/chat?token=${encodeURIComponent(token)}`;
 }
 
+export type ChatUserUpdatedPayload = {
+  user_id: string;
+  name?: string;
+  avatar_url?: string;
+  nick_color?: string;
+  nick_glow?: string;
+};
+
 export function useChatSocket(opts: {
   apiBase: string;
   token: string | null;
@@ -20,14 +28,17 @@ export function useChatSocket(opts: {
     isEdited?: boolean;
   }) => void;
   onTyping: (ev: { channelId: string; userId: string; typing: boolean }) => void;
+  onUserUpdated?: (payload: ChatUserUpdatedPayload) => void;
 }) {
-  const { apiBase, token, channelId, onMessage, onTyping } = opts;
+  const { apiBase, token, channelId, onMessage, onTyping, onUserUpdated } = opts;
   const wsRef = useRef<WebSocket | null>(null);
   const chRef = useRef<string | null>(null);
   const onMessageRef = useRef(onMessage);
   const onTypingRef = useRef(onTyping);
+  const onUserUpdatedRef = useRef(onUserUpdated);
   onMessageRef.current = onMessage;
   onTypingRef.current = onTyping;
+  onUserUpdatedRef.current = onUserUpdated;
 
   useEffect(() => {
     if (!apiBase || !token) return;
@@ -52,6 +63,18 @@ export function useChatSocket(opts: {
             channelId: String(d.payload.channel_id ?? ''),
             userId: String(d.payload.user_id),
             typing: !!d.payload.typing,
+          });
+        }
+        if (d.type === 'user_updated' && d.payload && onUserUpdatedRef.current) {
+          const p = d.payload as Record<string, unknown>;
+          const uid = String(p.user_id ?? '');
+          if (!uid) return;
+          onUserUpdatedRef.current({
+            user_id: uid,
+            name: typeof p.name === 'string' ? p.name : undefined,
+            avatar_url: typeof p.avatar_url === 'string' ? p.avatar_url : undefined,
+            nick_color: typeof p.nick_color === 'string' ? p.nick_color : undefined,
+            nick_glow: typeof p.nick_glow === 'string' ? p.nick_glow : undefined,
           });
         }
       } catch {
