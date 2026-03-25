@@ -18,7 +18,7 @@ import {
   ListTodo, Bold, Italic, Code as CodeIcon, Link, FileText, Image as ImageIcon,
   Command as CmdIcon, User, Moon, LogOut, 
   X, MicOff, PhoneOff, Palette, BellRing, MessageSquareShare,
-  UploadCloud, Copy, Smile, MonitorUp, Monitor, Trash2, Edit2, MoreVertical, CheckSquare, Square, Download, FileAudio, FileArchive, Eye, UserCheck, UserMinus, BellOff, LogIn, Server, Link2, CopyPlus, ChevronDown, FolderPlus, Pin, SlidersHorizontal, VolumeX, Wifi
+  UploadCloud, Copy, Smile, MonitorUp, Monitor, Trash2, Edit2, MoreVertical, CheckSquare, Square, Download, FileAudio, FileArchive, Eye, UserCheck, UserMinus, BellOff, LogIn, Server, Link2, CopyPlus, ChevronDown, FolderPlus, Pin, SlidersHorizontal, VolumeX, Wifi, MoreHorizontal, StickyNote, ExternalLink, Globe
 } from 'lucide-react';
 
 // ============================================================================
@@ -66,6 +66,12 @@ function writeChannelsPath(sid: string, cid: string) {
 function mediaStreamHasLiveVideo(ms: MediaStream | null | undefined): boolean {
   if (!ms) return false;
   return ms.getVideoTracks().some((t) => t.readyState === 'live');
+}
+
+/** Klucz do wymuszenia odmontowania `<video>` przy zmianie / zakończeniu ścieżek (unfreeze ostatniej klatki). */
+function remoteLiveVideoKey(peerId: string, stream: MediaStream): string {
+  const vt = stream.getVideoTracks();
+  return `${peerId}:${vt.map((t) => `${t.id}:${t.readyState}`).join('|')}`;
 }
 
 /** Wyciąga kod / ID z pełnego URL lub surowego kodu zaproszenia. */
@@ -355,22 +361,53 @@ const VideoPlayer = ({
       return;
     }
     v.srcObject = stream;
-    const onDead = () => {
+
+    const trackCleanups: Array<() => void> = [];
+
+    const clearIfNoLiveVideo = () => {
       if (!mediaStreamHasLiveVideo(stream)) {
         v.srcObject = null;
       }
     };
-    const cleanups: Array<() => void> = [];
-    for (const t of stream.getVideoTracks()) {
-      const fn = () => onDead();
+
+    const wireVideoTrack = (t: MediaStreamTrack) => {
+      if (t.kind !== 'video') return;
+      const fn = () => clearIfNoLiveVideo();
       t.addEventListener('ended', fn);
       t.addEventListener('mute', fn);
-      cleanups.push(() => {
+      trackCleanups.push(() => {
         t.removeEventListener('ended', fn);
         t.removeEventListener('mute', fn);
       });
-    }
-    return () => cleanups.forEach((c) => c());
+    };
+
+    const wireAllVideoTracks = () => {
+      while (trackCleanups.length) {
+        const c = trackCleanups.pop();
+        c?.();
+      }
+      for (const t of stream.getVideoTracks()) {
+        wireVideoTrack(t);
+      }
+    };
+
+    wireAllVideoTracks();
+
+    const onStreamTrackChange = () => {
+      wireAllVideoTracks();
+      clearIfNoLiveVideo();
+    };
+
+    stream.addEventListener('addtrack', onStreamTrackChange);
+    stream.addEventListener('removetrack', onStreamTrackChange);
+
+    return () => {
+      stream.removeEventListener('addtrack', onStreamTrackChange);
+      stream.removeEventListener('removetrack', onStreamTrackChange);
+      while (trackCleanups.length) {
+        trackCleanups.pop()?.();
+      }
+    };
   }, [stream]);
   useEffect(() => {
     const v = videoRef.current;
@@ -552,6 +589,7 @@ export default function App() {
   const [dmInputValue, setDmInputValue] = useState('');
   const [dmMessagesByThread, setDmMessagesByThread] = useState<Record<string, DmRow[]>>(() => loadDmStore());
   const [profileCardUser, setProfileCardUser] = useState<UserInfo | null>(null);
+  const [profileCardNote, setProfileCardNote] = useState('');
   const [pvCall, setPvCall] = useState<{ peerId: string; status: 'ringing' | 'connected' } | null>(null);
   const remoteScreenHostRef = useRef<HTMLDivElement | null>(null);
 
@@ -565,6 +603,18 @@ export default function App() {
   useEffect(() => {
     saveDmStore(dmMessagesByThread);
   }, [dmMessagesByThread]);
+
+  useEffect(() => {
+    if (!profileCardUser) {
+      setProfileCardNote('');
+      return;
+    }
+    try {
+      setProfileCardNote(localStorage.getItem(`devcord_profile_note_${profileCardUser.id}`) ?? '');
+    } catch {
+      setProfileCardNote('');
+    }
+  }, [profileCardUser]);
 
   useEffect(() => {
     if (activeServer !== '') setDmPeerId(null);
@@ -1150,14 +1200,33 @@ export default function App() {
   useEffect(() => {
     const cleanups: Array<() => void> = [];
     for (const s of Object.values(remoteScreenByUser)) {
+      const bump = () => bumpScreenLayout();
+      const onStreamTracks = () => bump();
+      s.addEventListener('addtrack', onStreamTracks);
+      s.addEventListener('removetrack', onStreamTracks);
+      cleanups.push(() => {
+        s.removeEventListener('addtrack', onStreamTracks);
+        s.removeEventListener('removetrack', onStreamTracks);
+      });
       for (const t of s.getVideoTracks()) {
         const fn = () => bumpScreenLayout();
         t.addEventListener('ended', fn);
-        cleanups.push(() => t.removeEventListener('ended', fn));
+        t.addEventListener('mute', fn);
+        cleanups.push(() => {
+          t.removeEventListener('ended', fn);
+          t.removeEventListener('mute', fn);
+        });
       }
     }
     return () => cleanups.forEach((c) => c());
   }, [remoteScreenByUser]);
+
+  /** Gdy track kończy się bez zdarzenia lub stan zacią się w przeglądarce — odśwież układ podglądu. */
+  useEffect(() => {
+    if (voicePhase !== 'connected' || !activeVoiceChannel) return;
+    const id = window.setInterval(() => bumpScreenLayout(), 1200);
+    return () => clearInterval(id);
+  }, [voicePhase, activeVoiceChannel]);
 
   const localScreenLive = useMemo(() => mediaStreamHasLiveVideo(screenStream), [screenStream, screenLayoutTick]);
   const localCameraLive = useMemo(() => mediaStreamHasLiveVideo(cameraStream), [cameraStream, screenLayoutTick]);
@@ -3787,6 +3856,7 @@ export default function App() {
                                 {remoteScreenWatching ? (
                                   <>
                                   <VideoPlayer
+                                    key={remoteLiveVideoKey(maximized.id, maximized.stream)}
                                     stream={maximized.stream}
                                     volume={remoteScreenVolume}
                                     muted={remoteScreenVideoMuted}
@@ -3844,7 +3914,12 @@ export default function App() {
                             <div className="flex flex-wrap gap-4 justify-center">
                               {others.map(s => (
                                 <div key={s.id} onClick={() => setMaximizedScreenId(s.id)} className="w-64 aspect-video rounded-2xl border border-white/[0.1] bg-[#0a0a0c] overflow-hidden cursor-pointer hover:border-[#00eeff]/50 hover:shadow-[0_0_20px_rgba(0,238,255,0.15)] transition-all relative group">
-                                  <VideoPlayer stream={s.stream} isLocal={s.isLocal} className="w-full h-full object-cover opacity-60 group-hover:opacity-100 transition-opacity" />
+                                  <VideoPlayer
+                                    key={s.isLocal ? `loc-${s.id}` : remoteLiveVideoKey(s.id, s.stream)}
+                                    stream={s.stream}
+                                    isLocal={s.isLocal}
+                                    className="w-full h-full object-cover opacity-60 group-hover:opacity-100 transition-opacity"
+                                  />
                                   <div className="absolute bottom-2 left-2 flex items-center gap-1.5 px-2 py-1 rounded-lg bg-black/80 text-white text-[10px] font-semibold border border-white/[0.05] min-w-0 max-w-[95%]">
                                     {s.kind === 'camera' ? <Video size={10} className="text-emerald-400 shrink-0" /> : <Monitor size={10} className="text-[#00eeff] shrink-0" />}
                                     <span className="truncate flex items-center gap-1 min-w-0">
@@ -4550,72 +4625,191 @@ export default function App() {
         )}
       </div>
 
-      {profileCardUser && (
-        <div
-          className="fixed inset-0 z-[460] flex items-center justify-center p-4 bg-black/75 backdrop-blur-md"
-          role="presentation"
-          onClick={() => setProfileCardUser(null)}
-        >
-          <div
-            className="w-full max-w-md rounded-3xl border border-white/[0.1] bg-[#0c0c0e] shadow-[0_0_80px_rgba(0,0,0,1),0_0_40px_rgba(0,238,255,0.1)] ring-1 ring-[#00eeff]/15 overflow-hidden"
-            onClick={(e) => e.stopPropagation()}
-            role="dialog"
-          >
-            <div className="h-28 bg-gradient-to-r from-[#00eeff]/25 via-transparent to-fuchsia-500/20 relative">
-              <button
-                type="button"
-                aria-label="Zamknij"
-                onClick={() => setProfileCardUser(null)}
-                className="absolute top-3 right-3 p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-white/[0.08] transition-colors"
+      {profileCardUser &&
+        (() => {
+          const pc = profileCardUser;
+          const pr = getRole(pc.roleId);
+          const cardBg = '#111214';
+          const statusDot =
+            pc.status === 'online'
+              ? 'bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.65)]'
+              : pc.status === 'idle'
+                ? 'bg-amber-400'
+                : pc.status === 'dnd'
+                  ? 'bg-red-500'
+                  : 'bg-zinc-600';
+          let originLabel = 'Devcord_';
+          try {
+            originLabel = new URL(appPublicOrigin()).host || originLabel;
+          } catch {
+            /* ignore */
+          }
+          return (
+            <div
+              className="fixed inset-0 z-[460] flex items-center justify-center p-4 sm:p-6 bg-black/80 backdrop-blur-md"
+              role="presentation"
+              onClick={() => setProfileCardUser(null)}
+            >
+              <div
+                className="w-full max-w-[420px] max-h-[90vh] overflow-y-auto custom-scrollbar rounded-2xl border border-white/[0.07] bg-[#111214]/96 backdrop-blur-2xl shadow-[0_24px_80px_rgba(0,0,0,0.85),0_0_60px_rgba(0,238,255,0.07)] ring-1 ring-white/[0.05]"
+                style={{ ['--card-surface' as string]: cardBg }}
+                onClick={(e) => e.stopPropagation()}
+                role="dialog"
+                aria-labelledby="profile-card-title"
               >
-                <X size={18} />
-              </button>
-            </div>
-            <div className="px-6 pb-6 -mt-10 flex flex-col items-center text-center">
-              {profileCardUser.avatarUrl?.trim() ? (
-                <img
-                  src={profileCardUser.avatarUrl}
-                  alt=""
-                  className="w-24 h-24 rounded-2xl object-cover border-4 border-[#0c0c0e] shadow-xl"
-                />
-              ) : (
-                <div className="w-24 h-24 rounded-2xl border-4 border-[#0c0c0e] bg-black flex items-center justify-center text-3xl font-black text-zinc-200 shadow-xl">
-                  {profileCardUser.name.charAt(0)}
+                <div className="relative h-[118px] overflow-hidden shrink-0">
+                  <div className="absolute inset-0 bg-gradient-to-br from-[#061018] via-[#12081c] to-[#050506]" />
+                  <div
+                    className="absolute -top-16 left-[12%] h-48 w-48 rounded-full bg-[#00eeff]/35 blur-[46px] motion-safe:animate-pulse"
+                    aria-hidden
+                  />
+                  <div
+                    className="absolute -top-12 right-[8%] h-44 w-44 rounded-full bg-fuchsia-600/40 blur-[42px] motion-safe:animate-pulse"
+                    style={{ animationDelay: '400ms' }}
+                    aria-hidden
+                  />
+                  <div className="absolute inset-0 bg-gradient-to-t from-[#111214] via-[#111214]/40 to-transparent" />
+                  <div className="absolute inset-0 opacity-[0.12] bg-[url('data:image/svg+xml,%3Csvg%20viewBox%3D%220%200%20256%20256%22%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3Cfilter%20id%3D%22n%22%3E%3CfeTurbulence%20type%3D%22fractalNoise%22%20baseFrequency%3D%220.9%22%20numOctaves%3D%224%22%2F%3E%3C%2Ffilter%3E%3Crect%20width%3D%22100%25%22%20height%3D%22100%25%22%20filter%3D%22url(%23n)%22%2F%3E%3C%2Fsvg%3E')]" />
+                  <button
+                    type="button"
+                    aria-label="Zamknij"
+                    onClick={() => setProfileCardUser(null)}
+                    className="absolute top-3 right-3 z-10 p-2 rounded-xl text-white/70 hover:text-white hover:bg-white/[0.08] transition-colors"
+                  >
+                    <X size={18} />
+                  </button>
                 </div>
-              )}
-              <NickLabel
-                user={profileCardUser}
-                fallbackColor="#fafafa"
-                className="text-xl font-bold mt-4 block"
-              />
-              <p className="text-[10px] text-zinc-500 uppercase tracking-[0.25em] mt-2">Profil</p>
-              <div className="flex flex-wrap gap-2 justify-center mt-6 w-full">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveServer('');
-                    setDmPeerId(profileCardUser.id);
-                    setProfileCardUser(null);
-                  }}
-                  className="flex-1 min-w-[120px] py-2.5 rounded-xl bg-[#00eeff] text-black text-sm font-bold shadow-[0_0_20px_rgba(0,238,255,0.3)]"
-                >
-                  Wiadomość
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setPvCall({ peerId: profileCardUser.id, status: 'ringing' });
-                    setProfileCardUser(null);
-                  }}
-                  className="flex-1 min-w-[120px] py-2.5 rounded-xl border border-white/[0.12] text-sm font-semibold text-zinc-200 hover:border-[#00eeff]/35 hover:text-[#00eeff] transition-colors"
-                >
-                  Zadzwoń
-                </button>
+
+                <div className="relative px-5 pb-5 -mt-[52px]">
+                  <div className="flex items-start gap-4">
+                    <div className="relative shrink-0">
+                      <div
+                        className="w-[88px] h-[88px] rounded-full border-[4px] border-[#111214] bg-[#18181b] overflow-hidden shadow-[0_12px_40px_rgba(0,0,0,0.65)] ring-1 ring-white/[0.06]"
+                      >
+                        {pc.avatarUrl?.trim() ? (
+                          <img src={pc.avatarUrl} alt="" className="w-full h-full object-cover" />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-3xl font-black text-zinc-200">
+                            {pc.name.charAt(0)}
+                          </div>
+                        )}
+                      </div>
+                      <div
+                        className={`absolute bottom-1 right-1 z-10 h-[18px] w-[18px] rounded-full border-[3px] border-[#111214] ${statusDot}`}
+                        title={pc.status}
+                      />
+                    </div>
+                    <div className="flex-1 min-w-0 pt-10 sm:pt-11">
+                      <button
+                        type="button"
+                        className="inline-flex items-center gap-1.5 max-w-full px-2.5 py-1 rounded-full bg-black/45 border border-white/[0.09] text-[11px] text-zinc-400 hover:border-[#00eeff]/25 hover:text-zinc-200 transition-colors"
+                        onClick={() => copyToClipboard(appPublicOrigin())}
+                      >
+                        <Globe size={12} className="text-[#00eeff]/80 shrink-0" />
+                        <span className="truncate font-medium">{originLabel}</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <h2 id="profile-card-title" className="mt-4 min-w-0">
+                    <NickLabel user={pc} fallbackColor="#f4f4f5" className="text-[22px] sm:text-2xl font-bold leading-tight tracking-tight block" />
+                  </h2>
+                  <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px] text-zinc-500">
+                    <span className="font-mono text-[11px] text-zinc-500 tabular-nums">id · {pc.id}</span>
+                    <span className="text-zinc-700 hidden sm:inline">·</span>
+                    <span
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider border"
+                      style={{
+                        backgroundColor: pr.bg,
+                        borderColor: pr.border,
+                        color: pr.color,
+                        boxShadow: pr.glow !== 'none' ? `0 0 12px ${pr.color}22` : undefined,
+                      }}
+                    >
+                      <pr.icon size={10} strokeWidth={2.5} />
+                      {pr.name}
+                    </span>
+                  </div>
+
+                  <div className="mt-5 flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveServer('');
+                        setDmPeerId(pc.id);
+                        setProfileCardUser(null);
+                      }}
+                      className="flex-1 min-w-0 flex items-center justify-center gap-2 py-2.5 rounded-lg bg-[#00eeff] text-black text-sm font-bold shadow-[0_0_24px_rgba(0,238,255,0.22)] hover:brightness-110 transition-all"
+                    >
+                      <MessageSquare size={18} className="shrink-0" />
+                      Wiadomość
+                    </button>
+                    <button
+                      type="button"
+                      title="Połączenie głosowe"
+                      onClick={() => {
+                        setPvCall({ peerId: pc.id, status: 'ringing' });
+                        setProfileCardUser(null);
+                      }}
+                      className="shrink-0 w-11 h-11 rounded-lg flex items-center justify-center border border-white/[0.1] bg-[#2b2d31] text-zinc-200 hover:bg-[#35373c] hover:border-[#00eeff]/25 hover:text-[#00eeff] transition-colors"
+                    >
+                      <Phone size={18} />
+                    </button>
+                    <button
+                      type="button"
+                      title="Zaproś / więcej"
+                      onClick={() => {
+                        setActiveServer('');
+                        setDmPeerId(pc.id);
+                        setProfileCardUser(null);
+                      }}
+                      className="shrink-0 w-11 h-11 rounded-lg flex items-center justify-center border border-white/[0.1] bg-[#2b2d31] text-zinc-200 hover:bg-[#35373c] transition-colors"
+                    >
+                      <MoreHorizontal size={18} />
+                    </button>
+                  </div>
+
+                  <div className="mt-8 border-t border-white/[0.06] pt-5">
+                    <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500 mb-2">O użytkowniku</p>
+                    <p className="text-sm text-zinc-400 leading-relaxed">
+                      Publiczny opis profilu z API pojawi się tutaj po rozszerzeniu backendu. Avatar, nick i efekty Nitro są już synchronizowane globalnie.
+                    </p>
+                    <a
+                      href={appPublicOrigin() || '#'}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1.5 mt-3 text-xs font-semibold text-[#00eeff] hover:underline"
+                    >
+                      <ExternalLink size={12} />
+                      Otwórz przestrzeń Devcord
+                    </a>
+                  </div>
+
+                  <div className="mt-6">
+                    <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500 mb-2 flex items-center gap-1.5">
+                      <StickyNote size={12} className="text-zinc-600" />
+                      Notka (tylko u Ciebie)
+                    </p>
+                    <textarea
+                      value={profileCardNote}
+                      onChange={(e) => setProfileCardNote(e.target.value)}
+                      onBlur={() => {
+                        try {
+                          localStorage.setItem(`devcord_profile_note_${pc.id}`, profileCardNote);
+                        } catch {
+                          /* ignore */
+                        }
+                      }}
+                      placeholder="Kliknij, aby dodać notkę…"
+                      rows={3}
+                      className="w-full rounded-xl bg-black/35 border border-white/[0.08] text-[13px] text-zinc-200 placeholder:text-zinc-600 px-3 py-2.5 outline-none focus:border-[#00eeff]/35 resize-y min-h-[76px] custom-scrollbar"
+                    />
+                  </div>
+                </div>
               </div>
             </div>
-          </div>
-        </div>
-      )}
+          );
+        })()}
 
       {pvCall && (
         <div

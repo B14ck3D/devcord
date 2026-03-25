@@ -501,6 +501,21 @@ export function useVoiceRoom(opts: {
                 ms.addTrack(ev.track);
               }
               remoteScreenTracksRef.current[peerId] = ms;
+              const msAny = ms as MediaStream & { __fluxScreenRem?: boolean };
+              if (!msAny.__fluxScreenRem) {
+                msAny.__fluxScreenRem = true;
+                ms.addEventListener('removetrack', () => {
+                  setRemoteScreenByUser((prev) => {
+                    const next = { ...prev };
+                    const cur = remoteScreenTracksRef.current[peerId];
+                    if (!cur?.getVideoTracks().some((t) => t.readyState === 'live')) {
+                      delete next[peerId];
+                      delete remoteScreenTracksRef.current[peerId];
+                    }
+                    return next;
+                  });
+                });
+              }
               const combined = remoteAudioCombinedRef.current.get(peerId);
               if (combined) {
                 for (const t of [...combined.getAudioTracks()]) {
