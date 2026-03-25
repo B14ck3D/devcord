@@ -262,6 +262,9 @@ function useVoiceRoomMaybe(opts: {
   userId: string;
   micDeviceId: string;
   screenStream: MediaStream | null;
+  micSoftwareGate: boolean;
+  micGateThresholdDb: number;
+  micBrowserNoiseSuppression: boolean;
 }) {
   const real = useVoiceRoom({
     enabled: opts.apiMode && opts.enabled,
@@ -269,6 +272,9 @@ function useVoiceRoomMaybe(opts: {
     userId: opts.userId,
     micDeviceId: opts.micDeviceId,
     screenStream: opts.screenStream,
+    micSoftwareGate: opts.micSoftwareGate,
+    micGateThresholdDb: opts.micGateThresholdDb,
+    micBrowserNoiseSuppression: opts.micBrowserNoiseSuppression,
   });
   const mock = useVoiceRoomMock({
     enabled: !opts.apiMode && opts.enabled,
@@ -437,7 +443,11 @@ export default function App() {
   const [remoteScreenVideoMuted, setRemoteScreenVideoMuted] = useState(false);
   const [screenStreamContext, setScreenStreamContext] = useState<{ x: number; y: number } | null>(null);
   const [micDeviceId, setMicDeviceId] = useState('');
+  const [micSoftwareGate, setMicSoftwareGate] = useState(true);
+  const [micGateThresholdDb, setMicGateThresholdDb] = useState(-40);
+  const [micBrowserNoiseSuppression, setMicBrowserNoiseSuppression] = useState(false);
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
+  const [voicePeersByChannel, setVoicePeersByChannel] = useState<Record<string, string[]>>({});
 
   const [fluxToken, setFluxToken] = useState(() => getStoredAuthToken());
   const [meUserId, setMeUserId] = useState('');
@@ -820,7 +830,46 @@ export default function App() {
     userId: myUserId,
     micDeviceId,
     screenStream,
+    micSoftwareGate,
+    micGateThresholdDb,
+    micBrowserNoiseSuppression,
   });
+
+  useEffect(() => {
+    if (!API_BASE_URL || !activeServer) return;
+    const voiceCh = channels.filter((c) => c.serverId === activeServer && c.type === 'voice');
+    if (voiceCh.length === 0) return;
+    let cancelled = false;
+    const tick = async () => {
+      const updates: Record<string, string[]> = {};
+      await Promise.all(
+        voiceCh.map(async (ch) => {
+          try {
+            const r = await fetch(`/voice/peers?room=${encodeURIComponent(ch.id)}`);
+            if (!r.ok) return;
+            const j = (await r.json()) as { user_ids?: string[] };
+            updates[ch.id] = [...new Set(j.user_ids ?? [])].sort();
+          } catch {
+            /* ignore */
+          }
+        }),
+      );
+      if (cancelled) return;
+      setVoicePeersByChannel((prev) => {
+        const next = { ...prev };
+        for (const ch of voiceCh) {
+          if (updates[ch.id] !== undefined) next[ch.id] = updates[ch.id]!;
+        }
+        return next;
+      });
+    };
+    void tick();
+    const id = window.setInterval(tick, 3500);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [API_BASE_URL, activeServer, channels]);
 
   const remoteScreenPeers = useMemo(
     () => Object.entries(remoteScreenByUser).filter(([id]) => id !== myUserId),
@@ -1383,7 +1432,12 @@ export default function App() {
       glow: 'none' as const,
     };
   };
-  const userIdsOnVoiceChannel = (channelId: string) => activeVoiceChannel === channelId ? voiceParticipants : [];
+  const userIdsOnVoiceChannel = (channelId: string) => {
+    if (activeVoiceChannel === channelId) {
+      return voiceParticipants.length > 0 ? voiceParticipants : (voicePeersByChannel[channelId] ?? []);
+    }
+    return voicePeersByChannel[channelId] ?? [];
+  };
   const getFileIcon = (type: FileItem['type']) => {
     switch(type) { case 'image': return <ImageIcon size={16} />; case 'doc': return <FileText size={16} />; case 'audio': return <FileAudio size={16} />; case 'archive': return <FileArchive size={16} />; }
   };
@@ -1870,6 +1924,60 @@ export default function App() {
                     ))}
                   </select>
                 </div>
+                <div className="flex items-center justify-between gap-3 py-1">
+                  <span className="text-sm text-zinc-300">Bramka ciszy (dB)</span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={micSoftwareGate}
+                    onClick={() => setMicSoftwareGate((v) => !v)}
+                    className={`relative w-11 h-6 rounded-full transition-colors ${micSoftwareGate ? 'bg-[#00eeff]/40' : 'bg-white/[0.08]'}`}
+                  >
+                    <span
+                      className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white transition-transform ${micSoftwareGate ? 'translate-x-5' : ''}`}
+                    />
+                  </button>
+                </div>
+                <div>
+                  <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">
+                    <span>Próg głośności (dBFS)</span>
+                    <span className="text-zinc-400 tabular-nums">{micGateThresholdDb} dB</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={-58}
+                    max={-26}
+                    step={1}
+                    value={micGateThresholdDb}
+                    onChange={(e) => setMicGateThresholdDb(Number(e.target.value))}
+                    disabled={!micSoftwareGate}
+                    className="w-full accent-[#00eeff] h-2 disabled:opacity-35"
+                  />
+                  <div className="flex justify-between text-[10px] text-zinc-600 mt-1">
+                    <span>czulszy</span>
+                    <span>ostrzejsze cięcie</span>
+                  </div>
+                  <p className="text-[11px] text-zinc-600 mt-2 leading-relaxed">
+                    Działa w przeglądarce: sygnał poniżej progu jest tłumiony. Wyższy próg (bliżej 0 dB) = więcej wycięcia szumu, ale trzeba mówić wyraźniej. Możesz regulować na żywo na połączonym kanale.
+                  </p>
+                </div>
+                <div className="flex items-center justify-between gap-3 py-1 border-t border-white/[0.06] pt-3">
+                  <span className="text-sm text-zinc-400">+ tłumienie przeglądarki</span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={micBrowserNoiseSuppression}
+                    onClick={() => setMicBrowserNoiseSuppression((v) => !v)}
+                    className={`relative w-11 h-6 rounded-full transition-colors ${micBrowserNoiseSuppression ? 'bg-white/[0.15]' : 'bg-white/[0.08]'}`}
+                  >
+                    <span
+                      className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white transition-transform ${micBrowserNoiseSuppression ? 'translate-x-5' : ''}`}
+                    />
+                  </button>
+                </div>
+                <p className="text-[11px] text-zinc-600 leading-relaxed">
+                  Backend nie przetwarza audio w WebRTC — tylko sygnalizacja. Bramka jest po Twojej stronie. Zmiana urządzenia lub opcji z &quot;+ przeglądarka&quot; wymaga ponownego wejścia na kanał.
+                </p>
                 <button
                   type="button"
                   onClick={() => void refreshAudioDevices()}
@@ -2122,22 +2230,28 @@ export default function App() {
                     const isActiveVoice = activeVoiceChannel === channel.id;
                     const isViewed = activeChannel === channel.id;
                     const participantsOnChannel = isVoice ? userIdsOnVoiceChannel(channel.id) : [];
+                    const sidebarVoiceVad = isVoice && activeVoiceChannel === channel.id && voicePhase === 'connected';
 
                     return (
                       <div key={channel.id} className="flex flex-col">
                         <button 
                           onClick={() => handleChannelClick(channel)} 
                           onContextMenu={(e) => handleContextMenu(e, 'channel', channel)}
-                          className="channel-row flex items-center gap-2.5 py-1.5 px-3 rounded-lg text-sm transition-all duration-200 group border border-transparent" 
+                          className="channel-row flex items-center gap-2.5 py-1.5 px-3 rounded-lg text-sm transition-all duration-200 group border border-transparent min-w-0" 
                           style={isViewed || isActiveVoice ? { backgroundColor: `${channel.color}15`, borderColor: `${channel.color}30` } : { '--hover-bg': `${channel.color}10`, '--hover-border': `${channel.color}20` } as any}
                         >
                           {isVoice && isActiveVoice ? (
-                            <div className="w-4 h-4 flex items-center justify-center relative"><Volume2 size={16} style={{ color: channel.color }} className="animate-pulse" /></div>
+                            <div className="w-4 h-4 flex items-center justify-center relative shrink-0"><Volume2 size={16} style={{ color: channel.color }} className="animate-pulse" /></div>
                           ) : (
-                            <channel.icon size={16} style={{ color: isViewed ? channel.color : undefined }} className={!isViewed ? "text-zinc-500 group-hover:brightness-150 transition-all" : ""} />
+                            <channel.icon size={16} style={{ color: isViewed ? channel.color : undefined }} className={`shrink-0 ${!isViewed ? "text-zinc-500 group-hover:brightness-150 transition-all" : ""}`} />
                           )}
-                          <span className={`truncate ${isViewed || isActiveVoice ? 'font-semibold' : 'text-zinc-400 group-hover:text-zinc-200'}`} style={isViewed || isActiveVoice ? { color: channel.color, textShadow: `0 0 10px ${channel.color}40` } : {}}>{channel.name}</span>
-                          {!isVoice && channel.unread && !isViewed && <div className="ml-auto w-1.5 h-1.5 rounded-full" style={{ backgroundColor: channel.color, boxShadow: `0 0 8px ${channel.color}` }}></div>}
+                          <span className={`truncate min-w-0 flex-1 text-left ${isViewed || isActiveVoice ? 'font-semibold' : 'text-zinc-400 group-hover:text-zinc-200'}`} style={isViewed || isActiveVoice ? { color: channel.color, textShadow: `0 0 10px ${channel.color}40` } : {}}>{channel.name}</span>
+                          {isVoice && participantsOnChannel.length > 0 && (
+                            <span className="shrink-0 text-[10px] font-bold tabular-nums text-zinc-500 px-1.5 py-0.5 rounded-md bg-white/[0.04] border border-white/[0.06]" title="Na kanale głosowym">
+                              {participantsOnChannel.length}
+                            </span>
+                          )}
+                          {!isVoice && channel.unread && !isViewed && <div className="ml-auto w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: channel.color, boxShadow: `0 0 8px ${channel.color}` }}></div>}
                         </button>
                         
                         {isVoice && participantsOnChannel.length > 0 && (
@@ -2145,12 +2259,17 @@ export default function App() {
                             {participantsOnChannel.map((uid) => {
                               const u = getUser(uid); const isMe = uid === myUserId;
                               return (
-                                <div key={uid} onContextMenu={(e) => handleContextMenu(e, 'user', u)} className="flex items-center gap-2 text-xs text-zinc-400 py-1 px-2 rounded-md hover:bg-white/[0.05] cursor-pointer transition-colors border border-transparent hover:border-white/[0.05]">
+                                <div key={uid} onContextMenu={(e) => handleContextMenu(e, 'user', u)} title={sidebarVoiceVad ? (speakingPeers[uid] ? 'Mówi' : 'Cisza') : undefined} className="flex items-center gap-2 text-xs text-zinc-400 py-1 px-2 rounded-md hover:bg-white/[0.05] cursor-pointer transition-colors border border-transparent hover:border-white/[0.05] min-w-0">
                                   <div className="relative shrink-0">
                                     <div className="w-5 h-5 rounded-md bg-zinc-800 flex items-center justify-center text-[9px] font-bold text-white border border-white/[0.05]">{u.name.charAt(0)}</div>
                                     <div className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 border-2 rounded-full ${isMe && voicePhase === 'connected' ? 'bg-[#00eeff] border-[#080808]' : 'bg-emerald-500 border-[#080808]'}`} />
                                   </div>
-                                  <span className={`truncate ${isMe ? 'text-[#00eeff] font-medium' : ''}`}>{u.name}</span>
+                                  <span className={`truncate min-w-0 flex items-center gap-1.5 ${isMe ? 'text-[#00eeff] font-medium' : ''}`}>
+                                    {sidebarVoiceVad && speakingPeers[uid] ? (
+                                      <span className="w-1.5 h-1.5 rounded-full bg-[#00eeff] shadow-[0_0_6px_#00eeff] animate-pulse shrink-0" aria-hidden />
+                                    ) : null}
+                                    {u.name}
+                                  </span>
                                 </div>
                               );
                             })}
@@ -2186,22 +2305,28 @@ export default function App() {
                           const isActiveVoice = activeVoiceChannel === channel.id;
                           const isViewed = activeChannel === channel.id;
                           const participantsOnChannel = isVoice ? userIdsOnVoiceChannel(channel.id) : [];
+                          const sidebarVoiceVad = isVoice && activeVoiceChannel === channel.id && voicePhase === 'connected';
 
                           return (
                             <div key={channel.id} className="flex flex-col">
                               <button 
                                 onClick={() => handleChannelClick(channel)} 
                                 onContextMenu={(e) => handleContextMenu(e, 'channel', channel)}
-                                className="channel-row flex items-center gap-2.5 py-1.5 px-3 rounded-lg text-sm transition-all duration-200 group border border-transparent" 
+                                className="channel-row flex items-center gap-2.5 py-1.5 px-3 rounded-lg text-sm transition-all duration-200 group border border-transparent min-w-0" 
                                 style={isViewed || isActiveVoice ? { backgroundColor: `${channel.color}15`, borderColor: `${channel.color}30` } : { '--hover-bg': `${channel.color}10`, '--hover-border': `${channel.color}20` } as any}
                               >
                                 {isVoice && isActiveVoice ? (
-                                  <div className="w-4 h-4 flex items-center justify-center relative"><Volume2 size={16} style={{ color: channel.color }} className="animate-pulse" /></div>
+                                  <div className="w-4 h-4 flex items-center justify-center relative shrink-0"><Volume2 size={16} style={{ color: channel.color }} className="animate-pulse" /></div>
                                 ) : (
-                                  <channel.icon size={16} style={{ color: isViewed ? channel.color : undefined }} className={!isViewed ? "text-zinc-500 group-hover:brightness-150 transition-all" : ""} />
+                                  <channel.icon size={16} style={{ color: isViewed ? channel.color : undefined }} className={`shrink-0 ${!isViewed ? "text-zinc-500 group-hover:brightness-150 transition-all" : ""}`} />
                                 )}
-                                <span className={`truncate ${isViewed || isActiveVoice ? 'font-semibold' : 'text-zinc-400 group-hover:text-zinc-200'}`} style={isViewed || isActiveVoice ? { color: channel.color, textShadow: `0 0 10px ${channel.color}40` } : {}}>{channel.name}</span>
-                                {!isVoice && channel.unread && !isViewed && <div className="ml-auto w-1.5 h-1.5 rounded-full" style={{ backgroundColor: channel.color, boxShadow: `0 0 8px ${channel.color}` }}></div>}
+                                <span className={`truncate min-w-0 flex-1 text-left ${isViewed || isActiveVoice ? 'font-semibold' : 'text-zinc-400 group-hover:text-zinc-200'}`} style={isViewed || isActiveVoice ? { color: channel.color, textShadow: `0 0 10px ${channel.color}40` } : {}}>{channel.name}</span>
+                                {isVoice && participantsOnChannel.length > 0 && (
+                                  <span className="shrink-0 text-[10px] font-bold tabular-nums text-zinc-500 px-1.5 py-0.5 rounded-md bg-white/[0.04] border border-white/[0.06]" title="Na kanale głosowym">
+                                    {participantsOnChannel.length}
+                                  </span>
+                                )}
+                                {!isVoice && channel.unread && !isViewed && <div className="ml-auto w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: channel.color, boxShadow: `0 0 8px ${channel.color}` }}></div>}
                               </button>
                               
                               {/* Voice Participants */}
@@ -2210,12 +2335,17 @@ export default function App() {
                                   {participantsOnChannel.map((uid) => {
                                     const u = getUser(uid); const isMe = uid === myUserId;
                                     return (
-                                      <div key={uid} onContextMenu={(e) => handleContextMenu(e, 'user', u)} className="flex items-center gap-2 text-xs text-zinc-400 py-1 px-2 rounded-md hover:bg-white/[0.05] cursor-pointer transition-colors border border-transparent hover:border-white/[0.05]">
+                                      <div key={uid} onContextMenu={(e) => handleContextMenu(e, 'user', u)} title={sidebarVoiceVad ? (speakingPeers[uid] ? 'Mówi' : 'Cisza') : undefined} className="flex items-center gap-2 text-xs text-zinc-400 py-1 px-2 rounded-md hover:bg-white/[0.05] cursor-pointer transition-colors border border-transparent hover:border-white/[0.05] min-w-0">
                                         <div className="relative shrink-0">
                                           <div className="w-5 h-5 rounded-md bg-zinc-800 flex items-center justify-center text-[9px] font-bold text-white border border-white/[0.05]">{u.name.charAt(0)}</div>
                                           <div className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 border-2 rounded-full ${isMe && voicePhase === 'connected' ? 'bg-[#00eeff] border-[#080808]' : 'bg-emerald-500 border-[#080808]'}`} />
                                         </div>
-                                        <span className={`truncate ${isMe ? 'text-[#00eeff] font-medium' : ''}`}>{u.name}</span>
+                                        <span className={`truncate min-w-0 flex items-center gap-1.5 ${isMe ? 'text-[#00eeff] font-medium' : ''}`}>
+                                          {sidebarVoiceVad && speakingPeers[uid] ? (
+                                            <span className="w-1.5 h-1.5 rounded-full bg-[#00eeff] shadow-[0_0_6px_#00eeff] animate-pulse shrink-0" aria-hidden />
+                                          ) : null}
+                                          {u.name}
+                                        </span>
                                       </div>
                                     );
                                   })}

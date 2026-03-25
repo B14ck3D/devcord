@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createMicNoiseGate } from './micNoiseGate';
 
 export type VoicePhase =
   | 'idle'
@@ -82,8 +83,23 @@ export function useVoiceRoom(opts: {
   userId: string;
   micDeviceId: string;
   screenStream?: MediaStream | null;
+  /** Bramka progu w Web Audio — wycina to, co jest poniżej progu dBFS */
+  micSoftwareGate?: boolean;
+  /** Im wyższa wartość (bliżej 0 dBFS), tym głośniejszy sygnał musi być, żeby przejść (ostrzejsze cięcie szumu) */
+  micGateThresholdDb?: number;
+  /** Dodatkowe tłumienie w sterowniku przeglądarki (często słabe); przy włączonej bramce zwykle wyłączone */
+  micBrowserNoiseSuppression?: boolean;
 }) {
-  const { enabled, roomId, userId, micDeviceId, screenStream = null } = opts;
+  const {
+    enabled,
+    roomId,
+    userId,
+    micDeviceId,
+    screenStream = null,
+    micSoftwareGate = true,
+    micGateThresholdDb = -40,
+    micBrowserNoiseSuppression = false,
+  } = opts;
   const [phase, setPhase] = useState<VoicePhase>('idle');
   const [error, setError] = useState<string | null>(null);
   const [participants, setParticipants] = useState<string[]>([]);
@@ -93,6 +109,10 @@ export function useVoiceRoom(opts: {
 
   const wsRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const micRawStreamRef = useRef<MediaStream | null>(null);
+  const micGateDisposeRef = useRef<(() => void) | null>(null);
+  const micGateThresholdRef = useRef(micGateThresholdDb);
+  micGateThresholdRef.current = micGateThresholdDb;
   const pcsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const iceQueuesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   const audioElsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
@@ -147,10 +167,12 @@ export function useVoiceRoom(opts: {
     const newIds = new Set((screen?.getTracks() ?? []).map((t) => t.id));
 
     for (const [peerId, pc] of pcsRef.current) {
+      let changed = false;
       for (const sender of [...pc.getSenders()]) {
         const tr = sender.track;
         if (tr && oldIds.has(tr.id) && !newIds.has(tr.id)) {
           pc.removeTrack(sender);
+          changed = true;
         }
       }
       if (screen) {
@@ -160,9 +182,11 @@ export function useVoiceRoom(opts: {
         for (const t of screen.getTracks()) {
           if (!existing.has(t.id)) {
             pc.addTrack(t, screen);
+            changed = true;
           }
         }
       }
+      if (!changed) continue;
       try {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
@@ -200,7 +224,10 @@ export function useVoiceRoom(opts: {
     remoteScreenTracksRef.current = {};
     prevScreenTrackIdsRef.current.clear();
     setRemoteScreenByUser({});
-    streamRef.current?.getTracks().forEach((t) => t.stop());
+    micGateDisposeRef.current?.();
+    micGateDisposeRef.current = null;
+    micRawStreamRef.current?.getTracks().forEach((t) => t.stop());
+    micRawStreamRef.current = null;
     streamRef.current = null;
     if (wsRef.current) {
       try {
@@ -236,23 +263,47 @@ export function useVoiceRoom(opts: {
               : '';
           throw new Error(`Brak dostępu do API mikrofonu w tej przeglądarce.${hint}`);
         }
+        const browserNs = micBrowserNoiseSuppression;
         const audioConstraints: MediaTrackConstraints =
           micDeviceId && micDeviceId !== 'default'
-            ? { deviceId: { exact: micDeviceId }, echoCancellation: true, noiseSuppression: true }
-            : { echoCancellation: true, noiseSuppression: true };
-        const stream = await md.getUserMedia({
+            ? {
+                deviceId: { exact: micDeviceId },
+                echoCancellation: true,
+                noiseSuppression: browserNs,
+                autoGainControl: browserNs,
+              }
+            : {
+                echoCancellation: true,
+                noiseSuppression: browserNs,
+                autoGainControl: browserNs,
+              };
+        const rawStream = await md.getUserMedia({
           audio: audioConstraints,
           video: false,
         });
         if (cancelled) {
-          stream.getTracks().forEach((t) => t.stop());
+          rawStream.getTracks().forEach((t) => t.stop());
           return;
         }
-        streamRef.current = stream;
+        micRawStreamRef.current = rawStream;
+
+        let sendStream: MediaStream = rawStream;
+        if (micSoftwareGate) {
+          const gate = createMicNoiseGate(rawStream, {
+            getOpenThresholdDb: () => micGateThresholdRef.current,
+            getHardMuted: () => localMutedRef.current,
+            hysteresisDb: 6,
+          });
+          sendStream = gate.stream;
+          micGateDisposeRef.current = gate.dispose;
+        } else {
+          micGateDisposeRef.current = null;
+        }
+        streamRef.current = sendStream;
 
         localVadStopRef.current?.();
         localVadStopRef.current = createSpeakingLevelMonitor(
-          stream,
+          sendStream,
           userIdRef.current,
           () => localMutedRef.current,
           flushSpeaking,
@@ -455,14 +506,33 @@ export function useVoiceRoom(opts: {
             if (!from || !sdp) return;
             setPhase('negotiating');
             const pc = ensurePc(from);
-            await pc.setRemoteDescription({ type: typ, sdp });
+            const polite = userIdRef.current < from;
+            if (pc.signalingState === 'have-local-offer') {
+              if (!polite) {
+                return;
+              }
+              try {
+                await pc.setLocalDescription({ type: 'rollback' });
+              } catch {
+                return;
+              }
+            }
+            try {
+              await pc.setRemoteDescription({ type: typ, sdp });
+            } catch {
+              return;
+            }
             await flushIce(from);
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
-            sendSignal({
-              type: 'answer',
-              payload: { target_user_id: from, sdp: answer.sdp, type: answer.type },
-            });
+            try {
+              const answer = await pc.createAnswer();
+              await pc.setLocalDescription(answer);
+              sendSignal({
+                type: 'answer',
+                payload: { target_user_id: from, sdp: answer.sdp, type: answer.type },
+              });
+            } catch {
+              /* ignore */
+            }
             setPhase('connected');
             return;
           }
@@ -474,7 +544,14 @@ export function useVoiceRoom(opts: {
             if (!from || !sdp) return;
             const pc = pcsRef.current.get(from);
             if (!pc) return;
-            await pc.setRemoteDescription({ type: typ, sdp });
+            if (pc.signalingState !== 'have-local-offer') {
+              return;
+            }
+            try {
+              await pc.setRemoteDescription({ type: typ, sdp });
+            } catch {
+              return;
+            }
             await flushIce(from);
             setPhase('connected');
             return;
@@ -525,7 +602,18 @@ export function useVoiceRoom(opts: {
       cancelled = true;
       cleanupAll();
     };
-  }, [enabled, roomId, userId, micDeviceId, cleanupAll, flushIce, sendSignal, flushSpeaking]);
+  }, [
+    enabled,
+    roomId,
+    userId,
+    micDeviceId,
+    micSoftwareGate,
+    micBrowserNoiseSuppression,
+    cleanupAll,
+    flushIce,
+    sendSignal,
+    flushSpeaking,
+  ]);
 
   useEffect(() => {
     if (!enabled || !roomId) return;
