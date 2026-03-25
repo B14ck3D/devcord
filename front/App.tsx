@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { useVoiceRoom } from './useVoiceRoom';
 import { 
-  Send, Search, Plus, ArrowUpRight, Hash, Volume2, VolumeX,
+  Send, Search, Plus, ArrowUpRight, Hash, Volume2, 
   Phone, Video, Users, UserPlus, Settings, Mic, 
   Headphones, MessageSquare, Compass, Shield,
   Crown, Terminal, Sparkles, Code, Coffee, Radio, Zap,
@@ -95,12 +94,32 @@ const initialFiles: FileItem[] = [
 function guestSessionId(): string {
   const k = 'flux_guest_id';
   let id = sessionStorage.getItem(k);
-  // Unikalny ID gościa (stary błąd: wszyscy dostawali 'u1' → konflikt w pokoju WebRTC)
-  if (!id || id === 'u1') {
-    id = 'g_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
-    sessionStorage.setItem(k, id);
-  }
+  if (!id) { id = 'u1'; sessionStorage.setItem(k, id); }
   return id;
+}
+
+// --- HOOKS ---
+function useVoiceRoomMock({ enabled, roomId, userId }: { enabled: boolean, roomId: string | null, userId: string, micDeviceId: string }) {
+  const [localMuted, setLocalMuted] = useState(false);
+  const [participants, setParticipants] = useState<string[]>([]);
+  const [phase, setPhase] = useState('disconnected');
+
+  useEffect(() => {
+    if (enabled && roomId) {
+      setPhase('connecting_signaling');
+      const timer = setTimeout(() => {
+        setPhase('connected');
+        if (roomId === 'v1') setParticipants(['u2', 'u3', userId]);
+        else setParticipants([userId]);
+      }, 800);
+      return () => clearTimeout(timer);
+    } else {
+      setPhase('disconnected');
+      setParticipants([]);
+    }
+  }, [enabled, roomId, userId]);
+
+  return { phase, error: null, participants, localMuted, setLocalMuted };
 }
 
 const createMockScreenStream = (): MediaStream => {
@@ -198,13 +217,7 @@ export default function App() {
   // Stany Głosowe
   const [activeVoiceChannel, setActiveVoiceChannel] = useState<string | null>(null);
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
-  const [micDeviceId, setMicDeviceId] = useState(() => {
-    try {
-      return localStorage.getItem('flux_mic_device') ?? '';
-    } catch {
-      return '';
-    }
-  });
+  const [micDeviceId, setMicDeviceId] = useState('');
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
 
   // Referencje
@@ -246,18 +259,8 @@ export default function App() {
   const messages = messagesByChannel[activeChannel] ?? [];
   const myUserId = guestIdRef.current;
   
-  const {
-    phase: voicePhase,
-    error: voiceError,
-    participants: voiceParticipants,
-    localMuted,
-    setLocalMuted,
-    speakingPeers,
-  } = useVoiceRoom({
-    enabled: !!activeVoiceChannel,
-    roomId: activeVoiceChannel,
-    userId: myUserId,
-    micDeviceId,
+  const { phase: voicePhase, participants: voiceParticipants, localMuted, setLocalMuted } = useVoiceRoomMock({
+    enabled: !!activeVoiceChannel, roomId: activeVoiceChannel, userId: myUserId, micDeviceId,
   });
 
   const refreshAudioDevices = async () => {
@@ -484,6 +487,10 @@ export default function App() {
   // --- PLIKI ---
   const handleAttachClick = async () => {
     try {
+      // W prawdziwej aplikacji użylibyśmy FormData:
+      // const formData = new FormData(); formData.append('file', fileObject);
+      // await fetch(`${API_BASE_URL}/files`, { method: 'POST', body: formData });
+      
       const newFile: FileItem = { id: `f_${Date.now()}`, name: 'wspolny_zrzut.png', size: '2.1 MB', type: 'image', uploaderId: myUserId, date: 'Przed chwilą' };
       setFiles([newFile, ...files]); setRightPanelTab('files');
       setMessagesByChannel((prev) => ({
@@ -736,11 +743,7 @@ export default function App() {
             </div>
             <div className="flex justify-end gap-3">
               <button onClick={() => setCreateServerModal(null)} className="px-5 py-2.5 rounded-xl text-sm font-medium text-zinc-400 hover:bg-white/[0.05] transition-colors">Anuluj</button>
-              <button 
-                onClick={createServerModal === 'create' ? handleCreateServer : handleJoinServer} 
-                disabled={createServerModal === 'create' ? !newServerName.trim() : !joinServerCode.trim()} 
-                className={`px-5 py-2.5 rounded-xl text-sm font-bold transition-all ${(createServerModal === 'create' ? newServerName.trim() : joinServerCode.trim()) ? 'bg-[#00eeff] text-black shadow-[0_0_15px_rgba(0,238,255,0.4)]' : 'bg-white/[0.05] text-zinc-600 cursor-not-allowed'}`}
-              >
+              <button onClick={createServerModal === 'create' ? handleCreateServer : handleJoinServer} disabled={createServerModal === 'create' ? !newServerName.trim() : !joinServerCode.trim()} className={`px-5 py-2.5 rounded-xl text-sm font-bold transition-all ${(createServerModal === 'create' ? newServerName.trim() : joinServerCode.trim()) ? 'bg-[#00eeff] text-black shadow-[0_0_15px_rgba(0,238,255,0.4)]' : 'bg-white/[0.05] text-zinc-600 cursor-not-allowed'}`}>
                 {createServerModal === 'create' ? 'Utwórz' : 'Dołącz'}
               </button>
             </div>
@@ -759,23 +762,12 @@ export default function App() {
               <label className="block text-xs font-bold uppercase tracking-widest text-zinc-500 mb-2">Nazwa kategorii</label>
               <div className="relative flex items-center bg-[#151515] border border-white/[0.1] rounded-xl focus-within:border-[#00eeff]/50 transition-colors px-3">
                 <FolderPlus size={16} className="text-zinc-500"/>
-                <input 
-                  autoFocus 
-                  value={categoryNameInput} 
-                  onChange={e => setCategoryNameInput(e.target.value)} 
-                  onKeyDown={e => {if(e.key==='Enter') createCategoryModal ? handleCreateCategory() : handleEditCategory()}} 
-                  placeholder="np. Zespół Alpha" 
-                  className="w-full bg-transparent outline-none py-3 px-3 text-sm text-white placeholder-zinc-600" 
-                />
+                <input autoFocus value={categoryNameInput} onChange={e => setCategoryNameInput(e.target.value)} onKeyDown={e => {if(e.key==='Enter') createCategoryModal ? handleCreateCategory() : handleEditCategory()}} placeholder="np. Zespół Alpha" className="w-full bg-transparent outline-none py-3 px-3 text-sm text-white placeholder-zinc-600" />
               </div>
             </div>
             <div className="flex justify-end gap-3">
               <button onClick={() => { setCreateCategoryModal(false); setEditCategoryModal(null); }} className="px-5 py-2.5 rounded-xl text-sm font-medium text-zinc-400 hover:bg-white/[0.05] transition-colors">Anuluj</button>
-              <button 
-                onClick={createCategoryModal ? handleCreateCategory : handleEditCategory} 
-                disabled={!categoryNameInput.trim()} 
-                className={`px-5 py-2.5 rounded-xl text-sm font-bold transition-all ${categoryNameInput.trim() ? 'bg-[#00eeff] text-black shadow-[0_0_15px_rgba(0,238,255,0.4)]' : 'bg-white/[0.05] text-zinc-600 cursor-not-allowed'}`}
-              >
+              <button onClick={createCategoryModal ? handleCreateCategory : handleEditCategory} disabled={!categoryNameInput.trim()} className={`px-5 py-2.5 rounded-xl text-sm font-bold transition-all ${categoryNameInput.trim() ? 'bg-[#00eeff] text-black shadow-[0_0_15px_rgba(0,238,255,0.4)]' : 'bg-white/[0.05] text-zinc-600 cursor-not-allowed'}`}>
                 {createCategoryModal ? 'Utwórz' : 'Zapisz'}
               </button>
             </div>
@@ -925,17 +917,9 @@ export default function App() {
                                 <div key={uid} onContextMenu={(e) => handleContextMenu(e, 'user', u)} className="flex items-center gap-2 text-xs text-zinc-400 py-1 px-2 rounded-md hover:bg-white/[0.05] cursor-pointer transition-colors border border-transparent hover:border-white/[0.05]">
                                   <div className="relative shrink-0">
                                     <div className="w-5 h-5 rounded-md bg-zinc-800 flex items-center justify-center text-[9px] font-bold text-white border border-white/[0.05]">{u.name.charAt(0)}</div>
-                                    <div
-                                      className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 border-2 rounded-full ${
-                                        isMe && localMuted
-                                          ? 'bg-red-500 border-[#080808]'
-                                          : speakingPeers[uid]
-                                            ? 'bg-[#00eeff] border-[#080808] animate-pulse shadow-[0_0_6px_rgba(0,238,255,0.6)]'
-                                            : 'bg-emerald-500 border-[#080808]'
-                                      }`}
-                                    />
+                                    <div className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 border-2 rounded-full ${isMe && voicePhase === 'connected' ? 'bg-[#00eeff] border-[#080808]' : 'bg-emerald-500 border-[#080808]'}`} />
                                   </div>
-                                  <span className={`truncate ${isMe ? 'text-[#00eeff] font-medium' : ''} ${speakingPeers[uid] && !isMe ? 'text-[#00eeff]/90' : ''}`}>{u.name}</span>
+                                  <span className={`truncate ${isMe ? 'text-[#00eeff] font-medium' : ''}`}>{u.name}</span>
                                 </div>
                               );
                             })}
@@ -998,17 +982,9 @@ export default function App() {
                                       <div key={uid} onContextMenu={(e) => handleContextMenu(e, 'user', u)} className="flex items-center gap-2 text-xs text-zinc-400 py-1 px-2 rounded-md hover:bg-white/[0.05] cursor-pointer transition-colors border border-transparent hover:border-white/[0.05]">
                                         <div className="relative shrink-0">
                                           <div className="w-5 h-5 rounded-md bg-zinc-800 flex items-center justify-center text-[9px] font-bold text-white border border-white/[0.05]">{u.name.charAt(0)}</div>
-                                          <div
-                                            className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 border-2 rounded-full ${
-                                              isMe && localMuted
-                                                ? 'bg-red-500 border-[#080808]'
-                                                : speakingPeers[uid]
-                                                  ? 'bg-[#00eeff] border-[#080808] animate-pulse shadow-[0_0_6px_rgba(0,238,255,0.6)]'
-                                                  : 'bg-emerald-500 border-[#080808]'
-                                            }`}
-                                          />
+                                          <div className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 border-2 rounded-full ${isMe && voicePhase === 'connected' ? 'bg-[#00eeff] border-[#080808]' : 'bg-emerald-500 border-[#080808]'}`} />
                                         </div>
-                                        <span className={`truncate ${isMe ? 'text-[#00eeff] font-medium' : ''} ${speakingPeers[uid] && !isMe ? 'text-[#00eeff]/90' : ''}`}>{u.name}</span>
+                                        <span className={`truncate ${isMe ? 'text-[#00eeff] font-medium' : ''}`}>{u.name}</span>
                                       </div>
                                     );
                                   })}
@@ -1076,11 +1052,6 @@ export default function App() {
               <div className="flex-1 p-6 sm:p-10 flex flex-col overflow-auto custom-scrollbar relative z-10">
                 {activeVoiceChannel === currentChannelData?.id ? (
                   <div className="w-full max-w-7xl mx-auto flex flex-col pb-24">
-                    {voicePhase === 'error' && voiceError && (
-                      <div className="mb-6 rounded-2xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
-                        {voiceError}
-                      </div>
-                    )}
                     {screenStream && (
                       <div className="w-full aspect-video rounded-3xl border border-[#00eeff]/20 bg-black/80 p-2 shadow-[0_0_80px_rgba(0,238,255,0.1)] relative mb-12 group transition-all duration-700">
                         <div className="absolute top-0 left-0 w-12 h-12 border-t-2 border-l-2 border-[#00eeff]/80 rounded-tl-3xl z-10 transition-all duration-500 group-hover:w-16 group-hover:h-16 shadow-[-5px_-5px_15px_rgba(0,238,255,0.2)]"></div>
@@ -1100,9 +1071,7 @@ export default function App() {
                     </div>
                     <div className="flex flex-wrap justify-center gap-6">
                       {voiceParticipants.map((uid) => {
-                        const u = getUser(uid); const isSelf = uid === guestIdRef.current;
-                        const isSpeaking = !!speakingPeers[uid];
-
+                        const u = getUser(uid); const isSelf = uid === guestIdRef.current; const isSpeaking = isSelf && !localMuted; 
                         return (
                           <div 
                             key={uid} 
@@ -1112,15 +1081,11 @@ export default function App() {
                             <div className="relative shrink-0">
                               <div className={`absolute inset-0 rounded-full blur-md transition-all duration-500 ${isSpeaking ? 'bg-[#00eeff] opacity-50 animate-pulse' : 'opacity-0'}`}></div>
                               <div className={`w-14 h-14 relative z-10 rounded-full flex items-center justify-center text-xl font-black transition-colors duration-500 ${isSpeaking ? 'bg-[#000] border-2 border-[#00eeff] text-[#00eeff]' : 'bg-[#151515] border border-white/[0.1] text-zinc-400'}`}>{u.name.charAt(0)}</div>
-                              <div className={`absolute bottom-0 right-0 w-4 h-4 rounded-full border-2 border-[#050505] flex items-center justify-center z-20 ${isSelf && localMuted ? 'bg-red-500' : 'bg-emerald-500'}`}>
-                                {isSelf && localMuted && <VolumeX size={8} className="text-black" />}
-                              </div>
+                              <div className={`absolute bottom-0 right-0 w-4 h-4 rounded-full border-2 border-[#050505] flex items-center justify-center z-20 ${isSelf && localMuted ? 'bg-red-500' : 'bg-emerald-500'}`}>{isSelf && localMuted && <MicOff size={8} className="text-black" />}</div>
                             </div>
                             <div className="flex flex-col flex-1 min-w-0 justify-center">
                               <span className={`text-[15px] font-bold truncate transition-colors duration-300 ${isSpeaking ? 'text-[#00eeff] drop-shadow-[0_0_8px_rgba(0,238,255,0.4)]' : 'text-zinc-200'}`}>{u.name}</span>
-                              <span className="text-[10px] text-zinc-500 uppercase tracking-widest font-semibold flex items-center gap-1 mt-0.5">
-                                {isSelf && localMuted ? 'Wyciszony' : isSpeaking ? 'Mówi…' : 'Połączony'}
-                              </span>
+                              <span className="text-[10px] text-zinc-500 uppercase tracking-widest font-semibold flex items-center gap-1 mt-0.5">{isSelf && localMuted ? 'Wyciszony' : 'Połączony'}</span>
                             </div>
                             {isSpeaking && (
                               <div className="flex items-center gap-1 h-4 opacity-80 shrink-0">
@@ -1145,8 +1110,8 @@ export default function App() {
               </div>
               {activeVoiceChannel === currentChannelData?.id && (
                 <div className="absolute bottom-8 left-1/2 -translate-x-1/2 bg-[#0a0a0c]/80 backdrop-blur-2xl border border-white/[0.1] rounded-full flex items-center p-2 shadow-[0_20px_60px_rgba(0,0,0,0.8)] z-30 gap-2">
-                  <button onClick={() => setLocalMuted(!localMuted)} className={`w-14 h-14 rounded-full flex items-center justify-center transition-all duration-300 border ${localMuted ? 'bg-red-500/20 text-red-400 border-red-500/40 shadow-[0_0_15px_rgba(239,68,68,0.2)]' : 'bg-white/[0.05] text-zinc-200 border-white/[0.05] hover:bg-white/[0.1]'}`} title={localMuted ? 'Odcisz' : 'Wycisz'}>
-                    {localMuted ? <VolumeX size={22} /> : <Volume2 size={22} />}
+                  <button onClick={() => setLocalMuted(!localMuted)} className={`w-14 h-14 rounded-full flex items-center justify-center transition-all duration-300 border ${localMuted ? 'bg-red-500/20 text-red-400 border-red-500/40 shadow-[0_0_15px_rgba(239,68,68,0.2)]' : 'bg-white/[0.05] text-zinc-200 border-white/[0.05] hover:bg-white/[0.1]'}`} title={localMuted ? 'Włącz mikrofon' : 'Wycisz mikrofon'}>
+                    {localMuted ? <MicOff size={22} /> : <Mic size={22} />}
                   </button>
                   <div className="w-px h-8 bg-white/[0.1] mx-1"></div>
                   <button onClick={toggleScreenShare} className={`px-6 h-14 rounded-full flex items-center gap-3 font-bold uppercase tracking-wider text-[11px] transition-all duration-300 border ${screenStream ? 'bg-[#00eeff] text-black border-[#00eeff] shadow-[0_0_20px_rgba(0,238,255,0.4)]' : 'bg-white/[0.05] text-zinc-200 border-white/[0.05] hover:bg-white/[0.1]'}`}>
@@ -1325,8 +1290,8 @@ export default function App() {
                       <span className="text-[10px] text-[#00eeff] font-bold uppercase tracking-widest shrink-0 hover:underline">Wróć na grid</span>
                     </div>
                     <div className="px-4 py-3 bg-black/40 flex items-center justify-center gap-3">
-                      <button onClick={() => setLocalMuted(!localMuted)} className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors border ${localMuted ? 'bg-red-500/15 text-red-400 border-red-500/35' : 'bg-white/[0.05] text-zinc-200 border-white/[0.08] hover:bg-white/[0.1]'}`}>
-                        {localMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+                      <button onClick={() => setLocalMuted((m) => !m)} className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors border ${localMuted ? 'bg-red-500/15 text-red-400 border-red-500/35' : 'bg-white/[0.05] text-zinc-200 border-white/[0.08] hover:bg-white/[0.1]'}`}>
+                        {localMuted ? <MicOff size={16} /> : <Mic size={16} />}
                       </button>
                       <button onClick={disconnectVoice} className="w-10 h-10 rounded-full bg-red-500/10 hover:bg-red-500/20 text-red-500 border border-red-500/30 flex items-center justify-center transition-colors shadow-[0_0_15px_rgba(239,68,68,0.2)]"><PhoneOff size={16} /></button>
                     </div>
