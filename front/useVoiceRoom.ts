@@ -20,6 +20,62 @@ function signalingWsURL(): string {
 
 type SigPayload = Record<string, unknown>;
 
+/** Analiza poziomu z MediaStream (mikrofon lub zdalne audio WebRTC) — histereza, żeby UI nie migało. */
+function createSpeakingLevelMonitor(
+  stream: MediaStream,
+  peerId: string,
+  isMuted: () => boolean,
+  onSpeaking: (id: string, speaking: boolean) => void,
+): () => void {
+  const AC =
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+  const ctx = new AC();
+  void ctx.resume().catch(() => {});
+  const source = ctx.createMediaStreamSource(stream);
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 512;
+  analyser.smoothingTimeConstant = 0.55;
+  source.connect(analyser);
+  const data = new Uint8Array(analyser.frequencyBinCount);
+  let raf = 0;
+  let speaking = false;
+  const hi = 13;
+  const lo = 7;
+
+  const tick = () => {
+    if (isMuted()) {
+      if (speaking) {
+        speaking = false;
+        onSpeaking(peerId, false);
+      }
+      raf = requestAnimationFrame(tick);
+      return;
+    }
+    analyser.getByteFrequencyData(data);
+    let sum = 0;
+    for (let i = 0; i < data.length; i++) sum += data[i];
+    const avg = sum / data.length;
+    if (!speaking && avg >= hi) {
+      speaking = true;
+      onSpeaking(peerId, true);
+    } else if (speaking && avg <= lo) {
+      speaking = false;
+      onSpeaking(peerId, false);
+    }
+    raf = requestAnimationFrame(tick);
+  };
+  raf = requestAnimationFrame(tick);
+
+  return () => {
+    cancelAnimationFrame(raf);
+    source.disconnect();
+    analyser.disconnect();
+    void ctx.close();
+    onSpeaking(peerId, false);
+  };
+}
+
 export function useVoiceRoom(opts: {
   enabled: boolean;
   roomId: string | null;
@@ -31,6 +87,7 @@ export function useVoiceRoom(opts: {
   const [error, setError] = useState<string | null>(null);
   const [participants, setParticipants] = useState<string[]>([]);
   const [localMuted, setLocalMuted] = useState(false);
+  const [speakingPeers, setSpeakingPeers] = useState<Record<string, boolean>>({});
 
   const wsRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -39,6 +96,18 @@ export function useVoiceRoom(opts: {
   const audioElsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
   const userIdRef = useRef(userId);
   userIdRef.current = userId;
+  const localMutedRef = useRef(localMuted);
+  localMutedRef.current = localMuted;
+
+  const speakingSnapRef = useRef<Record<string, boolean>>({});
+  const localVadStopRef = useRef<(() => void) | null>(null);
+  const remoteVadStopRef = useRef<Map<string, () => void>>(new Map());
+
+  const flushSpeaking = useCallback((id: string, speaking: boolean) => {
+    if (speakingSnapRef.current[id] === speaking) return;
+    speakingSnapRef.current[id] = speaking;
+    setSpeakingPeers((prev) => ({ ...prev, [id]: speaking }));
+  }, []);
 
   const sendSignal = useCallback((obj: unknown) => {
     const ws = wsRef.current;
@@ -63,6 +132,13 @@ export function useVoiceRoom(opts: {
   );
 
   const cleanupAll = useCallback(() => {
+    localVadStopRef.current?.();
+    localVadStopRef.current = null;
+    for (const stop of remoteVadStopRef.current.values()) stop();
+    remoteVadStopRef.current.clear();
+    speakingSnapRef.current = {};
+    setSpeakingPeers({});
+
     iceQueuesRef.current.clear();
     for (const [, pc] of pcsRef.current) {
       pc.ontrack = null;
@@ -124,6 +200,14 @@ export function useVoiceRoom(opts: {
         }
         streamRef.current = stream;
 
+        localVadStopRef.current?.();
+        localVadStopRef.current = createSpeakingLevelMonitor(
+          stream,
+          userIdRef.current,
+          () => localMutedRef.current,
+          flushSpeaking,
+        );
+
         setPhase('connecting_signaling');
         const ws = new WebSocket(signalingWsURL());
         wsRef.current = ws;
@@ -155,6 +239,8 @@ export function useVoiceRoom(opts: {
             }
           };
           pc.ontrack = (ev) => {
+            if (ev.track.kind !== 'audio') return;
+            const ms = ev.streams[0];
             let el = audioElsRef.current.get(peerId);
             if (!el) {
               el = document.createElement('audio');
@@ -164,8 +250,12 @@ export function useVoiceRoom(opts: {
               document.body.appendChild(el);
               audioElsRef.current.set(peerId, el);
             }
-            el.srcObject = ev.streams[0];
+            el.srcObject = ms;
             void el.play().catch(() => {});
+
+            remoteVadStopRef.current.get(peerId)?.();
+            const stopRemoteVad = createSpeakingLevelMonitor(ms, peerId, () => false, flushSpeaking);
+            remoteVadStopRef.current.set(peerId, stopRemoteVad);
           };
           const s = streamRef.current;
           if (s) s.getTracks().forEach((t) => pc!.addTrack(t, s));
@@ -228,6 +318,8 @@ export function useVoiceRoom(opts: {
               el.remove();
               audioElsRef.current.delete(uid);
             }
+            remoteVadStopRef.current.get(uid)?.();
+            remoteVadStopRef.current.delete(uid);
             iceQueuesRef.current.delete(uid);
             return;
           }
@@ -316,7 +408,7 @@ export function useVoiceRoom(opts: {
       cancelled = true;
       cleanupAll();
     };
-  }, [enabled, roomId, userId, micDeviceId, cleanupAll, flushIce, sendSignal]);
+  }, [enabled, roomId, userId, micDeviceId, cleanupAll, flushIce, sendSignal, flushSpeaking]);
 
   useEffect(() => {
     streamRef.current?.getAudioTracks().forEach((t) => {
@@ -324,5 +416,5 @@ export function useVoiceRoom(opts: {
     });
   }, [localMuted]);
 
-  return { phase, error, participants, localMuted, setLocalMuted };
+  return { phase, error, participants, localMuted, setLocalMuted, speakingPeers };
 }
