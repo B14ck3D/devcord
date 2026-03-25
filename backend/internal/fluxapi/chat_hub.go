@@ -60,6 +60,23 @@ func (h *ChatHub) Broadcast(chID int64, msg []byte) {
 	}
 }
 
+func (h *ChatHub) BroadcastGlobal(msg []byte) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	seen := make(map[*wsConn]struct{})
+	for _, m := range h.ch {
+		for c := range m {
+			if _, ok := seen[c]; !ok {
+				seen[c] = struct{}{}
+				select {
+				case c.send <- msg:
+				default:
+				}
+			}
+		}
+	}
+}
+
 func (h *ChatHub) maybeTyping(chID, uid int64, typing bool) {
 	key := strconv.FormatInt(chID, 10) + ":" + strconv.FormatInt(uid, 10)
 	now := time.Now()

@@ -79,6 +79,7 @@ func (a *App) Router() http.Handler {
 		r.Group(func(r chi.Router) {
 			r.Use(a.authMW)
 			r.Get("/auth/me", a.handleMe)
+			r.Put("/auth/me", a.handleUpdateMe)
 
 			r.Post("/servers/join", a.handleJoinServer)
 			r.Get("/servers", a.handleListServers)

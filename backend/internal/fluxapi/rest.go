@@ -931,7 +931,8 @@ func (a *App) handleListMembers(w http.ResponseWriter, r *http.Request) {
 				(SELECT r.id FROM member_roles mr JOIN roles r ON r.id = mr.role_id
 				 WHERE mr.user_id = u.id AND mr.server_id = sm.server_id ORDER BY r.position DESC LIMIT 1),
 				(SELECT id FROM roles WHERE server_id = sm.server_id AND name = 'Member' ORDER BY position ASC LIMIT 1)
-			) AS role_id
+			) AS role_id,
+			u.avatar_url, u.nick_color, u.nick_glow
 		FROM server_members sm JOIN users u ON u.id = sm.user_id WHERE sm.server_id = $1
 		ORDER BY u.display_name`, sid)
 	if err != nil {
@@ -944,16 +945,27 @@ func (a *App) handleListMembers(w http.ResponseWriter, r *http.Request) {
 		var uID int64
 		var dn string
 		var rid *int64
-		if memberRows.Scan(&uID, &dn, &rid) != nil {
+		var aURL, nColor, nGlow *string
+		if memberRows.Scan(&uID, &dn, &rid, &aURL, &nColor, &nGlow) != nil {
 			continue
 		}
 		ridStr := ""
 		if rid != nil {
 			ridStr = strconv.FormatInt(*rid, 10)
 		}
-		members = append(members, map[string]interface{}{
+		mMap := map[string]interface{}{
 			"id": strconv.FormatInt(uID, 10), "name": dn, "roleId": ridStr, "status": "online",
-		})
+		}
+		if aURL != nil {
+			mMap["avatar_url"] = *aURL
+		}
+		if nColor != nil {
+			mMap["nick_color"] = *nColor
+		}
+		if nGlow != nil {
+			mMap["nick_glow"] = *nGlow
+		}
+		members = append(members, mMap)
 	}
 	jsonWrite(w, http.StatusOK, map[string]interface{}{"roles": roles, "members": members})
 }

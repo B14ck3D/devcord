@@ -37,6 +37,8 @@ func (h *Hub) handleInbound(c *Client, data []byte) error {
 		return h.handleForwardSession(c, TypeAnswer, env.Payload)
 	case TypeICECandidate:
 		return h.handleForwardICE(c, env.Payload)
+	case TypeVoiceState, TypeUserProfileUpdated:
+		return h.handleBroadcastToRoom(c, env.Type, env.Payload)
 	case TypeLeave, TypeUserDisconnected:
 		h.unregister(c)
 		return nil
@@ -153,6 +155,23 @@ func (h *Hub) handleForwardICE(c *Client, payload json.RawMessage) error {
 	}
 	if !target.Send(out) {
 		return ErrUnknownUser
+	}
+	return nil
+}
+
+func (h *Hub) handleBroadcastToRoom(c *Client, msgType MessageType, payload json.RawMessage) error {
+	if c.room == nil {
+		return ErrNotJoined
+	}
+	out, err := json.Marshal(Envelope{Type: msgType, Payload: payload})
+	if err != nil {
+		return err
+	}
+	for _, pid := range c.room.PeerIDs(c.userID) {
+		target := c.room.Get(pid)
+		if target != nil {
+			target.Send(out)
+		}
 	}
 	return nil
 }

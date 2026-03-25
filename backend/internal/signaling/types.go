@@ -13,6 +13,8 @@ const (
 	TypeUserDisconnected MessageType = "user_disconnected"
 	TypeJoined           MessageType = "joined"
 	TypeUserJoined       MessageType = "user_joined"
+	TypeVoiceState       MessageType = "voice_state"
+	TypeUserProfileUpdated MessageType = "user_profile_updated"
 	TypeError            MessageType = "error"
 )
 
@@ -61,6 +63,16 @@ type ForwardedICECandidatePayload struct {
 type ErrorPayload struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+type VoiceStatePayload struct {
+	UserID   string `json:"user_id"`
+	Muted    bool   `json:"muted"`
+	Deafened bool   `json:"deafened"`
+}
+
+type UserProfileUpdatedPayload struct {
+	UserID string `json:"user_id"`
 }
 
 func MarshalEnvelope(t MessageType, payload any) ([]byte, error) {

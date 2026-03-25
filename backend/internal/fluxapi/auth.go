@@ -334,14 +334,125 @@ func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var email, display, nick string
 	var verified *time.Time
+	var avatarURL, nickColor, nickGlow *string
 	err := a.pool.QueryRow(ctx,
-		`SELECT email, display_name, nick, email_verified_at FROM users WHERE id = $1`, uid).Scan(&email, &display, &nick, &verified)
+		`SELECT email, display_name, nick, email_verified_at, avatar_url, nick_color, nick_glow FROM users WHERE id = $1`, uid).Scan(&email, &display, &nick, &verified, &avatarURL, &nickColor, &nickGlow)
 	if err != nil {
 		jsonErr(w, http.StatusNotFound, "user")
 		return
 	}
-	jsonWrite(w, http.StatusOK, map[string]interface{}{
+	
+	res := map[string]interface{}{
 		"id": strconv.FormatInt(uid, 10), "email": email, "display_name": display, "nick": nick,
 		"email_verified": verified != nil,
+	}
+	if avatarURL != nil {
+		res["avatar_url"] = *avatarURL
+	}
+	if nickColor != nil {
+		res["nick_color"] = *nickColor
+	}
+	if nickGlow != nil {
+		res["nick_glow"] = *nickGlow
+	}
+	
+	jsonWrite(w, http.StatusOK, res)
+}
+
+type updateMeBody struct {
+	DisplayName *string `json:"display_name,omitempty"`
+	Nick        *string `json:"nick,omitempty"`
+	AvatarURL   *string `json:"avatar_url,omitempty"`
+	NickColor   *string `json:"nick_color,omitempty"`
+	NickGlow    *string `json:"nick_glow,omitempty"`
+	OldPassword *string `json:"old_password,omitempty"`
+	NewPassword *string `json:"new_password,omitempty"`
+}
+
+func (a *App) handleUpdateMe(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFromReq(r)
+	var body updateMeBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	ctx := r.Context()
+	tx, err := a.pool.Begin(ctx)
+	if err != nil {
+		jsonErr(w, http.StatusInternalServerError, "tx")
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	// Check password
+	var currentHash []byte
+	err = tx.QueryRow(ctx, `SELECT password_hash FROM users WHERE id = $1`, uid).Scan(&currentHash)
+	if err != nil {
+		jsonErr(w, http.StatusNotFound, "user")
+		return
+	}
+
+	if body.NewPassword != nil && *body.NewPassword != "" {
+		if body.OldPassword == nil || bcrypt.CompareHashAndPassword(currentHash, []byte(*body.OldPassword)) != nil {
+			jsonErr(w, http.StatusUnauthorized, "invalid old password")
+			return
+		}
+		hash, err := bcrypt.GenerateFromPassword([]byte(*body.NewPassword), bcrypt.DefaultCost)
+		if err != nil {
+			jsonErr(w, http.StatusInternalServerError, "hash")
+			return
+		}
+		if _, err := tx.Exec(ctx, `UPDATE users SET password_hash = $1 WHERE id = $2`, string(hash), uid); err != nil {
+			jsonErr(w, http.StatusInternalServerError, "update password")
+			return
+		}
+	}
+
+	if body.DisplayName != nil {
+		if _, err := tx.Exec(ctx, `UPDATE users SET display_name = $1 WHERE id = $2`, *body.DisplayName, uid); err != nil {
+			jsonErr(w, http.StatusInternalServerError, "update display_name")
+			return
+		}
+	}
+	if body.Nick != nil {
+		if _, err := tx.Exec(ctx, `UPDATE users SET nick = $1 WHERE id = $2`, *body.Nick, uid); err != nil {
+			jsonErr(w, http.StatusInternalServerError, "update nick")
+			return
+		}
+	}
+	if body.AvatarURL != nil {
+		if _, err := tx.Exec(ctx, `UPDATE users SET avatar_url = $1 WHERE id = $2`, *body.AvatarURL, uid); err != nil {
+			jsonErr(w, http.StatusInternalServerError, "update avatar_url")
+			return
+		}
+	}
+	if body.NickColor != nil {
+		if _, err := tx.Exec(ctx, `UPDATE users SET nick_color = $1 WHERE id = $2`, *body.NickColor, uid); err != nil {
+			jsonErr(w, http.StatusInternalServerError, "update nick_color")
+			return
+		}
+	}
+	if body.NickGlow != nil {
+		if _, err := tx.Exec(ctx, `UPDATE users SET nick_glow = $1 WHERE id = $2`, *body.NickGlow, uid); err != nil {
+			jsonErr(w, http.StatusInternalServerError, "update nick_glow")
+			return
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		jsonErr(w, http.StatusInternalServerError, "commit")
+		return
+	}
+
+	payload, _ := json.Marshal(map[string]interface{}{
+		"type": "user_updated",
+		"payload": map[string]interface{}{
+			"user_id": strconv.FormatInt(uid, 10),
+		},
 	})
+	if a.chathub != nil {
+		a.chathub.BroadcastGlobal(payload)
+	}
+
+	jsonWrite(w, http.StatusOK, map[string]string{"status": "ok"})
 }

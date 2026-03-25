@@ -1,5 +1,6 @@
-import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback, useReducer } from 'react';
 import { useVoiceRoom } from './useVoiceRoom';
+import { loadFluxLocalSettings, saveFluxLocalSettings } from './fluxLocalSettings';
 import { useChatSocket } from './useChatSocket';
 import { iconFromKey } from './iconMap';
 import { AuthGate } from './AuthGate';
@@ -12,7 +13,7 @@ import {
   ListTodo, Bold, Italic, Code as CodeIcon, Link, FileText, Image as ImageIcon,
   Command as CmdIcon, User, Moon, LogOut, 
   X, MicOff, PhoneOff, Palette, BellRing, MessageSquareShare,
-  UploadCloud, Copy, Smile, MonitorUp, Monitor, Trash2, Edit2, MoreVertical, CheckSquare, Square, Download, FileAudio, FileArchive, Eye, UserCheck, UserMinus, BellOff, LogIn, Server, Link2, CopyPlus, ChevronDown, FolderPlus, Pin
+  UploadCloud, Copy, Smile, MonitorUp, Monitor, Trash2, Edit2, MoreVertical, CheckSquare, Square, Download, FileAudio, FileArchive, Eye, UserCheck, UserMinus, BellOff, LogIn, Server, Link2, CopyPlus, ChevronDown, FolderPlus, Pin, SlidersHorizontal, VolumeX
 } from 'lucide-react';
 
 // ============================================================================
@@ -55,6 +56,11 @@ function writeChannelsPath(sid: string, cid: string) {
   const cur = (window.location.pathname || '').replace(/\/$/, '') || '/';
   if (cur === want) return;
   window.history.replaceState({ devcord: 1 }, '', want);
+}
+
+function mediaStreamHasLiveVideo(ms: MediaStream | null | undefined): boolean {
+  if (!ms) return false;
+  return ms.getVideoTracks().some((t) => t.readyState === 'live');
 }
 
 /** Wyciąga kod / ID z pełnego URL lub surowego kodu zaproszenia. */
@@ -156,7 +162,7 @@ const apiClient = async (endpoint: string, method: string = 'GET', body?: unknow
 // ============================================================================
 // --- TYPY DANYCH BAZY DANYCH ---
 // ============================================================================
-type UserInfo = { id: string; name: string; roleId: string; status: 'online' | 'idle' | 'dnd' | 'offline' };
+type UserInfo = { id: string; name: string; roleId: string; status: 'online' | 'idle' | 'dnd' | 'offline'; avatarUrl?: string; nickColor?: string; nickGlow?: string };
 type Category = { id: string; name: string; isExpanded: boolean; serverId: string };
 type Channel = { id: string; name: string; type: 'text' | 'voice'; color: string; icon: React.ElementType; unread?: boolean; categoryId?: string; serverId: string };
 type ChatRow = { id: string; userId: string; time: string; content: string; isMe?: boolean; isEdited?: boolean; reactions?: { emoji: string; count: number; userReacted: boolean }[] };
@@ -226,6 +232,7 @@ function guestSessionId(): string {
 // --- HOOKS ---
 function useVoiceRoomMock({ enabled, roomId, userId }: { enabled: boolean, roomId: string | null, userId: string, micDeviceId: string }) {
   const [localMuted, setLocalMuted] = useState(false);
+  const [localDeafened, setLocalDeafened] = useState(false);
   const [participants, setParticipants] = useState<string[]>([]);
   const [phase, setPhase] = useState('disconnected');
 
@@ -250,8 +257,13 @@ function useVoiceRoomMock({ enabled, roomId, userId }: { enabled: boolean, roomI
     participants,
     localMuted,
     setLocalMuted,
+    localDeafened,
+    setLocalDeafened,
     speakingPeers: {} as Record<string, boolean>,
     remoteScreenByUser: {} as Record<string, MediaStream>,
+    remoteVoiceState: {} as Record<string, { muted: boolean; deafened: boolean }>,
+    setUserVolume: () => {},
+    setUserOutputMuted: () => {},
   };
 }
 
@@ -262,9 +274,9 @@ function useVoiceRoomMaybe(opts: {
   userId: string;
   micDeviceId: string;
   screenStream: MediaStream | null;
+  screenBitrate?: number;
   micSoftwareGate: boolean;
   micGateThresholdDb: number;
-  micBrowserNoiseSuppression: boolean;
 }) {
   const real = useVoiceRoom({
     enabled: opts.apiMode && opts.enabled,
@@ -272,9 +284,9 @@ function useVoiceRoomMaybe(opts: {
     userId: opts.userId,
     micDeviceId: opts.micDeviceId,
     screenStream: opts.screenStream,
+    screenBitrate: opts.screenBitrate,
     micSoftwareGate: opts.micSoftwareGate,
     micGateThresholdDb: opts.micGateThresholdDb,
-    micBrowserNoiseSuppression: opts.micBrowserNoiseSuppression,
   });
   const mock = useVoiceRoomMock({
     enabled: !opts.apiMode && opts.enabled,
@@ -282,7 +294,8 @@ function useVoiceRoomMaybe(opts: {
     userId: opts.userId,
     micDeviceId: opts.micDeviceId,
   });
-  return opts.apiMode ? real : mock;
+  if (opts.apiMode) return real;
+  return mock;
 }
 
 const createMockScreenStream = (): MediaStream => {
@@ -359,6 +372,8 @@ const VideoPlayer = ({
 // --- GŁÓWNY KOMPONENT APLIKACJI ---
 // ============================================================================
 export default function App() {
+  const fluxSeed = useMemo(() => loadFluxLocalSettings(), []);
+
   // Stany Danych — przy podłączonym API startujemy pusto (bez s1/c1), żeby nie strzelać w nieistniejące ID.
   const [servers, setServers] = useState(() => (DEMO_MODE ? initialServers : []));
   const [categories, setCategories] = useState<Category[]>(() => (DEMO_MODE ? initialCategories : []));
@@ -402,8 +417,15 @@ export default function App() {
   const [isCmdPaletteOpen, setIsCmdPaletteOpen] = useState(false);
   const [cmdSearchQuery, setCmdSearchQuery] = useState('');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<'profile' | 'audio'>('profile');
+  const [settingsTab, setSettingsTab] = useState<'profile' | 'account' | 'appearance' | 'audio'>('profile');
   const [localUserName, setLocalUserName] = useState(() => (DEMO_MODE ? 'Admin' : 'Użytkownik'));
+  const [localUserAvatar, setLocalUserAvatar] = useState('');
+  const [localUserColor, setLocalUserColor] = useState('#00eeff');
+  const [localUserGlow, setLocalUserGlow] = useState('none');
+  const [settingsBusy, setSettingsBusy] = useState(false);
+  const [settingsSuccess, setSettingsSuccess] = useState('');
+  const [settingsError, setSettingsError] = useState('');
+  const [localTheme, setLocalTheme] = useState('dark');
   
   // Modale (Kanały/Serwery/Kategorie/Zadania)
   const [createServerModal, setCreateServerModal] = useState<'create' | 'join' | null>(null);
@@ -439,15 +461,42 @@ export default function App() {
   const [activeVoiceChannel, setActiveVoiceChannel] = useState<string | null>(null);
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
   const [remoteScreenWatching, setRemoteScreenWatching] = useState(false);
+  const [maximizedScreenId, setMaximizedScreenId] = useState<string | null>(null);
   const [remoteScreenVolume, setRemoteScreenVolume] = useState(1);
   const [remoteScreenVideoMuted, setRemoteScreenVideoMuted] = useState(false);
   const [screenStreamContext, setScreenStreamContext] = useState<{ x: number; y: number } | null>(null);
-  const [micDeviceId, setMicDeviceId] = useState('');
-  const [micSoftwareGate, setMicSoftwareGate] = useState(true);
-  const [micGateThresholdDb, setMicGateThresholdDb] = useState(-40);
-  const [micBrowserNoiseSuppression, setMicBrowserNoiseSuppression] = useState(false);
+  const [micDeviceId, setMicDeviceId] = useState(fluxSeed.audio.micDeviceId);
+  const [micSoftwareGate, setMicSoftwareGate] = useState(fluxSeed.audio.micSoftwareGate);
+  const [micGateThresholdDb, setMicGateThresholdDb] = useState(fluxSeed.audio.micGateThresholdDb);
+  const [screenFps, setScreenFps] = useState(fluxSeed.screen.fps);
+  const [screenRes, setScreenRes] = useState(fluxSeed.screen.res);
+  const [userVolumes, setUserVolumes] = useState<Record<string, number>>(() => ({ ...fluxSeed.userVoiceGain }));
+  const [userOutputMuted, setUserOutputMutedMap] = useState<Record<string, boolean>>(() => ({ ...fluxSeed.userOutputMuted }));
+
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
   const [voicePeersByChannel, setVoicePeersByChannel] = useState<Record<string, string[]>>({});
+  const [voiceMixPanelOpen, setVoiceMixPanelOpen] = useState(false);
+
+  useEffect(() => {
+    saveFluxLocalSettings({
+      version: 1,
+      audio: {
+        micDeviceId,
+        micSoftwareGate,
+        micGateThresholdDb,
+      },
+      screen: { fps: screenFps, res: screenRes },
+      userVoiceGain: userVolumes,
+      userOutputMuted,
+    });
+  }, [micDeviceId, micSoftwareGate, micGateThresholdDb, screenFps, screenRes, userVolumes, userOutputMuted]);
+
+  useEffect(() => {
+    if (!screenStream) return;
+    screenStream.getVideoTracks().forEach(track => {
+      track.applyConstraints({ frameRate: { max: screenFps }, height: { max: screenRes } }).catch(console.error);
+    });
+  }, [screenStream, screenFps, screenRes]);
 
   const [fluxToken, setFluxToken] = useState(() => getStoredAuthToken());
   const [meUserId, setMeUserId] = useState('');
@@ -542,6 +591,12 @@ export default function App() {
           setMeUserId((me as { id: string }).id);
           const dn = (me as { display_name?: string }).display_name;
           if (dn) setLocalUserName(dn);
+          const av = (me as { avatar_url?: string }).avatar_url;
+          if (av) setLocalUserAvatar(av);
+          const nc = (me as { nick_color?: string }).nick_color;
+          if (nc) setLocalUserColor(nc);
+          const ng = (me as { nick_glow?: string }).nick_glow;
+          if (ng) setLocalUserGlow(ng);
         }
       } catch {
         setMeUserId('');
@@ -666,10 +721,13 @@ export default function App() {
   useEffect(() => {
     if (!API_BASE_URL || !fluxToken || !activeServer) return;
     if (!servers.some((s) => s.id === activeServer)) return;
-    (async () => {
-      try {
-        const data = await apiClient(`/members?serverId=${activeServer}`);
-        if (data && typeof data === 'object' && 'roles' in data && 'members' in data) {
+    let cancelled = false;
+    const run = () => {
+      if (cancelled || document.visibilityState === 'hidden') return;
+      void (async () => {
+        try {
+          const data = await apiClient(`/members?serverId=${activeServer}`);
+          if (cancelled || !data || typeof data !== 'object' || !('members' in data)) return;
           const d = data as {
             roles: Array<{ id: string; name: string; color: string; bg: string; border: string; glow: string; iconKey?: string }>;
             members: UserInfo[];
@@ -692,7 +750,7 @@ export default function App() {
             const mid = String(m.id ?? '');
             let rid = m.roleId != null && String(m.roleId).length > 0 ? String(m.roleId) : fallbackRoleId;
             if (rid && !roleIdSet.has(rid)) rid = fallbackRoleId || mappedRoles[0]?.id || '';
-            return { ...m, id: mid, roleId: rid };
+            return { ...m, id: mid, roleId: rid, avatarUrl: (m as any).avatar_url, nickColor: (m as any).nick_color, nickGlow: (m as any).nick_glow };
           });
           let rolesOut = mappedRoles;
           if (mappedRoles.length === 0 && mapped.length > 0) {
@@ -715,16 +773,27 @@ export default function App() {
             rolesOut[0]?.id ??
             '__devcord_members';
           if (meUserId && !mapped.some((x) => x.id === meUserId)) {
-            mapped = [...mapped, { id: meUserId, name: localUserName, roleId: selfRid, status: 'online' as const }];
+            mapped = [...mapped, { id: meUserId, name: localUserName, roleId: selfRid, status: 'online' as const, avatarUrl: localUserAvatar, nickColor: localUserColor, nickGlow: localUserGlow }];
           }
           setWorkspaceRoles(rolesOut);
           setWorkspaceMembers(mapped);
+        } catch {
+          /* ignore */
         }
-      } catch {
-        /* ignore */
-      }
-    })();
-  }, [API_BASE_URL, fluxToken, activeServer, servers, meUserId, localUserName]);
+      })();
+    };
+    run();
+    const id = window.setInterval(run, 5000);
+    const onVis = () => {
+      if (document.visibilityState === 'visible') run();
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, [API_BASE_URL, fluxToken, activeServer, servers, meUserId, localUserName, localUserAvatar, localUserColor, localUserGlow]);
 
   useEffect(() => {
     if (!API_BASE_URL || !fluxToken || !activeChannel) return;
@@ -821,8 +890,13 @@ export default function App() {
     participants: voiceParticipants,
     localMuted,
     setLocalMuted,
+    localDeafened,
+    setLocalDeafened,
     speakingPeers,
     remoteScreenByUser,
+    remoteVoiceState,
+    setUserVolume,
+    setUserOutputMuted: setPeerOutputMute,
   } = useVoiceRoomMaybe({
     apiMode: !!API_BASE_URL,
     enabled: !!activeVoiceChannel,
@@ -830,10 +904,31 @@ export default function App() {
     userId: myUserId,
     micDeviceId,
     screenStream,
+    screenBitrate: screenRes === 1440 ? 8000000 : screenRes === 1080 ? 4000000 : screenRes === 720 ? 1500000 : 800000,
     micSoftwareGate,
     micGateThresholdDb,
-    micBrowserNoiseSuppression,
   });
+
+  /** Słuchawki: u Ciebie brak odsłuchu innych + wyłączony mikrofon. */
+  const toggleVoiceHeadphones = useCallback(() => {
+    if (localDeafened) {
+      setLocalDeafened(false);
+      setLocalMuted(false);
+    } else {
+      setLocalDeafened(true);
+      setLocalMuted(true);
+    }
+  }, [localDeafened, setLocalDeafened, setLocalMuted]);
+
+  /** Mikrofon: zwykle tylko mute; w trybie głuchym jedno kliknięcie wyłącza też głuchotę. */
+  const toggleVoiceMic = useCallback(() => {
+    if (localDeafened) {
+      setLocalDeafened(false);
+      setLocalMuted(false);
+    } else {
+      setLocalMuted((m) => !m);
+    }
+  }, [localDeafened, setLocalDeafened, setLocalMuted]);
 
   useEffect(() => {
     if (!API_BASE_URL || !activeServer) return;
@@ -863,29 +958,73 @@ export default function App() {
         return next;
       });
     };
-    void tick();
-    const id = window.setInterval(tick, 3500);
+    const runTick = () => {
+      if (document.visibilityState === 'hidden') return;
+      void tick();
+    };
+    runTick();
+    const id = window.setInterval(runTick, 900);
+    const onVis = () => {
+      if (document.visibilityState === 'visible') void tick();
+    };
+    document.addEventListener('visibilitychange', onVis);
     return () => {
       cancelled = true;
       clearInterval(id);
+      document.removeEventListener('visibilitychange', onVis);
     };
   }, [API_BASE_URL, activeServer, channels]);
 
+  const [screenLayoutTick, bumpScreenLayout] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => {
+    const cleanups: Array<() => void> = [];
+    for (const s of Object.values(remoteScreenByUser)) {
+      for (const t of s.getVideoTracks()) {
+        const fn = () => bumpScreenLayout();
+        t.addEventListener('ended', fn);
+        cleanups.push(() => t.removeEventListener('ended', fn));
+      }
+    }
+    return () => cleanups.forEach((c) => c());
+  }, [remoteScreenByUser]);
+
+  const localScreenLive = useMemo(() => mediaStreamHasLiveVideo(screenStream), [screenStream, screenLayoutTick]);
   const remoteScreenPeers = useMemo(
-    () => Object.entries(remoteScreenByUser).filter(([id]) => id !== myUserId),
-    [remoteScreenByUser, myUserId],
+    () =>
+      Object.entries(remoteScreenByUser).filter(
+        ([id, stream]) => id !== myUserId && mediaStreamHasLiveVideo(stream),
+      ),
+    [remoteScreenByUser, myUserId, screenLayoutTick],
   );
   const primaryRemoteScreen = remoteScreenPeers[0] ?? null;
   const primaryRemoteSharerId = primaryRemoteScreen?.[0] ?? null;
   const primaryRemoteStream = primaryRemoteScreen?.[1] ?? null;
-  const voiceHasScreenActivity = !!screenStream || remoteScreenPeers.length > 0;
+  const voiceHasScreenActivity = localScreenLive || remoteScreenPeers.length > 0;
 
   useEffect(() => {
-    if (!primaryRemoteStream) {
+    if (!primaryRemoteStream || !mediaStreamHasLiveVideo(primaryRemoteStream)) {
       setRemoteScreenWatching(false);
       setScreenStreamContext(null);
     }
-  }, [primaryRemoteStream]);
+  }, [primaryRemoteStream, screenLayoutTick]);
+
+  useEffect(() => {
+    if (voicePhase !== 'connected') {
+      setVoiceMixPanelOpen(false);
+      return;
+    }
+    Object.entries(userVolumes).forEach(([id, vol]) => setUserVolume(id, vol));
+    Object.entries(userOutputMuted).forEach(([id, muted]) => setPeerOutputMute(id, !!muted));
+  }, [voicePhase, userVolumes, userOutputMuted, setUserVolume, setPeerOutputMute]);
+
+  useEffect(() => {
+    const ids = new Set<string>();
+    if (localScreenLive) ids.add(myUserId);
+    remoteScreenPeers.forEach(([id]) => ids.add(id));
+    if (maximizedScreenId && !ids.has(maximizedScreenId)) {
+      setMaximizedScreenId(ids.size > 0 ? [...ids][0] : null);
+    }
+  }, [maximizedScreenId, localScreenLive, remoteScreenPeers, myUserId]);
 
   const refreshAudioDevices = async () => {
     try {
@@ -902,6 +1041,7 @@ export default function App() {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); setIsCmdPaletteOpen(prev => !prev); }
       if (e.key === 'Escape') {
         setIsCmdPaletteOpen(false); setIsSettingsOpen(false); setIsAIPromptOpen(false);
+        setVoiceMixPanelOpen(false);
         setScreenStreamContext(null);
         setCreateChannelModal(null); setCreateTaskModal({ isOpen: false }); setContextMenu(null);
         setCreateServerModal(null); setCreateCategoryModal(false); setEditCategoryModal(null);
@@ -1357,6 +1497,7 @@ export default function App() {
 
   // --- Voice & Screen ---
   const disconnectVoice = () => {
+    setVoiceMixPanelOpen(false);
     setActiveVoiceChannel(null);
     setRemoteScreenWatching(false);
     setScreenStreamContext(null);
@@ -1403,8 +1544,8 @@ export default function App() {
 
   // --- Getters ---
   const getUser = (id: string): UserInfo => {
-    if (id === 'devcord_ai') return { id: 'devcord_ai', name: 'Devcord AI', roleId: 'r1', status: 'online' };
-    if (id === myUserId) return { id, name: localUserName, roleId: workspaceRoles[0]?.id ?? 'r1', status: 'online' };
+    if (id === 'devcord_ai') return { id: 'devcord_ai', name: 'Devcord AI', roleId: 'r1', status: 'online', nickColor: '#00eeff', nickGlow: '0 0 15px rgba(0,238,255,0.4)', avatarUrl: '' };
+    if (id === myUserId) return { id, name: localUserName, roleId: workspaceRoles[0]?.id ?? 'r1', status: 'online', avatarUrl: localUserAvatar, nickColor: localUserColor, nickGlow: localUserGlow };
     const u = workspaceMembers.find((x) => x.id === id);
     if (u) return u;
     if (DEMO_MODE) {
@@ -1433,10 +1574,11 @@ export default function App() {
     };
   };
   const userIdsOnVoiceChannel = (channelId: string) => {
-    if (activeVoiceChannel === channelId) {
-      return voiceParticipants.length > 0 ? voiceParticipants : (voicePeersByChannel[channelId] ?? []);
+    const polled = voicePeersByChannel[channelId] ?? [];
+    if (activeVoiceChannel === channelId && voiceParticipants.length > 0) {
+      return [...new Set([...voiceParticipants, ...polled])].sort();
     }
-    return voicePeersByChannel[channelId] ?? [];
+    return polled;
   };
   const getFileIcon = (type: FileItem['type']) => {
     switch(type) { case 'image': return <ImageIcon size={16} />; case 'doc': return <FileText size={16} />; case 'audio': return <FileAudio size={16} />; case 'archive': return <FileArchive size={16} />; }
@@ -1492,6 +1634,25 @@ export default function App() {
     );
   }
 
+  const saveProfileSettings = async () => {
+    if (!API_BASE_URL) return;
+    setSettingsBusy(true); setSettingsSuccess(''); setSettingsError('');
+    try {
+      await apiClient('/auth/me', 'PUT', {
+        display_name: localUserName,
+        avatar_url: localUserAvatar,
+        nick_color: localUserColor,
+        nick_glow: localUserGlow
+      });
+      setSettingsSuccess('Profil zaktualizowany! Zmiany są widoczne na żywo.');
+      setTimeout(() => setSettingsSuccess(''), 3000);
+    } catch (e: any) {
+      setSettingsError(e.message || 'Błąd zapisu profilu.');
+    } finally {
+      setSettingsBusy(false);
+    }
+  };
+
   return (
     <div className="flex h-screen w-full bg-[#000000] p-2 md:p-4 text-zinc-200 font-sans overflow-hidden selection:bg-[#00eeff]/30 selection:text-white relative"
       onDragEnter={handleDragEnter} onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop} 
@@ -1517,6 +1678,8 @@ export default function App() {
             top: Math.min(contextMenu.y, window.innerHeight - 350),
             left: Math.min(contextMenu.x, window.innerWidth - 256)
           }}
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
         >
           {contextMenu.type === 'workspace' && (
             <>
@@ -1628,6 +1791,47 @@ export default function App() {
               <div className="px-3 py-2 text-xs font-bold text-zinc-500 uppercase tracking-widest border-b border-white/[0.05] mb-1 truncate">{contextMenu.data.name}</div>
               <button className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-white/[0.05] rounded-lg transition-colors w-full text-left"><Eye size={14}/> Pokaż profil</button>
               <button className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-white/[0.05] rounded-lg transition-colors w-full text-left"><MessageSquare size={14}/> Wyślij wiadomość</button>
+              {activeVoiceChannel && (
+                  <div
+                    className="px-3 py-2 flex flex-col gap-2 w-full border-y border-white/[0.05] mt-1 pt-2 pb-2"
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div className="flex items-center gap-2 w-full">
+                      <Volume2 size={14} className="text-zinc-500 shrink-0" />
+                      <span className="text-[10px] text-zinc-500 tabular-nums shrink-0 w-10 text-right">
+                        {Math.round((userVolumes[contextMenu.data.id] ?? 1) * 100)}%
+                      </span>
+                      <input
+                        type="range"
+                        min="0.25"
+                        max="4"
+                        step="0.05"
+                        value={userVolumes[contextMenu.data.id] ?? 1}
+                        onChange={(e) => {
+                          const vol = parseFloat(e.target.value);
+                          const uid = contextMenu.data.id as string;
+                          setUserVolumes((prev) => ({ ...prev, [uid]: vol }));
+                          setUserVolume(uid, vol);
+                        }}
+                        className="flex-1 min-w-0 h-1 rounded-full appearance-none bg-white/[0.1] accent-[#00eeff]"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const uid = contextMenu.data.id as string;
+                        const next = !userOutputMuted[uid];
+                        setUserOutputMutedMap((prev) => ({ ...prev, [uid]: next }));
+                        setPeerOutputMute(uid, next);
+                      }}
+                      className="flex items-center gap-2 px-2 py-1.5 text-xs text-zinc-300 hover:text-white hover:bg-white/[0.06] rounded-lg transition-colors w-full text-left"
+                    >
+                      <VolumeX size={14} />
+                      {userOutputMuted[contextMenu.data.id as string] ? 'Włącz odsłuch użytkownika' : 'Wycisz odsłuch (tylko u Ciebie)'}
+                    </button>
+                  </div>
+              )}
               <button className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-white/[0.05] rounded-lg transition-colors w-full text-left"><UserCheck size={14}/> Zmień rolę</button>
               <div className="h-px bg-white/[0.05] my-1"></div>
               <button className="flex items-center gap-2 px-3 py-2 text-sm text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded-lg transition-colors w-full text-left"><UserMinus size={14}/> Wyrzuć z Devcord_</button>
@@ -1842,6 +2046,49 @@ export default function App() {
         </div>
       )}
 
+      {screenStreamContext && remoteScreenWatching && primaryRemoteStream && (
+        <div
+          className="fixed inset-0 z-[400] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200"
+          onClick={() => setScreenStreamContext(null)}
+          onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setScreenStreamContext(null); }}
+        >
+          <div
+            className="bg-[#0c0c0e] border border-white/[0.1] rounded-2xl shadow-[0_20px_60px_rgba(0,0,0,0.9)] overflow-hidden flex flex-col min-w-[200px]"
+            style={{
+              position: 'absolute',
+              left: Math.min(screenStreamContext.x, window.innerWidth - 220),
+              top: Math.min(screenStreamContext.y, window.innerHeight - 150),
+            }}
+            onClick={(e) => e.stopPropagation()}
+            onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+          >
+            <div className="p-3 border-b border-white/[0.05] bg-black/40">
+              <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Ustawienia Streamu</span>
+            </div>
+            <div className="p-2 flex flex-col gap-1">
+              <div className="flex items-center gap-3 px-3 py-2">
+                <Volume2 size={14} className="text-zinc-400" />
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={remoteScreenVolume}
+                  onChange={(e) => setRemoteScreenVolume(Number(e.target.value))}
+                  className="w-full accent-[#00eeff] h-1"
+                />
+              </div>
+              <label className="flex items-center gap-3 px-3 py-2 hover:bg-white/[0.05] rounded-xl cursor-pointer transition-colors group">
+                 <div className={`w-8 h-4 rounded-full relative transition-colors ${remoteScreenVideoMuted ? 'bg-[#00eeff]/50' : 'bg-white/[0.1]'}`}>
+                   <div className={`absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-white transition-transform ${remoteScreenVideoMuted ? 'translate-x-4' : ''}`}></div>
+                 </div>
+                 <span className="text-sm font-medium text-zinc-300 group-hover:text-white transition-colors">Wstrzymaj wideo</span>
+              </label>
+            </div>
+          </div>
+        </div>
+      )}
+
       {isSettingsOpen && (
         <div
           className="fixed inset-0 z-[400] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200"
@@ -1849,144 +2096,282 @@ export default function App() {
           role="presentation"
         >
           <div
-            className="w-full max-w-md bg-[#0c0c0e] border border-white/[0.1] rounded-3xl shadow-[0_0_80px_rgba(0,0,0,1)] p-6"
+            className="w-full max-w-2xl bg-[#0c0c0e] border border-white/[0.1] rounded-3xl shadow-[0_0_80px_rgba(0,0,0,1)] flex overflow-hidden max-h-[85vh]"
             onClick={(e) => e.stopPropagation()}
             role="dialog"
             aria-labelledby="settings-title"
           >
-            <div className="flex justify-between items-center mb-5">
-              <h2 id="settings-title" className="text-xl font-bold text-white">
+            {/* Sidebar Ustawień */}
+            <div className="w-1/3 min-w-[180px] bg-[#050505] p-4 border-r border-white/[0.06] flex flex-col gap-1 overflow-y-auto">
+              <h2 id="settings-title" className="text-xl font-bold text-white mb-4 px-2 tracking-tight">
                 Ustawienia
               </h2>
-              <button
-                type="button"
-                onClick={() => setIsSettingsOpen(false)}
-                className="text-zinc-500 hover:text-white p-1 rounded-lg hover:bg-white/[0.06]"
-              >
-                <X size={22} />
-              </button>
-            </div>
-            <div className="flex gap-2 p-1 rounded-xl bg-black/40 border border-white/[0.06] mb-6">
+              <div className="text-[10px] uppercase font-bold text-zinc-500 tracking-widest px-2 mb-2 mt-2">Personalizacja</div>
               <button
                 type="button"
                 onClick={() => setSettingsTab('profile')}
-                className={`flex-1 py-2.5 rounded-lg text-xs font-bold uppercase tracking-wider transition-colors ${
-                  settingsTab === 'profile' ? 'bg-[#00eeff]/15 text-[#00eeff] border border-[#00eeff]/30' : 'text-zinc-500 hover:text-zinc-300'
+                className={`flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm font-semibold transition-colors ${
+                  settingsTab === 'profile' ? 'bg-[#00eeff]/15 text-[#00eeff]' : 'text-zinc-400 hover:text-zinc-200 hover:bg-white/[0.05]'
                 }`}
               >
-                Profil
+                Mój Profil
               </button>
               <button
                 type="button"
-                onClick={() => setSettingsTab('audio')}
-                className={`flex-1 py-2.5 rounded-lg text-xs font-bold uppercase tracking-wider transition-colors ${
-                  settingsTab === 'audio' ? 'bg-[#00eeff]/15 text-[#00eeff] border border-[#00eeff]/30' : 'text-zinc-500 hover:text-zinc-300'
+                onClick={() => setSettingsTab('appearance')}
+                className={`flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm font-semibold transition-colors ${
+                  settingsTab === 'appearance' ? 'bg-[#00eeff]/15 text-[#00eeff]' : 'text-zinc-400 hover:text-zinc-200 hover:bg-white/[0.05]'
                 }`}
               >
-                Dźwięk
+                Wygląd i Motywy
+              </button>
+              <div className="text-[10px] uppercase font-bold text-zinc-500 tracking-widest px-2 mb-2 mt-4">Prywatność</div>
+              <button
+                type="button"
+                onClick={() => setSettingsTab('account')}
+                className={`flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm font-semibold transition-colors ${
+                  settingsTab === 'account' ? 'bg-[#00eeff]/15 text-[#00eeff]' : 'text-zinc-400 hover:text-zinc-200 hover:bg-white/[0.05]'
+                }`}
+              >
+                Konto i Hasła
+              </button>
+              <div className="text-[10px] uppercase font-bold text-zinc-500 tracking-widest px-2 mb-2 mt-4">Sprzęt</div>
+              <button
+                type="button"
+                onClick={() => setSettingsTab('audio')}
+                className={`flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm font-semibold transition-colors ${
+                  settingsTab === 'audio' ? 'bg-[#00eeff]/15 text-[#00eeff]' : 'text-zinc-400 hover:text-zinc-200 hover:bg-white/[0.05]'
+                }`}
+              >
+                Dźwięk i Wideo
               </button>
             </div>
-            {settingsTab === 'profile' ? (
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">
-                    Wyświetlana nazwa
-                  </label>
-                  <input
-                    value={localUserName}
-                    onChange={(e) => setLocalUserName(e.target.value)}
-                    className="w-full bg-[#151515] border border-white/[0.1] rounded-xl px-3 py-2.5 text-sm text-white outline-none focus:border-[#00eeff]/40"
-                    placeholder="Twój nick"
-                  />
+
+            {/* Content Ustawień */}
+            <div className="flex-1 p-8 flex flex-col overflow-y-auto custom-scrollbar relative">
+              <button
+                type="button"
+                onClick={() => setIsSettingsOpen(false)}
+                className="absolute top-4 right-4 text-zinc-500 hover:text-white p-1 rounded-lg hover:bg-white/[0.06] transition-colors"
+              >
+                <X size={22} />
+              </button>
+              
+              {settingsSuccess && <div className="mb-6 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-sm">{settingsSuccess}</div>}
+              {settingsError && <div className="mb-6 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-500 text-sm">{settingsError}</div>}
+
+              {settingsTab === 'profile' && (
+                <div className="space-y-8 animate-in fade-in duration-300">
+                  <div>
+                    <h3 className="text-xl font-bold text-white mb-1">Mój Profil</h3>
+                    <p className="text-sm text-zinc-400">Dostosuj to, jak inni widzą Cię na kanałach.</p>
+                  </div>
+
+                  <div className="flex gap-6 items-start">
+                    {/* Podgląd */}
+                    <div className="w-32 h-32 rounded-2xl bg-black border border-white/[0.08] flex items-center justify-center shadow-xl overflow-hidden shrink-0 relative">
+                       {localUserAvatar ? (
+                          <img src={localUserAvatar} alt="avatar" className="w-full h-full object-cover" />
+                       ) : (
+                          <span className="text-4xl font-bold" style={{ color: localUserColor }}>{localUserName.charAt(0)}</span>
+                       )}
+                    </div>
+
+                    <div className="flex-1 space-y-4">
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">Avatar URL</label>
+                        <input
+                          value={localUserAvatar}
+                          onChange={(e) => setLocalUserAvatar(e.target.value)}
+                          className="w-full bg-[#151515] border border-white/[0.1] rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-[#00eeff]/40 transition-colors"
+                          placeholder="https://imgur.com/..."
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">Wyświetlana nazwa</label>
+                        <input
+                          value={localUserName}
+                          onChange={(e) => setLocalUserName(e.target.value)}
+                          className="w-full bg-[#151515] border border-white/[0.1] rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-[#00eeff]/40 transition-colors"
+                          placeholder="Twój nick"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="pt-6 border-t border-white/[0.06] space-y-4">
+                    <h4 className="text-sm font-bold text-white uppercase tracking-wider">Styl Nicku (Nitro)</h4>
+                    
+                    <div>
+                        <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">Kolor Główny (HEX)</label>
+                        <div className="flex gap-3 items-center">
+                          <input type="color" value={localUserColor} onChange={e => setLocalUserColor(e.target.value)} className="w-10 h-10 rounded-lg cursor-pointer bg-transparent border-0 p-0" />
+                          <input
+                            value={localUserColor}
+                            onChange={(e) => setLocalUserColor(e.target.value)}
+                            className="flex-1 bg-[#151515] border border-white/[0.1] rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-[#00eeff]/40 font-mono transition-colors"
+                            placeholder="#00eeff"
+                          />
+                        </div>
+                    </div>
+
+                    <div>
+                        <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">Poświata (CSS box-shadow/text-shadow)</label>
+                        <input
+                          value={localUserGlow}
+                          onChange={(e) => setLocalUserGlow(e.target.value)}
+                          className="w-full bg-[#151515] border border-white/[0.1] rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-[#00eeff]/40 font-mono transition-colors"
+                          placeholder="np. 0 0 15px rgba(0,238,255,0.4) lub none"
+                        />
+                    </div>
+                    
+                    <div className="mt-4 p-4 rounded-xl border border-white/[0.06] bg-black/40">
+                      <span className="text-xs text-zinc-500 mb-2 block uppercase font-bold tracking-widest">Podgląd na czacie:</span>
+                      <span className="font-semibold text-[15px] tracking-wide" style={{ color: localUserColor, textShadow: localUserGlow !== 'none' ? localUserGlow : 'none' }}>
+                        {localUserName || 'Anonim'}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="pt-4 flex justify-end">
+                    <button onClick={saveProfileSettings} disabled={settingsBusy} className="px-6 py-2.5 rounded-xl bg-[#00eeff] text-black font-bold text-sm shadow-[0_0_15px_rgba(0,238,255,0.4)] disabled:opacity-50">
+                      {settingsBusy ? 'Zapisywanie...' : 'Zapisz Zmiany'}
+                    </button>
+                  </div>
                 </div>
-                {API_BASE_URL && authEmail ? (
-                  <p className="text-xs text-zinc-500">
-                    Konto: <span className="text-zinc-400 font-mono">{authEmail}</span>
-                  </p>
-                ) : null}
-              </div>
-            ) : (
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">
-                    Mikrofon
-                  </label>
-                  <select
-                    value={micDeviceId}
-                    onChange={(e) => setMicDeviceId(e.target.value)}
-                    className="w-full bg-[#151515] border border-white/[0.1] rounded-xl px-3 py-2.5 text-sm text-white outline-none focus:border-[#00eeff]/40"
-                  >
-                    <option value="">Domyślny</option>
-                    {audioInputs.map((d) => (
-                      <option key={d.deviceId} value={d.deviceId}>
-                        {d.label || d.deviceId || 'Wejście audio'}
-                      </option>
-                    ))}
-                  </select>
+              )}
+
+              {settingsTab === 'appearance' && (
+                <div className="space-y-8 animate-in fade-in duration-300">
+                  <div>
+                    <h3 className="text-xl font-bold text-white mb-1">Wygląd</h3>
+                    <p className="text-sm text-zinc-400">Zmień motyw aplikacji.</p>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4 mt-6">
+                    <button onClick={() => setLocalTheme('dark')} className={`p-4 rounded-2xl border text-left transition-all ${localTheme === 'dark' ? 'border-[#00eeff] bg-[#00eeff]/5' : 'border-white/[0.08] hover:border-white/[0.2] bg-white/[0.02]'}`}>
+                      <div className="w-full h-24 bg-[#0a0a0c] rounded-lg border border-white/[0.1] mb-3 flex relative overflow-hidden">
+                         <div className="w-1/4 bg-[#080808] border-r border-white/[0.05]"></div>
+                         <div className="flex-1 p-2"><div className="w-1/2 h-2 rounded bg-white/[0.1] mb-1"></div><div className="w-3/4 h-2 rounded bg-[#00eeff]/50"></div></div>
+                      </div>
+                      <span className="font-bold text-white">Classic Dark</span>
+                      <p className="text-xs text-zinc-500 mt-1">Domyślny motyw Devcord.</p>
+                    </button>
+
+                    <button onClick={() => setLocalTheme('light')} className={`p-4 rounded-2xl border text-left transition-all ${localTheme === 'light' ? 'border-[#00eeff] bg-[#00eeff]/5' : 'border-white/[0.08] hover:border-white/[0.2] bg-white/[0.02]'}`}>
+                      <div className="w-full h-24 bg-white rounded-lg border border-black/[0.1] mb-3 flex relative overflow-hidden">
+                         <div className="w-1/4 bg-gray-100 border-r border-black/[0.05]"></div>
+                         <div className="flex-1 p-2"><div className="w-1/2 h-2 rounded bg-black/[0.1] mb-1"></div><div className="w-3/4 h-2 rounded bg-[#00eeff]"></div></div>
+                      </div>
+                      <span className="font-bold text-white">Light Mode</span>
+                      <p className="text-xs text-zinc-500 mt-1">Jasny wariant interfejsu.</p>
+                    </button>
+                  </div>
                 </div>
-                <div className="flex items-center justify-between gap-3 py-1">
-                  <span className="text-sm text-zinc-300">Bramka ciszy (dB)</span>
+              )}
+
+              {settingsTab === 'account' && (
+                <div className="space-y-8 animate-in fade-in duration-300">
+                  <div>
+                    <h3 className="text-xl font-bold text-white mb-1">Moje Konto</h3>
+                    <p className="text-sm text-zinc-400">Zarządzaj swoimi danymi dostępowymi.</p>
+                  </div>
+                  
+                  <div className="bg-black/40 border border-white/[0.06] rounded-2xl p-6">
+                    <div className="flex items-center justify-between mb-6 border-b border-white/[0.06] pb-6">
+                      <div>
+                        <span className="text-xs uppercase font-bold text-zinc-500 block mb-1">Email kontaktowy</span>
+                        <span className="text-zinc-200">{authEmail || 'Zalogowano lokalnie'}</span>
+                      </div>
+                      <button className="px-4 py-2 bg-white/[0.05] hover:bg-white/[0.1] rounded-lg text-sm text-white transition-colors">Zmień Email</button>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <span className="text-xs uppercase font-bold text-zinc-500 block mb-1">Bezpieczeństwo</span>
+                        <span className="text-zinc-200">Zmień hasło by ułatwić zarządzanie kontem.</span>
+                      </div>
+                      <button className="px-4 py-2 border border-blue-500/30 text-blue-400 hover:bg-blue-500/10 rounded-lg text-sm transition-colors">Zmień Hasło</button>
+                    </div>
+                  </div>
+
+                  <div className="pt-6 border-t border-white/[0.06]">
+                     <h4 className="text-sm font-bold text-red-500 mb-2">Strefa Zagrożenia</h4>
+                     <p className="text-xs text-zinc-500 mb-4">Trwale usuń swoje konto i wszystkie powiązane z nim dane.</p>
+                     <button className="px-4 py-2 border border-red-500/50 text-red-500 hover:bg-red-500/10 rounded-lg text-sm transition-colors">Usuń konto</button>
+                  </div>
+                </div>
+              )}
+
+              {settingsTab === 'audio' && (
+                <div className="space-y-6 animate-in fade-in duration-300">
+                  <div>
+                    <h3 className="text-xl font-bold text-white mb-1">Dźwięk i Wideo</h3>
+                    <p className="text-sm text-zinc-400">Dostosuj swoje wejścia i wyjścia.</p>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">
+                      Mikrofon
+                    </label>
+                    <select
+                      value={micDeviceId}
+                      onChange={(e) => setMicDeviceId(e.target.value)}
+                      className="w-full bg-[#151515] border border-white/[0.1] rounded-xl px-4 py-3 text-sm text-white outline-none focus:border-[#00eeff]/40 transition-colors"
+                    >
+                      <option value="">Domyślny sprzęt systemowy</option>
+                      {audioInputs.map((d) => (
+                        <option key={d.deviceId} value={d.deviceId}>
+                          {d.label || d.deviceId || 'Wejście audio'}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="bg-[#151515] border border-white/[0.08] rounded-2xl p-5">
+                    <div className="flex items-center justify-between gap-3 mb-4">
+                      <span className="text-sm font-bold text-white tracking-wide">Bramka ciszy (Tłumienie sprzętowe)</span>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={micSoftwareGate}
+                        onClick={() => setMicSoftwareGate((v) => !v)}
+                        className={`relative w-12 h-6 rounded-full transition-colors ${micSoftwareGate ? 'bg-[#00eeff]/50' : 'bg-white/[0.1]'}`}
+                      >
+                        <span
+                          className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white transition-transform ${micSoftwareGate ? 'translate-x-6' : ''}`}
+                        />
+                      </button>
+                    </div>
+                    <div>
+                      <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-3 mt-4">
+                        <span>Próg odcięcia (dBFS)</span>
+                        <span className="text-[#00eeff] font-mono tabular-nums bg-[#00eeff]/10 px-2 py-0.5 rounded">{micGateThresholdDb} dB</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={-58}
+                        max={-26}
+                        step={1}
+                        value={micGateThresholdDb}
+                        onChange={(e) => setMicGateThresholdDb(Number(e.target.value))}
+                        disabled={!micSoftwareGate}
+                        className="w-full accent-[#00eeff] h-2 disabled:opacity-35"
+                      />
+                      <div className="flex justify-between text-[10px] text-zinc-500 mt-2 font-medium">
+                        <span>Bardzo czuły (Ciszej)</span>
+                        <span>Ostre cięcie (Głośniej)</span>
+                      </div>
+                    </div>
+                  </div>
                   <button
                     type="button"
-                    role="switch"
-                    aria-checked={micSoftwareGate}
-                    onClick={() => setMicSoftwareGate((v) => !v)}
-                    className={`relative w-11 h-6 rounded-full transition-colors ${micSoftwareGate ? 'bg-[#00eeff]/40' : 'bg-white/[0.08]'}`}
+                    onClick={() => void refreshAudioDevices()}
+                    className="mt-4 w-full py-3 rounded-xl text-sm font-semibold border border-white/[0.1] text-zinc-300 hover:bg-white/[0.05] hover:text-white transition-colors"
                   >
-                    <span
-                      className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white transition-transform ${micSoftwareGate ? 'translate-x-5' : ''}`}
-                    />
+                    Wyszukaj ponownie urządzenia
                   </button>
                 </div>
-                <div>
-                  <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">
-                    <span>Próg głośności (dBFS)</span>
-                    <span className="text-zinc-400 tabular-nums">{micGateThresholdDb} dB</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={-58}
-                    max={-26}
-                    step={1}
-                    value={micGateThresholdDb}
-                    onChange={(e) => setMicGateThresholdDb(Number(e.target.value))}
-                    disabled={!micSoftwareGate}
-                    className="w-full accent-[#00eeff] h-2 disabled:opacity-35"
-                  />
-                  <div className="flex justify-between text-[10px] text-zinc-600 mt-1">
-                    <span>czulszy</span>
-                    <span>ostrzejsze cięcie</span>
-                  </div>
-                  <p className="text-[11px] text-zinc-600 mt-2 leading-relaxed">
-                    Działa w przeglądarce: sygnał poniżej progu jest tłumiony. Wyższy próg (bliżej 0 dB) = więcej wycięcia szumu, ale trzeba mówić wyraźniej. Możesz regulować na żywo na połączonym kanale.
-                  </p>
-                </div>
-                <div className="flex items-center justify-between gap-3 py-1 border-t border-white/[0.06] pt-3">
-                  <span className="text-sm text-zinc-400">+ tłumienie przeglądarki</span>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={micBrowserNoiseSuppression}
-                    onClick={() => setMicBrowserNoiseSuppression((v) => !v)}
-                    className={`relative w-11 h-6 rounded-full transition-colors ${micBrowserNoiseSuppression ? 'bg-white/[0.15]' : 'bg-white/[0.08]'}`}
-                  >
-                    <span
-                      className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white transition-transform ${micBrowserNoiseSuppression ? 'translate-x-5' : ''}`}
-                    />
-                  </button>
-                </div>
-                <p className="text-[11px] text-zinc-600 leading-relaxed">
-                  Backend nie przetwarza audio w WebRTC — tylko sygnalizacja. Bramka jest po Twojej stronie. Zmiana urządzenia lub opcji z &quot;+ przeglądarka&quot; wymaga ponownego wejścia na kanał.
-                </p>
-                <button
-                  type="button"
-                  onClick={() => void refreshAudioDevices()}
-                  className="w-full py-2.5 rounded-xl text-sm font-semibold border border-white/[0.1] text-zinc-300 hover:bg-white/[0.05] transition-colors"
-                >
-                  Odśwież listę urządzeń
-                </button>
-              </div>
-            )}
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -2133,7 +2518,8 @@ export default function App() {
                 </div>
               ) : (
                 (() => {
-                  const activeServerData = servers.find((s) => s.id === activeServer) || servers[0];
+                  const terminalServerData = { id: '', name: 'Terminal Osobisty', color: '#00eeff', glow: '0 0 15px rgba(0,238,255,0.1)', icon: Terminal };
+                  const activeServerData = activeServer === '' ? terminalServerData : (servers.find((s) => s.id === activeServer) || servers[0]);
                   if (!activeServerData) return null;
                   return (
                     <>
@@ -2164,6 +2550,21 @@ export default function App() {
                       </button>
                       {isWorkspaceDropdownOpen && (
                         <div className="absolute top-[calc(100%-4px)] left-4 right-4 mt-2 bg-[#0c0c0e]/95 backdrop-blur-3xl border border-white/[0.1] rounded-2xl shadow-[0_20px_60px_rgba(0,0,0,0.9)] p-2 flex flex-col gap-1 z-50">
+                          <button
+                            onClick={() => {
+                              setActiveServer('');
+                              setActiveChannel('');
+                              setIsWorkspaceDropdownOpen(false);
+                            }}
+                            className="w-full flex items-center gap-3 p-2 rounded-xl transition-all duration-200 hover:bg-white/[0.05] group"
+                          >
+                            <div className="w-8 h-8 rounded-lg flex items-center justify-center transition-transform group-hover:scale-105" style={{ color: '#00eeff', backgroundColor: 'rgba(0,238,255,0.15)', border: '1px solid rgba(0,238,255,0.3)' }}>
+                              <Terminal size={14} />
+                            </div>
+                            <span className="text-sm font-semibold tracking-wide flex-1 text-left" style={{ color: '#00eeff' }}>Terminal Osobisty</span>
+                            {activeServer === '' && <Check size={16} className="ml-auto text-[#00eeff]" />}
+                          </button>
+                          <div className="h-px bg-white/[0.05] my-1 mx-2"></div>
                           {servers.map((server) => (
                             <button
                               key={server.id}
@@ -2220,6 +2621,36 @@ export default function App() {
             </div>
 
             {/* LISTA KANAŁÓW I KATEGORII */}
+            {activeServer === '' ? (
+              <div className="flex-1 overflow-y-auto custom-scrollbar py-4 px-4 flex flex-col gap-2 relative">
+                <div className="absolute inset-0 bg-[#00eeff]/[0.01] pointer-events-none rounded-xl"></div>
+                <div className="text-[10px] uppercase font-bold tracking-[0.2em] text-zinc-500 mb-2 px-2 flex items-center justify-between mt-2">
+                  <span>Wiadomości Bezpośrednie</span>
+                  <Plus size={14} className="hover:text-[#00eeff] cursor-pointer" title="Nowa wiadomość DM" />
+                </div>
+                {/* Mock DMs */}
+                <button className="flex items-center gap-3 p-2 hover:bg-[#00eeff]/10 hover:border-[#00eeff]/20 rounded-xl border border-transparent transition-colors text-zinc-300 hover:text-white w-full text-left group">
+                  <div className="relative shrink-0">
+                    <div className="w-8 h-8 rounded-[10px] bg-black border border-white/[0.1] flex items-center justify-center text-xs font-bold text-white group-hover:border-[#00eeff]/30 transition-colors">AK</div>
+                    <div className="absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full bg-emerald-500 border-[3px] border-[#080808]"></div>
+                  </div>
+                  <div className="flex flex-col min-w-0 flex-1">
+                    <span className="text-sm font-semibold truncate text-zinc-200 group-hover:text-[#00eeff] transition-colors">Anna K.</span>
+                    <span className="text-[10px] text-zinc-500 truncate">Może jutro o 15:00?</span>
+                  </div>
+                </button>
+                <button className="flex items-center gap-3 p-2 hover:bg-[#00eeff]/10 hover:border-[#00eeff]/20 rounded-xl border border-transparent transition-colors text-zinc-300 hover:text-white w-full text-left group">
+                  <div className="relative shrink-0">
+                    <div className="w-8 h-8 rounded-[10px] bg-black border border-white/[0.1] flex items-center justify-center text-xs font-bold text-white group-hover:border-[#00eeff]/30 transition-colors">MT</div>
+                    <div className="absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full border-[3px] border-[#080808] bg-zinc-600"></div>
+                  </div>
+                  <div className="flex flex-col min-w-0 flex-1">
+                    <span className="text-sm font-semibold truncate text-zinc-200 group-hover:text-[#00eeff] transition-colors">Michał (AI Team)</span>
+                    <span className="text-[10px] text-zinc-500 truncate">Widziałeś nowe pull requesty?</span>
+                  </div>
+                </button>
+              </div>
+            ) : (
             <div className="flex-1 overflow-y-auto custom-scrollbar py-2 px-4 flex flex-col gap-6">
               
               {/* KANAŁY BEZ KATEGORII */}
@@ -2261,7 +2692,11 @@ export default function App() {
                               return (
                                 <div key={uid} onContextMenu={(e) => handleContextMenu(e, 'user', u)} title={sidebarVoiceVad ? (speakingPeers[uid] ? 'Mówi' : 'Cisza') : undefined} className="flex items-center gap-2 text-xs text-zinc-400 py-1 px-2 rounded-md hover:bg-white/[0.05] cursor-pointer transition-colors border border-transparent hover:border-white/[0.05] min-w-0">
                                   <div className="relative shrink-0">
-                                    <div className="w-5 h-5 rounded-md bg-zinc-800 flex items-center justify-center text-[9px] font-bold text-white border border-white/[0.05]">{u.name.charAt(0)}</div>
+                                    {u.avatarUrl?.trim() ? (
+                                      <img src={u.avatarUrl} alt="" className="w-5 h-5 rounded-md object-cover border border-white/[0.05]" />
+                                    ) : (
+                                      <div className="w-5 h-5 rounded-md bg-zinc-800 flex items-center justify-center text-[9px] font-bold text-white border border-white/[0.05]">{u.name.charAt(0)}</div>
+                                    )}
                                     <div className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 border-2 rounded-full ${isMe && voicePhase === 'connected' ? 'bg-[#00eeff] border-[#080808]' : 'bg-emerald-500 border-[#080808]'}`} />
                                   </div>
                                   <span className={`truncate min-w-0 flex items-center gap-1.5 ${isMe ? 'text-[#00eeff] font-medium' : ''}`}>
@@ -2337,7 +2772,11 @@ export default function App() {
                                     return (
                                       <div key={uid} onContextMenu={(e) => handleContextMenu(e, 'user', u)} title={sidebarVoiceVad ? (speakingPeers[uid] ? 'Mówi' : 'Cisza') : undefined} className="flex items-center gap-2 text-xs text-zinc-400 py-1 px-2 rounded-md hover:bg-white/[0.05] cursor-pointer transition-colors border border-transparent hover:border-white/[0.05] min-w-0">
                                         <div className="relative shrink-0">
-                                          <div className="w-5 h-5 rounded-md bg-zinc-800 flex items-center justify-center text-[9px] font-bold text-white border border-white/[0.05]">{u.name.charAt(0)}</div>
+                                          {u.avatarUrl?.trim() ? (
+                                            <img src={u.avatarUrl} alt="" className="w-5 h-5 rounded-md object-cover border border-white/[0.05]" />
+                                          ) : (
+                                            <div className="w-5 h-5 rounded-md bg-zinc-800 flex items-center justify-center text-[9px] font-bold text-white border border-white/[0.05]">{u.name.charAt(0)}</div>
+                                          )}
                                           <div className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 border-2 rounded-full ${isMe && voicePhase === 'connected' ? 'bg-[#00eeff] border-[#080808]' : 'bg-emerald-500 border-[#080808]'}`} />
                                         </div>
                                         <span className={`truncate min-w-0 flex items-center gap-1.5 ${isMe ? 'text-[#00eeff] font-medium' : ''}`}>
@@ -2360,6 +2799,7 @@ export default function App() {
                 );
               })}
             </div>
+            )}
 
             <div className="h-16 border-t border-white/[0.04] bg-black/40 p-2 flex items-center z-50">
               <div onClick={() => setIsSettingsOpen(true)} className="flex items-center gap-2 flex-1 hover:bg-white/[0.05] p-1.5 rounded-lg cursor-pointer transition-colors">
@@ -2381,35 +2821,87 @@ export default function App() {
 
         {/* --- 2. MAIN VIEW (CZAT / VOICE) --- */}
         <main className="flex-1 flex flex-col relative bg-[#0a0a0c] overflow-hidden z-0 border-l border-white/[0.02] transition-all duration-500">
-          {API_BASE_URL && servers.length === 0 ? (
+          {activeServer === '' ? (
+            <div className="flex-1 flex flex-col p-8 bg-[#0a0a0c] overflow-y-auto custom-scrollbar relative animate-in fade-in duration-300">
+               <div className="absolute inset-0 bg-gradient-to-b from-[#00eeff]/[0.08] to-transparent pointer-events-none opacity-40"></div>
+               <div className="max-w-5xl mx-auto w-full pt-10">
+                 <div className="flex items-center gap-4 mb-3">
+                   <div className="w-14 h-14 rounded-2xl bg-[#00eeff]/10 border border-[#00eeff]/20 flex items-center justify-center shadow-[0_0_20px_rgba(0,238,255,0.15)]"><Terminal size={26} className="text-[#00eeff]" /></div>
+                   <div>
+                     <h1 className="text-3xl font-bold text-white tracking-tight">Przegląd Systemu</h1>
+                     <p className="text-zinc-400 text-sm">Twój osobisty terminal i wiadomości prywatne</p>
+                   </div>
+                 </div>
+                 
+                 <div className="h-px w-full bg-gradient-to-r from-white/[0.1] to-transparent mb-10"></div>
+                 
+                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="bg-[#0f0f12] border border-white/[0.06] p-6 rounded-3xl relative overflow-hidden group hover:border-white/[0.1] hover:bg-white/[0.02] transition-all">
+                      <div className="absolute -top-10 -right-10 w-40 h-40 bg-[#00eeff]/5 rounded-full blur-2xl group-hover:bg-[#00eeff]/10 transition-colors"></div>
+                      <div className="flex items-center gap-3 mb-6 relative z-10">
+                        <Coffee size={20} className="text-[#00eeff]" />
+                        <h2 className="text-lg font-bold text-white tracking-wide">Daily Sync</h2>
+                        <span className="ml-auto text-[10px] uppercase font-bold text-[#00eeff] bg-[#00eeff]/10 px-2 py-1 rounded-md">Za 22 minuty</span>
+                      </div>
+                      <p className="text-sm text-zinc-400 relative z-10 leading-relaxed mb-6">Rozpoczyna się spotkanie w kanele głosowym <b>Wyspa Devcord</b> ze wszystkimi współpracownikami.</p>
+                      <button className="px-5 py-2 bg-black/50 text-[#00eeff] font-bold border border-[#00eeff]/30 rounded-xl text-sm transition-all hover:bg-[#00eeff]/10 hover:shadow-[0_0_15px_rgba(0,238,255,0.15)] relative z-10 w-max shadow-lg">
+                        Dołącz teraz
+                      </button>
+                    </div>
+                    
+                    <div className="bg-[#0f0f12] border border-white/[0.06] p-6 rounded-3xl relative overflow-hidden group hover:border-white/[0.1] hover:bg-white/[0.02] transition-all">
+                      <div className="absolute -top-10 -right-10 w-40 h-40 bg-emerald-500/5 rounded-full blur-2xl group-hover:bg-emerald-500/10 transition-colors"></div>
+                      <div className="flex items-center gap-3 mb-6 relative z-10">
+                        <CheckSquare size={20} className="text-emerald-400" />
+                        <h2 className="text-lg font-bold text-white tracking-wide">Szybkie zadania</h2>
+                        <span className="ml-auto text-[10px] uppercase font-bold text-zinc-500 bg-white/[0.05] px-2 py-1 rounded-md">Globale</span>
+                      </div>
+                      <ul className="text-sm text-zinc-400 space-y-3 relative z-10">
+                        <li className="flex items-start gap-4 p-3 rounded-xl bg-black border border-white/[0.04] group-hover:border-white/[0.08] transition-colors">
+                          <div className="mt-1 flex items-center justify-center"><div className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.8)]"></div></div> 
+                          <span className="leading-tight text-zinc-300 font-medium tracking-wide">Przejrzeć pull-requesty z nowego brancha UI Settings</span>
+                        </li>
+                        <li className="flex items-start gap-4 p-3 rounded-xl bg-black border border-white/[0.04] group-hover:border-white/[0.08] transition-colors">
+                          <div className="mt-1 flex items-center justify-center"><div className="w-2 h-2 rounded-full bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.8)]"></div></div> 
+                          <span className="leading-tight text-zinc-300 font-medium tracking-wide">Aktualizacja bazy migracji 003_user_profiles.sql</span>
+                        </li>
+                      </ul>
+                    </div>
+                 </div>
+               </div>
+            </div>
+          ) : API_BASE_URL && servers.length === 0 ? (
             <div className="flex-1 flex flex-col items-center justify-center p-10 text-center">
               <div className="w-20 h-20 rounded-3xl bg-[#00eeff]/10 border border-[#00eeff]/25 flex items-center justify-center mb-8">
                 <Server size={40} className="text-[#00eeff]" />
               </div>
-              <h1 className="text-2xl font-bold text-white mb-2 tracking-tight">Zacznij od serwera</h1>
+              <h1 className="text-2xl font-bold text-white mb-2 tracking-tight">System pusty</h1>
               <p className="text-zinc-500 text-sm max-w-md mb-8 leading-relaxed">
-                Nie należysz jeszcze do żadnej przestrzeni. Utwórz własną — dostaniesz kanał „powitania” — albo wpisz kod zaproszenia.
+                Przejdź do <b>Terminala Osobistego</b>, aby sprawdzić DM, lub dołącz do nowej przestrzeni roboczej korzystając z przycisków w menu.
               </p>
               <div className="flex flex-wrap gap-3 justify-center">
                 <button
                   type="button"
-                  onClick={() => setCreateServerModal('create')}
-                  className="px-6 py-3 rounded-xl bg-[#00eeff] text-black font-bold text-sm shadow-[0_0_20px_rgba(0,238,255,0.35)] hover:scale-[1.02] transition-transform"
+                  onClick={() => setActiveServer('')}
+                  className="px-6 py-3 rounded-xl bg-[#00eeff] text-black font-bold text-sm shadow-[0_0_20px_rgba(0,238,255,0.35)] hover:scale-[1.02] transition-transform flex items-center gap-2"
                 >
-                  Utwórz serwer
+                  <Terminal size={16} /> Przejdź do Terminala
                 </button>
                 <button
                   type="button"
-                  onClick={() => setCreateServerModal('join')}
-                  className="px-6 py-3 rounded-xl border border-white/[0.12] text-zinc-200 font-semibold text-sm hover:bg-white/[0.05] transition-colors"
+                  onClick={() => setCreateServerModal('create')}
+                  className="px-6 py-3 rounded-xl border border-white/[0.12] text-zinc-200 font-semibold text-sm hover:bg-white/[0.05] transition-colors flex items-center gap-2"
                 >
-                  Dołącz do serwera
+                  <Plus size={16} /> Nowy Serwer
                 </button>
               </div>
             </div>
           ) : API_BASE_URL && servers.length > 0 && !currentChannelData ? (
-            <div className="flex-1 flex items-center justify-center p-8 text-center text-zinc-500 text-sm">
-              Brak kanału tekstowego. Dodaj kategorię / kanał z menu kontekstowego albo odśwież stronę.
+            <div className="flex-1 flex flex-col items-center justify-center p-8 text-center text-zinc-500 text-sm">
+              <div className="w-16 h-16 rounded-3xl bg-white/[0.02] border border-white/[0.05] flex items-center justify-center mb-6">
+                <Zap size={24} className="text-zinc-400" />
+              </div>
+              Brak zdefiniowanego kanału tekstawego w tej przestrzeni roboczej.
             </div>
           ) : (
           <>
@@ -2452,58 +2944,104 @@ export default function App() {
                 {activeVoiceChannel === currentChannelData?.id ? (
                   <div className="w-full max-w-7xl mx-auto flex flex-col pb-24">
                     <div className="flex flex-col gap-10 mb-12 w-full">
-                    {screenStream && (
-                      <div className="w-full aspect-video rounded-3xl border border-[#00eeff]/20 bg-black/80 p-2 shadow-[0_0_80px_rgba(0,238,255,0.1)] relative group transition-all duration-700">
-                        <div className="absolute top-0 left-0 w-12 h-12 border-t-2 border-l-2 border-[#00eeff]/80 rounded-tl-3xl z-10 transition-all duration-500 group-hover:w-16 group-hover:h-16 shadow-[-5px_-5px_15px_rgba(0,238,255,0.2)]"></div>
-                        <div className="absolute top-0 right-0 w-12 h-12 border-t-2 border-r-2 border-[#00eeff]/80 rounded-tr-3xl z-10 transition-all duration-500 group-hover:w-16 group-hover:h-16 shadow-[5px_-5px_15px_rgba(0,238,255,0.2)]"></div>
-                        <div className="absolute bottom-0 left-0 w-12 h-12 border-b-2 border-l-2 border-[#00eeff]/80 rounded-bl-3xl z-10 transition-all duration-500 group-hover:w-16 group-hover:h-16 shadow-[-5px_5px_15px_rgba(0,238,255,0.2)]"></div>
-                        <div className="absolute bottom-0 right-0 w-12 h-12 border-b-2 border-r-2 border-[#00eeff]/80 rounded-br-3xl z-10 transition-all duration-500 group-hover:w-16 group-hover:h-16 shadow-[5px_5px_15px_rgba(0,238,255,0.2)]"></div>
-                        <div className="w-full h-full rounded-2xl overflow-hidden relative">
-                          <VideoPlayer stream={screenStream} isLocal={true} className="w-full h-full object-contain bg-[#030303]" />
-                          <div className="absolute top-4 left-4 px-3 py-1.5 bg-black/60 backdrop-blur-md rounded-lg text-[10px] uppercase tracking-widest font-black text-white border border-[#00eeff]/30 flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-[#00eeff] animate-pulse shadow-[0_0_8px_#00eeff]"></span>Twój ekran</div>
-                        </div>
-                      </div>
-                    )}
-                    {primaryRemoteStream && primaryRemoteSharerId && API_BASE_URL && (
-                      <div className="w-full aspect-video rounded-3xl border border-white/[0.12] bg-[#0a0a0c] p-2 shadow-[0_0_60px_rgba(0,0,0,0.5)] relative group transition-all duration-700 overflow-hidden">
-                        <div className="w-full h-full rounded-2xl overflow-hidden relative bg-[#121214] min-h-[200px] flex items-center justify-center">
-                          {remoteScreenWatching ? (
-                            <VideoPlayer
-                              stream={primaryRemoteStream}
-                              volume={remoteScreenVolume}
-                              muted={remoteScreenVideoMuted}
-                              className="w-full h-full object-contain bg-[#030303]"
-                              onContextMenu={(e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                setScreenStreamContext({ x: e.clientX, y: e.clientY });
-                              }}
-                            />
-                          ) : (
-                            <div className="absolute inset-0 flex flex-col items-center justify-center gap-6 p-8">
-                              <button
-                                type="button"
-                                onClick={() => setRemoteScreenWatching(true)}
-                                className="px-8 py-3.5 rounded-2xl bg-white/[0.08] hover:bg-white/[0.12] border border-white/[0.1] text-white text-sm font-bold tracking-wide transition-colors"
-                              >
-                                Obejrzyj stream
-                              </button>
-                              <p className="text-[11px] text-zinc-600 text-center max-w-sm">Połączenie WebRTC — dźwięk z ekranu zależy od przeglądarki i wybranego źródła udostępniania.</p>
-                            </div>
-                          )}
-                          <div className="absolute bottom-4 left-4 flex items-center gap-2 px-3 py-1.5 rounded-xl bg-black/75 border border-white/[0.08] text-white text-xs font-semibold pointer-events-none">
-                            <Monitor size={14} className="text-[#00eeff] shrink-0" />
-                            <span className="truncate max-w-[12rem]">{getUser(primaryRemoteSharerId).name}</span>
+                    {(() => {
+                      const allScreens = [
+                        ...(localScreenLive && screenStream ? [{ id: myUserId, stream: screenStream, isLocal: true }] : []),
+                        ...(API_BASE_URL ? remoteScreenPeers.map(([id, stream]) => ({ id, stream, isLocal: false })) : []),
+                      ];
+                      if (allScreens.length === 0) return null;
+
+                      const maximized = allScreens.find(s => s.id === maximizedScreenId) || allScreens[0];
+                      const others = allScreens.filter(s => s.id !== maximized.id);
+
+                      return (
+                        <div className="w-full flex flex-col gap-6">
+                          {/* Maximized Screen */}
+                          <div className="w-full aspect-video rounded-3xl border border-white/[0.12] bg-[#0a0a0c] p-2 shadow-[0_0_60px_rgba(0,0,0,0.5)] relative group transition-all duration-700 overflow-hidden">
+                            {maximized.isLocal ? (
+                              <>
+                                <div className="absolute top-0 left-0 w-12 h-12 border-t-2 border-l-2 border-[#00eeff]/80 rounded-tl-3xl z-10 transition-all duration-500 group-hover:w-16 group-hover:h-16 shadow-[-5px_-5px_15px_rgba(0,238,255,0.2)]"></div>
+                                <div className="absolute top-0 right-0 w-12 h-12 border-t-2 border-r-2 border-[#00eeff]/80 rounded-tr-3xl z-10 transition-all duration-500 group-hover:w-16 group-hover:h-16 shadow-[5px_-5px_15px_rgba(0,238,255,0.2)]"></div>
+                                <div className="absolute bottom-0 left-0 w-12 h-12 border-b-2 border-l-2 border-[#00eeff]/80 rounded-bl-3xl z-10 transition-all duration-500 group-hover:w-16 group-hover:h-16 shadow-[-5px_5px_15px_rgba(0,238,255,0.2)]"></div>
+                                <div className="absolute bottom-0 right-0 w-12 h-12 border-b-2 border-r-2 border-[#00eeff]/80 rounded-br-3xl z-10 transition-all duration-500 group-hover:w-16 group-hover:h-16 shadow-[5px_5px_15px_rgba(0,238,255,0.2)]"></div>
+                                <div className="w-full h-full rounded-2xl overflow-hidden relative">
+                                  <VideoPlayer stream={maximized.stream} isLocal={true} className="w-full h-full object-contain bg-[#030303]" />
+                                  <div className="absolute top-4 left-4 z-20 px-3 py-1.5 bg-black/60 backdrop-blur-md rounded-lg text-[10px] uppercase tracking-widest font-black text-white border border-[#00eeff]/30 flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-[#00eeff] animate-pulse shadow-[0_0_8px_#00eeff]"></span>Twój ekran</div>
+                                  
+                                  <div className="absolute top-4 right-4 z-30 flex items-center gap-2 bg-black/60 backdrop-blur-md px-3 py-1.5 rounded-lg border border-white/[0.1]">
+                                    <span className="text-[10px] text-zinc-400 font-bold uppercase tracking-widest hidden sm:block mr-2">Jakość Streamu</span>
+                                    <div className="flex items-center gap-1.5 border-r border-white/[0.1] pr-2">
+                                      <Monitor size={12} className="text-[#00eeff]" />
+                                      <select value={screenRes} onChange={e => {
+                                        const r = parseInt(e.target.value);
+                                        setScreenRes(r);
+                                        if (r === 1440 && screenFps > 60) setScreenFps(60);
+                                      }} className="bg-transparent text-white font-semibold text-xs outline-none cursor-pointer">
+                                        <option value={480} className="bg-[#111]">480p</option>
+                                        <option value={720} className="bg-[#111]">720p</option>
+                                        <option value={1080} className="bg-[#111]">1080p</option>
+                                        <option value={1440} className="bg-[#111]">1440p (Max 60fps)</option>
+                                      </select>
+                                    </div>
+                                    <div className="flex items-center gap-1.5 pl-1">
+                                      <Zap size={12} className="text-emerald-400" />
+                                      <select value={screenFps} onChange={e => setScreenFps(parseInt(e.target.value))} className="bg-transparent text-white font-semibold text-xs outline-none cursor-pointer">
+                                        <option value={30} className="bg-[#111]">30 FPS</option>
+                                        <option value={60} className="bg-[#111]">60 FPS</option>
+                                        {screenRes < 1440 && <option value={120} className="bg-[#111]">120 FPS</option>}
+                                        {screenRes < 1440 && <option value={240} className="bg-[#111]">240 FPS</option>}
+                                      </select>
+                                    </div>
+                                  </div>
+                                </div>
+                              </>
+                            ) : (
+                              <div className="w-full h-full rounded-2xl overflow-hidden relative bg-[#121214] min-h-[200px] flex items-center justify-center">
+                                {remoteScreenWatching ? (
+                                  <VideoPlayer
+                                    stream={maximized.stream}
+                                    volume={remoteScreenVolume}
+                                    muted={remoteScreenVideoMuted}
+                                    className="w-full h-full object-contain bg-[#030303]"
+                                    onContextMenu={(e) => {
+                                      e.preventDefault(); e.stopPropagation(); setScreenStreamContext({ x: e.clientX, y: e.clientY });
+                                    }}
+                                  />
+                                ) : (
+                                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-6 p-8">
+                                    <button onClick={() => setRemoteScreenWatching(true)} className="px-8 py-3.5 rounded-2xl bg-white/[0.08] hover:bg-white/[0.12] border border-white/[0.1] text-white text-sm font-bold tracking-wide transition-colors">Obejrzyj stream</button>
+                                  </div>
+                                )}
+                                <div className="absolute bottom-4 left-4 flex items-center gap-2 px-3 py-1.5 rounded-xl bg-black/75 border border-white/[0.08] text-white text-xs font-semibold pointer-events-none">
+                                  <Monitor size={14} className="text-[#00eeff] shrink-0" />
+                                  <span className="truncate max-w-[12rem]">{getUser(maximized.id).name}</span>
+                                </div>
+                                {remoteScreenWatching && (
+                                  <div className="absolute top-4 left-4 px-3 py-1.5 bg-black/60 backdrop-blur-md rounded-lg text-[10px] uppercase tracking-widest font-black text-white border border-white/[0.12] flex items-center gap-2 pointer-events-none">
+                                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_#34d399]"></span>Oglądasz
+                                  </div>
+                                )}
+                              </div>
+                            )}
                           </div>
-                          {remoteScreenWatching && (
-                            <div className="absolute top-4 left-4 px-3 py-1.5 bg-black/60 backdrop-blur-md rounded-lg text-[10px] uppercase tracking-widest font-black text-white border border-white/[0.12] flex items-center gap-2 pointer-events-none">
-                              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_#34d399]"></span>
-                              Oglądasz
+
+                          {/* Thumbnail Screens */}
+                          {others.length > 0 && (
+                            <div className="flex flex-wrap gap-4 justify-center">
+                              {others.map(s => (
+                                <div key={s.id} onClick={() => setMaximizedScreenId(s.id)} className="w-64 aspect-video rounded-2xl border border-white/[0.1] bg-[#0a0a0c] overflow-hidden cursor-pointer hover:border-[#00eeff]/50 hover:shadow-[0_0_20px_rgba(0,238,255,0.15)] transition-all relative group">
+                                  <VideoPlayer stream={s.stream} isLocal={s.isLocal} className="w-full h-full object-cover opacity-60 group-hover:opacity-100 transition-opacity" />
+                                  <div className="absolute bottom-2 left-2 flex items-center gap-1.5 px-2 py-1 rounded-lg bg-black/80 text-white text-[10px] font-semibold border border-white/[0.05]">
+                                    <Monitor size={10} className="text-[#00eeff]" />
+                                    <span className="truncate max-w-[100px]">{s.isLocal ? 'Twój ekran' : getUser(s.id).name}</span>
+                                  </div>
+                                </div>
+                              ))}
                             </div>
                           )}
                         </div>
-                      </div>
-                    )}
+                      );
+                    })()}
                     </div>
                     <div className="flex items-center gap-3 mb-8 px-2">
                       <div className="h-px flex-1 bg-gradient-to-r from-transparent via-white/[0.1] to-transparent"></div>
@@ -2513,7 +3051,17 @@ export default function App() {
                     <div className="flex flex-wrap justify-center gap-6">
                       {voiceParticipants.map((uid) => {
                         const u = getUser(uid); const isSelf = uid === myUserId; const isSpeaking = !!speakingPeers[uid];
-                        const isScreenSharing = (isSelf && !!screenStream) || !!remoteScreenByUser[uid];
+                        const isScreenSharing =
+                          (isSelf && localScreenLive) || mediaStreamHasLiveVideo(remoteScreenByUser[uid]);
+                        const muted = isSelf ? localMuted : (remoteVoiceState[uid]?.muted ?? false);
+                        const deafened = isSelf ? localDeafened : (remoteVoiceState[uid]?.deafened ?? false);
+                        const statusLine = isSelf
+                          ? (localDeafened ? 'Nie słyszysz innych · mikrofon wył.' : muted ? 'Wyciszony' : 'Połączony')
+                          : deafened
+                            ? 'Głuchy'
+                            : muted
+                              ? 'Wyciszony'
+                              : 'Połączony';
                         return (
                           <div 
                             key={uid} 
@@ -2522,8 +3070,16 @@ export default function App() {
                           >
                             <div className="relative shrink-0">
                               <div className={`absolute inset-0 rounded-full blur-md transition-all duration-500 ${isSpeaking ? 'bg-[#00eeff] opacity-50 animate-pulse' : 'opacity-0'}`}></div>
-                              <div className={`w-14 h-14 relative z-10 rounded-full flex items-center justify-center text-xl font-black transition-colors duration-500 ${isSpeaking ? 'bg-[#000] border-2 border-[#00eeff] text-[#00eeff]' : 'bg-[#151515] border border-white/[0.1] text-zinc-400'}`}>{u.name.charAt(0)}</div>
-                              <div className={`absolute bottom-0 right-0 w-4 h-4 rounded-full border-2 border-[#050505] flex items-center justify-center z-20 ${isSelf && localMuted ? 'bg-red-500' : 'bg-emerald-500'}`}>{isSelf && localMuted && <MicOff size={8} className="text-black" />}</div>
+                              <div className={`w-14 h-14 relative z-10 rounded-full flex items-center justify-center text-xl font-black transition-colors duration-500 overflow-hidden ${isSpeaking ? 'bg-[#000] border-2 border-[#00eeff] text-[#00eeff]' : 'bg-[#151515] border border-white/[0.1] text-zinc-400'}`}>
+                                {u.avatarUrl?.trim() ? (
+                                  <img src={u.avatarUrl} alt="" className="w-full h-full object-cover" />
+                                ) : (
+                                  u.name.charAt(0)
+                                )}
+                              </div>
+                              <div className={`absolute bottom-0 right-0 w-4 h-4 rounded-full border-2 border-[#050505] flex items-center justify-center z-20 ${muted || deafened ? 'bg-red-500' : 'bg-emerald-500'}`}>
+                                {deafened ? <Headphones size={8} className="text-black" /> : muted ? <MicOff size={8} className="text-black" /> : null}
+                              </div>
                               {isScreenSharing && (
                                 <div className="absolute -top-0.5 -left-0.5 z-30 w-5 h-5 rounded-md bg-[#00eeff]/20 border border-[#00eeff]/50 flex items-center justify-center" title="Udostępnia ekran">
                                   <Monitor size={10} className="text-[#00eeff]" />
@@ -2534,9 +3090,31 @@ export default function App() {
                               <span className={`text-[15px] font-bold truncate transition-colors duration-300 ${isSpeaking ? 'text-[#00eeff] drop-shadow-[0_0_8px_rgba(0,238,255,0.4)]' : 'text-zinc-200'}`}>{u.name}</span>
                               <span className="text-[10px] text-zinc-500 uppercase tracking-widest font-semibold flex items-center gap-1 mt-0.5">
                                 {isScreenSharing ? <><Monitor size={10} className="text-[#00eeff]" /> Ekran · </> : null}
-                                {isSelf && localMuted ? 'Wyciszony' : 'Połączony'}
+                                {statusLine}
                               </span>
                             </div>
+                            {isSelf ? (
+                              <button
+                                type="button"
+                                title={
+                                  localDeafened
+                                    ? 'Włącz odsłuch innych i mikrofon'
+                                    : 'Wycisz mikrofon i przestań słyszeć innych u siebie'
+                                }
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  toggleVoiceHeadphones();
+                                }}
+                                disabled={voicePhase !== 'connected'}
+                                className={`w-10 h-10 shrink-0 rounded-full flex items-center justify-center transition-colors border ${
+                                  localDeafened
+                                    ? 'bg-red-500/15 text-red-400 border-red-500/35'
+                                    : 'bg-white/[0.05] text-zinc-200 border-white/[0.08] hover:bg-white/[0.1]'
+                                } disabled:opacity-40 disabled:cursor-not-allowed`}
+                              >
+                                <Headphones size={18} className={localDeafened ? 'opacity-50' : ''} />
+                              </button>
+                            ) : null}
                             {isSpeaking && (
                               <div className="flex items-center gap-1 h-4 opacity-80 shrink-0">
                                 <div className="w-1 bg-[#00eeff] rounded-full animate-pulse h-2" style={{ animationDuration: '0.5s' }}></div>
@@ -2559,16 +3137,100 @@ export default function App() {
                 )}
               </div>
               {activeVoiceChannel === currentChannelData?.id && (
-                <div className="absolute bottom-8 left-1/2 -translate-x-1/2 bg-[#0a0a0c]/80 backdrop-blur-2xl border border-white/[0.1] rounded-full flex items-center p-2 shadow-[0_20px_60px_rgba(0,0,0,0.8)] z-30 gap-2">
-                  <button onClick={() => setLocalMuted(!localMuted)} className={`w-14 h-14 rounded-full flex items-center justify-center transition-all duration-300 border ${localMuted ? 'bg-red-500/20 text-red-400 border-red-500/40 shadow-[0_0_15px_rgba(239,68,68,0.2)]' : 'bg-white/[0.05] text-zinc-200 border-white/[0.05] hover:bg-white/[0.1]'}`} title={localMuted ? 'Włącz mikrofon' : 'Wycisz mikrofon'}>
-                    {localMuted ? <MicOff size={22} /> : <Mic size={22} />}
-                  </button>
-                  <div className="w-px h-8 bg-white/[0.1] mx-1"></div>
-                  <button onClick={toggleScreenShare} className={`px-6 h-14 rounded-full flex items-center gap-3 font-bold uppercase tracking-wider text-[11px] transition-all duration-300 border ${screenStream ? 'bg-[#00eeff] text-black border-[#00eeff] shadow-[0_0_20px_rgba(0,238,255,0.4)]' : 'bg-white/[0.05] text-zinc-200 border-white/[0.05] hover:bg-white/[0.1]'}`}>
-                    <MonitorUp size={20} />{screenStream ? 'Zakończ transmisję' : 'Udostępnij ekran'}
-                  </button>
-                  <div className="w-px h-8 bg-white/[0.1] mx-1"></div>
-                  <button onClick={disconnectVoice} className="w-14 h-14 rounded-full bg-red-500 hover:bg-red-600 text-white flex items-center justify-center transition-all duration-300 shadow-[0_0_20px_rgba(239,68,68,0.4)] hover:shadow-[0_0_30px_rgba(239,68,68,0.6)]" title="Rozłącz"><PhoneOff size={22} /></button>
+                <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-30 flex flex-col items-center gap-3">
+                  {voiceMixPanelOpen && voicePhase === 'connected' && (
+                    <div
+                      className="max-h-[min(50vh,320px)] w-[min(92vw,380px)] overflow-y-auto custom-scrollbar rounded-2xl border border-white/[0.1] bg-[#0c0c0e]/95 backdrop-blur-2xl shadow-[0_20px_60px_rgba(0,0,0,0.85)] p-3 text-left"
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2 px-1">Miks uczestników (tylko u Ciebie)</div>
+                      {voiceParticipants.filter((id) => id !== myUserId).length === 0 ? (
+                        <p className="text-xs text-zinc-500 px-1 py-2">Brak innych uczestników na kanale.</p>
+                      ) : (
+                        <ul className="flex flex-col gap-2">
+                          {voiceParticipants
+                            .filter((id) => id !== myUserId)
+                            .map((uid) => {
+                              const u = getUser(uid);
+                              const vol = userVolumes[uid] ?? 1;
+                              const outMuted = !!userOutputMuted[uid];
+                              return (
+                                <li key={uid} className="flex flex-col gap-1.5 rounded-xl bg-white/[0.03] border border-white/[0.06] px-3 py-2">
+                                  <div className="flex items-center justify-between gap-2 min-w-0">
+                                    <span className="text-sm font-semibold text-zinc-200 truncate">{u.name}</span>
+                                    <button
+                                      type="button"
+                                      title={outMuted ? 'Włącz odsłuch' : 'Wycisz odsłuch'}
+                                      onClick={() => {
+                                        const next = !outMuted;
+                                        setUserOutputMutedMap((prev) => ({ ...prev, [uid]: next }));
+                                        setPeerOutputMute(uid, next);
+                                      }}
+                                      className={`shrink-0 w-9 h-9 rounded-full flex items-center justify-center border transition-colors ${outMuted ? 'bg-red-500/20 text-red-400 border-red-500/35' : 'bg-white/[0.06] text-zinc-300 border-white/[0.08] hover:bg-white/[0.1]'}`}
+                                    >
+                                      {outMuted ? <VolumeX size={18} /> : <Volume2 size={18} />}
+                                    </button>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-[10px] text-zinc-500 tabular-nums w-9 text-right shrink-0">{Math.round(vol * 100)}%</span>
+                                    <input
+                                      type="range"
+                                      min="0.25"
+                                      max="4"
+                                      step="0.05"
+                                      value={vol}
+                                      onChange={(e) => {
+                                        const v = parseFloat(e.target.value);
+                                        setUserVolumes((prev) => ({ ...prev, [uid]: v }));
+                                        setUserVolume(uid, v);
+                                      }}
+                                      className="flex-1 min-w-0 h-1.5 rounded-full appearance-none bg-white/[0.1] accent-[#00eeff]"
+                                    />
+                                  </div>
+                                </li>
+                              );
+                            })}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+                  <div className="bg-[#0a0a0c]/80 backdrop-blur-2xl border border-white/[0.1] rounded-full flex items-center p-2 shadow-[0_20px_60px_rgba(0,0,0,0.8)] gap-2">
+                    <button
+                      type="button"
+                      onClick={() => toggleVoiceMic()}
+                      className={`w-14 h-14 rounded-full flex items-center justify-center transition-all duration-300 border ${localMuted || localDeafened ? 'bg-red-500/20 text-red-400 border-red-500/40 shadow-[0_0_15px_rgba(239,68,68,0.2)]' : 'bg-white/[0.05] text-zinc-200 border-white/[0.05] hover:bg-white/[0.1]'}`}
+                      title={localDeafened ? 'Wyłącz tryb głuchy i włącz mikrofon' : localMuted ? 'Włącz mikrofon' : 'Wycisz mikrofon'}
+                    >
+                      {localMuted || localDeafened ? <MicOff size={22} /> : <Mic size={22} />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => toggleVoiceHeadphones()}
+                      disabled={voicePhase !== 'connected'}
+                      className={`w-12 h-12 rounded-full flex items-center justify-center transition-all border shrink-0 ${
+                        localDeafened ? 'bg-red-500/15 text-red-400 border-red-500/35' : 'bg-white/[0.05] text-zinc-200 border-white/[0.08] hover:bg-white/[0.1]'
+                      } disabled:opacity-40 disabled:cursor-not-allowed`}
+                      title={localDeafened ? 'Włącz odsłuch innych i mikrofon' : 'Wycisz mikrofon i przestań słyszeć innych'}
+                    >
+                      <Headphones size={20} className={localDeafened ? 'opacity-50' : ''} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setVoiceMixPanelOpen((o) => !o)}
+                      disabled={voicePhase !== 'connected'}
+                      className={`w-12 h-12 rounded-full flex items-center justify-center transition-all border shrink-0 ${voiceMixPanelOpen ? 'bg-[#00eeff]/15 text-[#00eeff] border-[#00eeff]/35' : 'bg-white/[0.05] text-zinc-300 border-white/[0.08] hover:bg-white/[0.1]'} disabled:opacity-40 disabled:cursor-not-allowed`}
+                      title="Głośność i wyciszenie odsłuchu uczestników"
+                    >
+                      <SlidersHorizontal size={20} />
+                    </button>
+                    <div className="w-px h-8 bg-white/[0.1] mx-1"></div>
+                    <button onClick={toggleScreenShare} className={`px-6 h-14 rounded-full flex items-center gap-3 font-bold uppercase tracking-wider text-[11px] transition-all duration-300 border ${screenStream ? 'bg-[#00eeff] text-black border-[#00eeff] shadow-[0_0_20px_rgba(0,238,255,0.4)]' : 'bg-white/[0.05] text-zinc-200 border-white/[0.05] hover:bg-white/[0.1]'}`}>
+                      <MonitorUp size={20} />{screenStream ? 'Zakończ transmisję' : 'Udostępnij ekran'}
+                    </button>
+                    <div className="w-px h-8 bg-white/[0.1] mx-1"></div>
+                    <button onClick={disconnectVoice} className="w-14 h-14 rounded-full bg-red-500 hover:bg-red-600 text-white flex items-center justify-center transition-all duration-300 shadow-[0_0_20px_rgba(239,68,68,0.4)] hover:shadow-[0_0_30px_rgba(239,68,68,0.6)]" title="Rozłącz"><PhoneOff size={22} /></button>
+                  </div>
                 </div>
               )}
             </div>
@@ -2732,23 +3394,102 @@ export default function App() {
 
           {/* PIP Głosowy, gdy jesteś na innym kanale */}
           {activeVoiceChannel && activeVoiceChannel !== activeChannel && (
-            <div className="absolute bottom-32 right-8 w-80 max-w-[calc(100vw-2rem)] bg-[#111111]/95 backdrop-blur-3xl border border-[#00eeff]/20 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.8)] z-40 overflow-hidden animate-in slide-in-from-bottom-6 fade-in duration-300">
+            <div className="absolute bottom-32 right-8 w-80 max-w-[calc(100vw-2rem)] max-h-[min(85vh,520px)] flex flex-col bg-[#111111]/95 backdrop-blur-3xl border border-[#00eeff]/20 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.8)] z-40 overflow-hidden animate-in slide-in-from-bottom-6 fade-in duration-300">
               {(() => {
                 const voiceChan = channels.find((c) => c.id === activeVoiceChannel);
                 if (!voiceChan) return null;
                 const dotClass = voicePhase === 'connected' ? 'bg-[#00eeff] shadow-[0_0_8px_#00eeff]' : voicePhase === 'error' ? 'bg-red-500' : 'bg-amber-400 animate-pulse';
                 return (
                   <>
-                    <div className="px-4 py-3 border-b border-white/[0.05] flex items-center justify-between bg-white/[0.02] gap-2 cursor-pointer hover:bg-[#00eeff]/5 transition-colors" onClick={() => setActiveChannel(voiceChan.id)}>
+                    <div className="px-4 py-3 border-b border-white/[0.05] flex items-center justify-between bg-white/[0.02] gap-2 cursor-pointer hover:bg-[#00eeff]/5 transition-colors shrink-0" onClick={() => setActiveChannel(voiceChan.id)}>
                       <div className="flex items-center gap-2 min-w-0">
                         <div className={`w-2 h-2 rounded-full shrink-0 ${dotClass}`} />
                         <span className="text-xs font-semibold tracking-wide truncate" style={{ color: voiceChan.color }}>{voiceChan.name}</span>
                       </div>
                       <span className="text-[10px] text-[#00eeff] font-bold uppercase tracking-widest shrink-0 hover:underline">Wróć na grid</span>
                     </div>
-                    <div className="px-4 py-3 bg-black/40 flex items-center justify-center gap-3">
-                      <button onClick={() => setLocalMuted((m) => !m)} className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors border ${localMuted ? 'bg-red-500/15 text-red-400 border-red-500/35' : 'bg-white/[0.05] text-zinc-200 border-white/[0.08] hover:bg-white/[0.1]'}`}>
-                        {localMuted ? <MicOff size={16} /> : <Mic size={16} />}
+                    {voiceMixPanelOpen && voicePhase === 'connected' && (
+                      <div
+                        className="px-3 py-2 border-b border-white/[0.06] overflow-y-auto custom-scrollbar max-h-[220px] shrink-0"
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <div className="text-[9px] font-bold uppercase tracking-widest text-zinc-500 mb-2 px-0.5">Miks uczestników</div>
+                        {voiceParticipants.filter((id) => id !== myUserId).length === 0 ? (
+                          <p className="text-[11px] text-zinc-500 py-1">Brak innych uczestników.</p>
+                        ) : (
+                          <ul className="flex flex-col gap-2">
+                            {voiceParticipants
+                              .filter((id) => id !== myUserId)
+                              .map((uid) => {
+                                const u = getUser(uid);
+                                const vol = userVolumes[uid] ?? 1;
+                                const outMuted = !!userOutputMuted[uid];
+                                return (
+                                  <li key={uid} className="flex flex-col gap-1 rounded-lg bg-white/[0.04] border border-white/[0.06] px-2 py-1.5">
+                                    <div className="flex items-center justify-between gap-1 min-w-0">
+                                      <span className="text-xs font-semibold text-zinc-200 truncate">{u.name}</span>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const next = !outMuted;
+                                          setUserOutputMutedMap((prev) => ({ ...prev, [uid]: next }));
+                                          setPeerOutputMute(uid, next);
+                                        }}
+                                        className={`shrink-0 w-7 h-7 rounded-full flex items-center justify-center border ${outMuted ? 'bg-red-500/20 text-red-400 border-red-500/35' : 'bg-white/[0.06] text-zinc-300 border-white/[0.08]'}`}
+                                      >
+                                        {outMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}
+                                      </button>
+                                    </div>
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="text-[9px] text-zinc-500 tabular-nums w-8 text-right shrink-0">{Math.round(vol * 100)}%</span>
+                                      <input
+                                        type="range"
+                                        min="0.25"
+                                        max="4"
+                                        step="0.05"
+                                        value={vol}
+                                        onChange={(e) => {
+                                          const v = parseFloat(e.target.value);
+                                          setUserVolumes((prev) => ({ ...prev, [uid]: v }));
+                                          setUserVolume(uid, v);
+                                        }}
+                                        className="flex-1 min-w-0 h-1 rounded-full appearance-none bg-white/[0.1] accent-[#00eeff]"
+                                      />
+                                    </div>
+                                  </li>
+                                );
+                              })}
+                          </ul>
+                        )}
+                      </div>
+                    )}
+                    <div className="px-4 py-3 bg-black/40 flex items-center justify-center gap-2 flex-wrap shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => toggleVoiceMic()}
+                        className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors border ${localMuted || localDeafened ? 'bg-red-500/15 text-red-400 border-red-500/35' : 'bg-white/[0.05] text-zinc-200 border-white/[0.08] hover:bg-white/[0.1]'}`}
+                        title={localDeafened ? 'Wyłącz tryb głuchy i włącz mikrofon' : localMuted ? 'Włącz mikrofon' : 'Wycisz mikrofon'}
+                      >
+                        {localMuted || localDeafened ? <MicOff size={16} /> : <Mic size={16} />}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setVoiceMixPanelOpen((o) => !o)}
+                        disabled={voicePhase !== 'connected'}
+                        className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors border shrink-0 ${voiceMixPanelOpen ? 'bg-[#00eeff]/15 text-[#00eeff] border-[#00eeff]/35' : 'bg-white/[0.05] text-zinc-300 border-white/[0.08] hover:bg-white/[0.1]'} disabled:opacity-40`}
+                        title="Miks uczestników"
+                      >
+                        <SlidersHorizontal size={16} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => toggleVoiceHeadphones()}
+                        disabled={voicePhase !== 'connected'}
+                        className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors border shrink-0 ${localDeafened ? 'bg-red-500/15 text-red-400 border-red-500/35' : 'bg-white/[0.05] text-zinc-200 border-white/[0.08] hover:bg-white/[0.1]'} disabled:opacity-40`}
+                        title={localDeafened ? 'Włącz odsłuch innych i mikrofon' : 'Wycisz mikrofon i przestań słyszeć innych'}
+                      >
+                        <Headphones size={16} className={localDeafened ? 'opacity-50' : ''} />
                       </button>
                       <button onClick={disconnectVoice} className="w-10 h-10 rounded-full bg-red-500/10 hover:bg-red-500/20 text-red-500 border border-red-500/30 flex items-center justify-center transition-colors shadow-[0_0_15px_rgba(239,68,68,0.2)]"><PhoneOff size={16} /></button>
                     </div>

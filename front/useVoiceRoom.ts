@@ -83,12 +83,12 @@ export function useVoiceRoom(opts: {
   userId: string;
   micDeviceId: string;
   screenStream?: MediaStream | null;
+  /** Max bitrate for screen track output in bits per second */
+  screenBitrate?: number;
   /** Bramka progu w Web Audio — wycina to, co jest poniżej progu dBFS */
   micSoftwareGate?: boolean;
   /** Im wyższa wartość (bliżej 0 dBFS), tym głośniejszy sygnał musi być, żeby przejść (ostrzejsze cięcie szumu) */
   micGateThresholdDb?: number;
-  /** Dodatkowe tłumienie w sterowniku przeglądarki (często słabe); przy włączonej bramce zwykle wyłączone */
-  micBrowserNoiseSuppression?: boolean;
 }) {
   const {
     enabled,
@@ -96,16 +96,18 @@ export function useVoiceRoom(opts: {
     userId,
     micDeviceId,
     screenStream = null,
+    screenBitrate,
     micSoftwareGate = true,
     micGateThresholdDb = -40,
-    micBrowserNoiseSuppression = false,
   } = opts;
   const [phase, setPhase] = useState<VoicePhase>('idle');
   const [error, setError] = useState<string | null>(null);
   const [participants, setParticipants] = useState<string[]>([]);
   const [localMuted, setLocalMuted] = useState(false);
+  const [localDeafened, setLocalDeafened] = useState(false);
   const [speakingPeers, setSpeakingPeers] = useState<Record<string, boolean>>({});
   const [remoteScreenByUser, setRemoteScreenByUser] = useState<Record<string, MediaStream>>({});
+  const [remoteVoiceState, setRemoteVoiceState] = useState<Record<string, { muted: boolean; deafened: boolean }>>({});
 
   const wsRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -115,8 +117,14 @@ export function useVoiceRoom(opts: {
   micGateThresholdRef.current = micGateThresholdDb;
   const pcsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const iceQueuesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
-  const audioElsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
   const remoteAudioCombinedRef = useRef<Map<string, MediaStream>>(new Map());
+  /** Odsłuch zdalny przez Web Audio (gain > 1 = powyżej „100%”) */
+  const playbackCtxRef = useRef<AudioContext | null>(null);
+  const peerPlaybackRef = useRef(
+    new Map<string, { src: MediaStreamAudioSourceNode; gain: GainNode }>(),
+  );
+  const remoteVolRef = useRef(new Map<string, number>());
+  const remoteMuteRef = useRef(new Map<string, boolean>());
   const remoteScreenTracksRef = useRef<Record<string, MediaStream>>({});
   const screenStreamRef = useRef<MediaStream | null>(null);
   const prevScreenTrackIdsRef = useRef<Set<string>>(new Set());
@@ -124,6 +132,8 @@ export function useVoiceRoom(opts: {
   userIdRef.current = userId;
   const localMutedRef = useRef(localMuted);
   localMutedRef.current = localMuted;
+  const localDeafenedRef = useRef(localDeafened);
+  localDeafenedRef.current = localDeafened;
 
   const speakingSnapRef = useRef<Record<string, boolean>>({});
   const localVadStopRef = useRef<(() => void) | null>(null);
@@ -139,6 +149,88 @@ export function useVoiceRoom(opts: {
     const ws = wsRef.current;
     if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
   }, []);
+
+  const ensurePlaybackCtx = useCallback(() => {
+    let ctx = playbackCtxRef.current;
+    const Ctor = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    if (!ctx || ctx.state === 'closed') {
+      ctx = new Ctor();
+      playbackCtxRef.current = ctx;
+    }
+    void ctx.resume().catch(() => {});
+    return ctx;
+  }, []);
+
+  const disposePeerPlayback = useCallback((peerId: string) => {
+    const p = peerPlaybackRef.current.get(peerId);
+    if (!p) return;
+    try {
+      p.src.disconnect();
+    } catch {
+      /* ignore */
+    }
+    try {
+      p.gain.disconnect();
+    } catch {
+      /* ignore */
+    }
+    peerPlaybackRef.current.delete(peerId);
+  }, []);
+
+  const computeOutputGain = useCallback((peerId: string) => {
+    if (localDeafenedRef.current) return 0;
+    if (remoteMuteRef.current.get(peerId)) return 0;
+    return Math.min(8, Math.max(0, remoteVolRef.current.get(peerId) ?? 1));
+  }, []);
+
+  const refreshPeerPlayback = useCallback(
+    (peerId: string) => {
+      const combined = remoteAudioCombinedRef.current.get(peerId);
+      if (!combined?.getAudioTracks().length) {
+        disposePeerPlayback(peerId);
+        return;
+      }
+      disposePeerPlayback(peerId);
+      const ctx = ensurePlaybackCtx();
+      let src: MediaStreamAudioSourceNode;
+      try {
+        src = ctx.createMediaStreamSource(combined);
+      } catch {
+        return;
+      }
+      const gain = ctx.createGain();
+      gain.gain.value = computeOutputGain(peerId);
+      src.connect(gain);
+      gain.connect(ctx.destination);
+      peerPlaybackRef.current.set(peerId, { src, gain });
+      void ctx.resume().catch(() => {});
+    },
+    [computeOutputGain, disposePeerPlayback, ensurePlaybackCtx],
+  );
+
+  const applyAllRemoteOutputGains = useCallback(() => {
+    for (const [pid, { gain }] of peerPlaybackRef.current) {
+      gain.gain.value = computeOutputGain(pid);
+    }
+  }, [computeOutputGain]);
+
+  const setUserVolume = useCallback(
+    (peerId: string, linearGain: number) => {
+      remoteVolRef.current.set(peerId, linearGain);
+      const p = peerPlaybackRef.current.get(peerId);
+      if (p) p.gain.gain.value = computeOutputGain(peerId);
+    },
+    [computeOutputGain],
+  );
+
+  const setUserOutputMuted = useCallback(
+    (peerId: string, muted: boolean) => {
+      remoteMuteRef.current.set(peerId, muted);
+      const p = peerPlaybackRef.current.get(peerId);
+      if (p) p.gain.gain.value = computeOutputGain(peerId);
+    },
+    [computeOutputGain],
+  );
 
   screenStreamRef.current = screenStream;
 
@@ -181,7 +273,13 @@ export function useVoiceRoom(opts: {
         );
         for (const t of screen.getTracks()) {
           if (!existing.has(t.id)) {
-            pc.addTrack(t, screen);
+            const sender = pc.addTrack(t, screen);
+            if (t.kind === 'video' && screenBitrate) {
+              const params = sender.getParameters();
+              if (!params.encodings) params.encodings = [{}];
+              params.encodings[0].maxBitrate = screenBitrate;
+              sender.setParameters(params).catch(() => {});
+            }
             changed = true;
           }
         }
@@ -199,7 +297,7 @@ export function useVoiceRoom(opts: {
       }
     }
     prevScreenTrackIdsRef.current = newIds;
-  }, [sendSignal]);
+  }, [sendSignal, screenBitrate]);
 
   const cleanupAll = useCallback(() => {
     localVadStopRef.current?.();
@@ -216,10 +314,15 @@ export function useVoiceRoom(opts: {
       pc.close();
     }
     pcsRef.current.clear();
-    for (const [, el] of audioElsRef.current) {
-      el.remove();
+    for (const pid of [...peerPlaybackRef.current.keys()]) disposePeerPlayback(pid);
+    try {
+      if (playbackCtxRef.current && playbackCtxRef.current.state !== 'closed') {
+        void playbackCtxRef.current.close();
+      }
+    } catch {
+      /* ignore */
     }
-    audioElsRef.current.clear();
+    playbackCtxRef.current = null;
     remoteAudioCombinedRef.current.clear();
     remoteScreenTracksRef.current = {};
     prevScreenTrackIdsRef.current.clear();
@@ -239,7 +342,7 @@ export function useVoiceRoom(opts: {
       wsRef.current = null;
     }
     setParticipants([]);
-  }, []);
+  }, [disposePeerPlayback]);
 
   useEffect(() => {
     if (!enabled || !roomId) {
@@ -263,19 +366,18 @@ export function useVoiceRoom(opts: {
               : '';
           throw new Error(`Brak dostępu do API mikrofonu w tej przeglądarce.${hint}`);
         }
-        const browserNs = micBrowserNoiseSuppression;
         const audioConstraints: MediaTrackConstraints =
           micDeviceId && micDeviceId !== 'default'
             ? {
                 deviceId: { exact: micDeviceId },
                 echoCancellation: true,
-                noiseSuppression: browserNs,
-                autoGainControl: browserNs,
+                noiseSuppression: false,
+                autoGainControl: false,
               }
             : {
                 echoCancellation: true,
-                noiseSuppression: browserNs,
-                autoGainControl: browserNs,
+                noiseSuppression: false,
+                autoGainControl: false,
               };
         const rawStream = await md.getUserMedia({
           audio: audioConstraints,
@@ -363,8 +465,7 @@ export function useVoiceRoom(opts: {
                     combined.removeTrack(t);
                   }
                 }
-                const el = audioElsRef.current.get(peerId);
-                if (el) el.srcObject = combined;
+                refreshPeerPlayback(peerId);
               }
               setRemoteScreenByUser((prev) => ({ ...prev, [peerId]: ms }));
               ev.track.addEventListener('ended', () => {
@@ -393,17 +494,7 @@ export function useVoiceRoom(opts: {
             if (!combined.getAudioTracks().some((t) => t.id === ev.track.id)) {
               combined.addTrack(ev.track);
             }
-            let el = audioElsRef.current.get(peerId);
-            if (!el) {
-              el = document.createElement('audio');
-              el.autoplay = true;
-              el.setAttribute('playsinline', '');
-              el.volume = 1;
-              document.body.appendChild(el);
-              audioElsRef.current.set(peerId, el);
-            }
-            el.srcObject = combined;
-            void el.play().catch(() => {});
+            refreshPeerPlayback(peerId);
 
             remoteVadStopRef.current.get(peerId)?.();
             const stopRemoteVad = createSpeakingLevelMonitor(combined, peerId, () => false, flushSpeaking);
@@ -415,6 +506,7 @@ export function useVoiceRoom(opts: {
               } catch {
                 /* ignore */
               }
+              refreshPeerPlayback(peerId);
             });
           };
           const s = streamRef.current;
@@ -455,6 +547,10 @@ export function useVoiceRoom(opts: {
               await connectToPeer(pid);
             }
             setPhase('connected');
+            sendSignal({
+              type: 'voice_state',
+              payload: { user_id: userIdRef.current, muted: localMutedRef.current, deafened: localDeafenedRef.current }
+            });
             return;
           }
 
@@ -462,6 +558,17 @@ export function useVoiceRoom(opts: {
             const uid = pl.user_id as string;
             if (uid && uid !== userIdRef.current) {
               setParticipants((prev) => [...new Set([...prev, uid])].sort());
+            }
+            return;
+          }
+
+          if (env.type === 'voice_state') {
+            const uid = pl.user_id as string;
+            if (uid) {
+              setRemoteVoiceState((prev) => ({
+                ...prev,
+                [uid]: { muted: !!pl.muted, deafened: !!pl.deafened }
+              }));
             }
             return;
           }
@@ -474,11 +581,7 @@ export function useVoiceRoom(opts: {
               pc.close();
               pcsRef.current.delete(uid);
             }
-            const el = audioElsRef.current.get(uid);
-            if (el) {
-              el.remove();
-              audioElsRef.current.delete(uid);
-            }
+            disposePeerPlayback(uid);
             remoteAudioCombinedRef.current.delete(uid);
             delete remoteScreenTracksRef.current[uid];
             setRemoteScreenByUser((prev) => {
@@ -608,24 +711,39 @@ export function useVoiceRoom(opts: {
     userId,
     micDeviceId,
     micSoftwareGate,
-    micBrowserNoiseSuppression,
     cleanupAll,
     flushIce,
     sendSignal,
     flushSpeaking,
+    refreshPeerPlayback,
   ]);
 
   useEffect(() => {
     if (!enabled || !roomId) return;
     const id = window.setTimeout(() => void syncScreenShareTracks(), 30);
     return () => clearTimeout(id);
-  }, [screenStream, enabled, roomId, phase, syncScreenShareTracks]);
+  }, [screenStream, screenBitrate, enabled, roomId, phase, syncScreenShareTracks]);
+
+  useEffect(() => {
+    applyAllRemoteOutputGains();
+  }, [localDeafened, applyAllRemoteOutputGains]);
+
+  /** Tryb głuchy = brak odsłuchu innych; mikrofon musi być wyłączony (jak w typowych komunikatorach). */
+  useEffect(() => {
+    if (localDeafened && !localMuted) setLocalMuted(true);
+  }, [localDeafened, localMuted]);
 
   useEffect(() => {
     streamRef.current?.getAudioTracks().forEach((t) => {
       t.enabled = !localMuted;
     });
-  }, [localMuted]);
+    if (wsRef.current?.readyState === WebSocket.OPEN && phase === 'connected') {
+      wsRef.current.send(JSON.stringify({
+        type: 'voice_state',
+        payload: { user_id: userId, muted: localMuted, deafened: localDeafened }
+      }));
+    }
+  }, [localMuted, localDeafened, phase, userId]);
 
   return {
     phase,
@@ -633,7 +751,12 @@ export function useVoiceRoom(opts: {
     participants,
     localMuted,
     setLocalMuted,
+    localDeafened,
+    setLocalDeafened,
     speakingPeers,
     remoteScreenByUser,
+    remoteVoiceState,
+    setUserVolume,
+    setUserOutputMuted,
   };
 }
