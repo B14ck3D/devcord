@@ -1,9 +1,0 @@
-# minified files
-**/i18n/catalogs/**
-**/i18n/locales/**
-
-# auto-generated files
-**/styled-system/**
-
-# test results
-**/test-results/**

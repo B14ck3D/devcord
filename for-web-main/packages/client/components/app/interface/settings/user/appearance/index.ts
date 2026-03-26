@@ -1,1 +1,0 @@
-export { AppearanceMenu } from "./AppearanceMenu";

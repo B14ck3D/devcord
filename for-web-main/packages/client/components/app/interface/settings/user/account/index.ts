@@ -1,1 +1,0 @@
-export { UserSummary } from "./UserSummary";
