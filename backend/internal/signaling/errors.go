@@ -8,5 +8,6 @@ var (
 	ErrBadPayload    = errors.New("invalid payload")
 	ErrUnknownUser   = errors.New("target user not in room")
 	ErrInvalidJoin   = errors.New("invalid join_room")
-	ErrAlreadyJoined = errors.New("already joined a room")
+	ErrAlreadyJoined          = errors.New("already joined a room")
+	ErrJoinIdentityMismatch   = errors.New("join user_id does not match access token")
 )

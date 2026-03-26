@@ -34,5 +34,11 @@ export default defineConfig({
     port: 4173,
     strictPort: true,
     https: previewHttps,
+    proxy: {
+      '/ws': { target: 'http://127.0.0.1:23623', ws: true },
+      '/voice': { target: 'http://127.0.0.1:23623' },
+      '/health': { target: 'http://127.0.0.1:12823' },
+      '/api': { target: 'http://127.0.0.1:12823', changeOrigin: true },
+    },
   },
 });

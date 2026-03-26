@@ -1,7 +1,14 @@
 # Przykład upstreamu API (lokalny dev) — produkcja: patrz nginx-devcord.ndevelopment.org.conf
+#
+# Głos WebRTC wymaga osobnego procesu signaling (cmd/signaling, domyślnie :23623) i w nginx
+# ścieżki /ws (oraz opcjonalnie /health, /voice) — bez tego /api/ping działa, a kanał głosowy nie.
 
 upstream devcord_api {
     server 127.0.0.1:12823;
+}
+
+upstream devcord_signaling {
+    server 127.0.0.1:23623;
 }
 
 server {
@@ -26,5 +33,18 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /ws {
+        proxy_pass http://devcord_signaling;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
     }
 }

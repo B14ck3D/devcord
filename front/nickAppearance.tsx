@@ -48,7 +48,7 @@ export function nickAppearanceFromFields(
     switch (v2.fx) {
       case 'gradient':
         return {
-          className: 'flux-nick-gradient-shift',
+          className: 'devcord-nick-gradient-shift',
           style: {
             fontFamily: font,
             backgroundImage: `linear-gradient(90deg, ${g1}, ${g2}, ${g1})`,
@@ -61,7 +61,7 @@ export function nickAppearanceFromFields(
         };
       case 'gradient_neon':
         return {
-          className: 'flux-nick-gradient-shift',
+          className: 'devcord-nick-gradient-shift',
           style: {
             fontFamily: font,
             backgroundImage: `linear-gradient(120deg, ${g1}, #ffffffaa, ${g2}, ${g1})`,
@@ -74,22 +74,22 @@ export function nickAppearanceFromFields(
         };
       case 'neon_pulse':
         return {
-          className: 'flux-nick-neon-pulse',
+          className: 'devcord-nick-neon-pulse',
           style: {
             fontFamily: font,
             color: g1,
-            ['--flux-neon1' as string]: g1,
-            ['--flux-neon2' as string]: g2,
+            ['--devcord-neon1' as string]: g1,
+            ['--devcord-neon2' as string]: g2,
           } as React.CSSProperties,
         };
       case 'shimmer':
         return {
-          className: 'flux-nick-shimmer',
+          className: 'devcord-nick-shimmer',
           style: {
             fontFamily: font,
             color: g1,
-            ['--flux-shimmer1' as string]: g1,
-            ['--flux-shimmer2' as string]: g2,
+            ['--devcord-shimmer1' as string]: g1,
+            ['--devcord-shimmer2' as string]: g2,
           } as React.CSSProperties,
         };
       case 'double_outline':

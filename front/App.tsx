@@ -1,14 +1,17 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback, useReducer } from 'react';
 import { useVoiceRoom } from './useVoiceRoom';
-import { loadFluxLocalSettings, saveFluxLocalSettings } from './fluxLocalSettings';
+import { useLiveKitVoice } from './useLiveKitVoice';
+import { loadDevcordLocalSettings, saveDevcordLocalSettings } from './devcordLocalSettings';
 import { resizeImageFileToDataUrl } from './resizeAvatarImage';
 import { SettingsGlowDropdown } from './SettingsGlowDropdown';
-import { useChatSocket, type ChatUserUpdatedPayload } from './useChatSocket';
+import { useChatSocket, type ChatUserUpdatedPayload, type DmMessageRow } from './useChatSocket';
 import { NickLabel } from './nickAppearance';
 import { buildNickGlowJson, NICK_FONT_STACKS } from './nickGlowPresets';
 import { dmThreadKey, loadDmStore, saveDmStore, type DmRow } from './dmStorage';
 import { iconFromKey } from './iconMap';
 import { AuthGate } from './AuthGate';
+import { MemberProfileCard } from './MemberProfileCard';
+import { resolveMediaUrl } from './resolveMediaUrl';
 import { 
   Send, Search, Plus, ArrowUpRight, Hash, Volume2, 
   Phone, Video, Users, UserPlus, Settings, Mic, 
@@ -43,6 +46,14 @@ function appPublicOrigin(): string {
   return '';
 }
 
+/** Gdy front jest na innym hoście niż signaling, ustaw VITE_VOICE_HTTP_BASE=https://twoja-domena */
+const VOICE_HTTP_BASE = ((import.meta.env.VITE_VOICE_HTTP_BASE as string | undefined) ?? '').replace(/\/$/, '');
+function voicePeersUrl(roomId: string) {
+  const q = encodeURIComponent(String(roomId));
+  if (VOICE_HTTP_BASE) return `${VOICE_HTTP_BASE}/voice/peers?room=${q}`;
+  return `/voice/peers?room=${q}`;
+}
+
 function readChannelsPath(): { sid: string; cid: string } | null {
   if (typeof window === 'undefined') return null;
   const path = (window.location.pathname || '/').replace(/\/$/, '') || '/';
@@ -61,6 +72,15 @@ function writeChannelsPath(sid: string, cid: string) {
   const cur = (window.location.pathname || '').replace(/\/$/, '') || '/';
   if (cur === want) return;
   window.history.replaceState({ devcord: 1 }, '', want);
+}
+
+/** Terminal osobisty / DM — usuń /channels/... żeby URL nie nadpisywał stanu po odświeżeniu. */
+function writePersonalHomePath() {
+  if (typeof window === 'undefined') return;
+  const cur = (window.location.pathname || '').replace(/\/$/, '') || '/';
+  if (cur === '/' || cur === '') return;
+  if (!/^\/channels\//i.test(cur)) return;
+  window.history.replaceState({ devcord: 1 }, '', '/');
 }
 
 function mediaStreamHasLiveVideo(ms: MediaStream | null | undefined): boolean {
@@ -173,7 +193,30 @@ const apiClient = async (endpoint: string, method: string = 'GET', body?: unknow
 // ============================================================================
 // --- TYPY DANYCH BAZY DANYCH ---
 // ============================================================================
-type UserInfo = { id: string; name: string; roleId: string; status: 'online' | 'idle' | 'dnd' | 'offline'; avatarUrl?: string; nickColor?: string; nickGlow?: string };
+type UserInfo = {
+  id: string;
+  name: string;
+  roleId: string;
+  roleIds?: string[];
+  nick?: string;
+  status: 'online' | 'idle' | 'dnd' | 'offline';
+  avatarUrl?: string;
+  nickColor?: string;
+  nickGlow?: string;
+  bannerUrl?: string;
+  bio?: string;
+};
+
+function userFromFriendApi(p: { id?: string; name?: string; avatar_url?: string }): UserInfo | null {
+  if (p.id == null || String(p.id) === '') return null;
+  return {
+    id: String(p.id),
+    name: String(p.name ?? ''),
+    roleId: '__devcord_members',
+    status: 'online',
+    avatarUrl: p.avatar_url,
+  };
+}
 type Category = { id: string; name: string; isExpanded: boolean; serverId: string };
 type Channel = { id: string; name: string; type: 'text' | 'voice'; color: string; icon: React.ElementType; unread?: boolean; categoryId?: string; serverId: string };
 type ChatRow = { id: string; userId: string; time: string; content: string; isMe?: boolean; isEdited?: boolean; reactions?: { emoji: string; count: number; userReacted: boolean }[] };
@@ -264,7 +307,7 @@ function useVoiceRoomMock({ enabled, roomId, userId }: { enabled: boolean, roomI
 
   return {
     phase,
-    error: null,
+    error: null as string | null,
     participants,
     localMuted,
     setLocalMuted,
@@ -275,6 +318,13 @@ function useVoiceRoomMock({ enabled, roomId, userId }: { enabled: boolean, roomI
     remoteVoiceState: {} as Record<string, { muted: boolean; deafened: boolean }>,
     setUserVolume: () => {},
     setUserOutputMuted: () => {},
+    voiceDiagnostics: {
+      backend: 'mesh' as const,
+      meshPeerConnectionCount: 0,
+      meshNegotiationMsLast: null as number | null,
+      meshTransportRttMs: null as number | null,
+      meshInboundPacketsLost: null as number | null,
+    },
   };
 }
 
@@ -284,22 +334,41 @@ function useVoiceRoomMaybe(opts: {
   roomId: string | null;
   userId: string;
   micDeviceId: string;
+  accessToken: string;
   screenStream: MediaStream | null;
   cameraStream: MediaStream | null;
   screenBitrate?: number;
   micSoftwareGate: boolean;
   micGateThresholdDb: number;
 }) {
-  const real = useVoiceRoom({
-    enabled: opts.apiMode && opts.enabled,
+  const transport =
+    (import.meta.env.VITE_VOICE_TRANSPORT as string | undefined)?.toLowerCase().trim() === 'livekit'
+      ? 'livekit'
+      : 'mesh';
+  const wantLiveKit =
+    opts.apiMode && transport === 'livekit' && !!opts.accessToken.trim() && opts.enabled && !!opts.roomId;
+
+  const mesh = useVoiceRoom({
+    enabled: opts.apiMode && opts.enabled && !!opts.roomId && !wantLiveKit,
     roomId: opts.roomId,
     userId: opts.userId,
     micDeviceId: opts.micDeviceId,
+    accessToken: opts.accessToken,
     screenStream: opts.screenStream,
     cameraStream: opts.cameraStream,
     screenBitrate: opts.screenBitrate,
     micSoftwareGate: opts.micSoftwareGate,
     micGateThresholdDb: opts.micGateThresholdDb,
+  });
+  const liveKit = useLiveKitVoice({
+    enabled: wantLiveKit,
+    channelId: opts.roomId,
+    userId: opts.userId,
+    accessToken: opts.accessToken,
+    micDeviceId: opts.micDeviceId,
+    screenStream: opts.screenStream,
+    cameraStream: opts.cameraStream,
+    screenBitrate: opts.screenBitrate,
   });
   const mock = useVoiceRoomMock({
     enabled: !opts.apiMode && opts.enabled,
@@ -307,8 +376,9 @@ function useVoiceRoomMaybe(opts: {
     userId: opts.userId,
     micDeviceId: opts.micDeviceId,
   });
-  if (opts.apiMode) return real;
-  return mock;
+  if (!opts.apiMode) return mock;
+  if (wantLiveKit) return liveKit;
+  return mesh;
 }
 
 const createMockScreenStream = (): MediaStream => {
@@ -469,7 +539,7 @@ function UserAvatarBubble({
 // --- GŁÓWNY KOMPONENT APLIKACJI ---
 // ============================================================================
 export default function App() {
-  const fluxSeed = useMemo(() => loadFluxLocalSettings(), []);
+  const devcordSeed = useMemo(() => loadDevcordLocalSettings(), []);
 
   // Stany Danych — przy podłączonym API startujemy pusto (bez s1/c1), żeby nie strzelać w nieistniejące ID.
   const [servers, setServers] = useState(() => (DEMO_MODE ? initialServers : []));
@@ -523,7 +593,7 @@ export default function App() {
   const [settingsSuccess, setSettingsSuccess] = useState('');
   const [settingsError, setSettingsError] = useState('');
   const [localTheme, setLocalTheme] = useState<'dark' | 'light'>(() =>
-    fluxSeed.appearance.theme === 'light' ? 'light' : 'dark',
+    devcordSeed.appearance.theme === 'light' ? 'light' : 'dark',
   );
   const [sessionEmail, setSessionEmail] = useState('');
   const [accountPwdOpen, setAccountPwdOpen] = useState(false);
@@ -573,13 +643,13 @@ export default function App() {
   const [remoteScreenVolume, setRemoteScreenVolume] = useState(1);
   const [remoteScreenVideoMuted, setRemoteScreenVideoMuted] = useState(false);
   const [screenStreamContext, setScreenStreamContext] = useState<{ x: number; y: number } | null>(null);
-  const [micDeviceId, setMicDeviceId] = useState(fluxSeed.audio.micDeviceId);
-  const [micSoftwareGate, setMicSoftwareGate] = useState(fluxSeed.audio.micSoftwareGate);
-  const [micGateThresholdDb, setMicGateThresholdDb] = useState(fluxSeed.audio.micGateThresholdDb);
-  const [screenFps, setScreenFps] = useState(fluxSeed.screen.fps);
-  const [screenRes, setScreenRes] = useState(fluxSeed.screen.res);
-  const [userVolumes, setUserVolumes] = useState<Record<string, number>>(() => ({ ...fluxSeed.userVoiceGain }));
-  const [userOutputMuted, setUserOutputMutedMap] = useState<Record<string, boolean>>(() => ({ ...fluxSeed.userOutputMuted }));
+  const [micDeviceId, setMicDeviceId] = useState(devcordSeed.audio.micDeviceId);
+  const [micSoftwareGate, setMicSoftwareGate] = useState(devcordSeed.audio.micSoftwareGate);
+  const [micGateThresholdDb, setMicGateThresholdDb] = useState(devcordSeed.audio.micGateThresholdDb);
+  const [screenFps, setScreenFps] = useState(devcordSeed.screen.fps);
+  const [screenRes, setScreenRes] = useState(devcordSeed.screen.res);
+  const [userVolumes, setUserVolumes] = useState<Record<string, number>>(() => ({ ...devcordSeed.userVoiceGain }));
+  const [userOutputMuted, setUserOutputMutedMap] = useState<Record<string, boolean>>(() => ({ ...devcordSeed.userOutputMuted }));
 
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
   const [voicePeersByChannel, setVoicePeersByChannel] = useState<Record<string, string[]>>({});
@@ -587,8 +657,21 @@ export default function App() {
 
   const [dmPeerId, setDmPeerId] = useState<string | null>(null);
   const [dmInputValue, setDmInputValue] = useState('');
+  const [dmActiveConversationId, setDmActiveConversationId] = useState<string | null>(null);
+  const dmActiveConversationIdRef = useRef<string | null>(null);
+  dmActiveConversationIdRef.current = dmActiveConversationId;
+  const [dmApiConversations, setDmApiConversations] = useState<
+    { id: string; peer: UserInfo; last_message?: { id: string; content: string; time: string } }[]
+  >([]);
+  const [dmMessagesByConversation, setDmMessagesByConversation] = useState<Record<string, ChatRow[]>>({});
+  const [dmTypingUsers, setDmTypingUsers] = useState<Record<string, boolean>>({});
   const [dmMessagesByThread, setDmMessagesByThread] = useState<Record<string, DmRow[]>>(() => loadDmStore());
   const [profileCardUser, setProfileCardUser] = useState<UserInfo | null>(null);
+  /** Zakładki lewego panelu w Terminalu osobistym */
+  const [personalSidebarTab, setPersonalSidebarTab] = useState<'messages' | 'contacts'>('messages');
+  const [friendIncoming, setFriendIncoming] = useState<{ id: string; from: UserInfo }[]>([]);
+  const [friendOutgoing, setFriendOutgoing] = useState<{ id: string; to: UserInfo }[]>([]);
+  const [acceptedFriends, setAcceptedFriends] = useState<UserInfo[]>([]);
   const [profileCardNote, setProfileCardNote] = useState('');
   const [pvCall, setPvCall] = useState<{ peerId: string; status: 'ringing' | 'connected' } | null>(null);
   const remoteScreenHostRef = useRef<HTMLDivElement | null>(null);
@@ -601,8 +684,9 @@ export default function App() {
   const [nickStudioFontId, setNickStudioFontId] = useState('outfit');
 
   useEffect(() => {
+    if (API_BASE_URL) return;
     saveDmStore(dmMessagesByThread);
-  }, [dmMessagesByThread]);
+  }, [dmMessagesByThread, API_BASE_URL]);
 
   useEffect(() => {
     if (!profileCardUser) {
@@ -617,11 +701,20 @@ export default function App() {
   }, [profileCardUser]);
 
   useEffect(() => {
-    if (activeServer !== '') setDmPeerId(null);
+    if (activeServer !== '') {
+      setDmPeerId(null);
+      setDmActiveConversationId(null);
+    }
   }, [activeServer]);
 
   useEffect(() => {
-    saveFluxLocalSettings({
+    if (activeServer !== '' || !dmActiveConversationId) return;
+    setRightPanelTab(null);
+    setActiveThread(null);
+  }, [activeServer, dmActiveConversationId]);
+
+  useEffect(() => {
+    saveDevcordLocalSettings({
       version: 1,
       audio: {
         micDeviceId,
@@ -642,18 +735,39 @@ export default function App() {
     });
   }, [screenStream, screenFps, screenRes]);
 
-  const [fluxToken, setFluxToken] = useState(() => getStoredAuthToken());
+  const [devcordToken, setDevcordToken] = useState(() => getStoredAuthToken());
   const [meUserId, setMeUserId] = useState('');
   type PanelRole = (typeof mockRoles)[number];
   const [workspaceRoles, setWorkspaceRoles] = useState<PanelRole[]>(() => (DEMO_MODE ? [...mockRoles] : []));
   const [workspaceMembers, setWorkspaceMembers] = useState<UserInfo[]>(() => (DEMO_MODE ? [...mockUsers] : []));
   const [typingUsers, setTypingUsers] = useState<Record<string, boolean>>({});
+  const typingClearTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const dmTypingClearTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const [authMode, setAuthMode] = useState<'login' | 'register' | 'verify'>('login');
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [authNick, setAuthNick] = useState('');
   const [authCode, setAuthCode] = useState('');
   const [authErr, setAuthErr] = useState('');
+
+  useEffect(() => {
+    return () => {
+      Object.values(typingClearTimersRef.current).forEach(clearTimeout);
+      Object.values(dmTypingClearTimersRef.current).forEach(clearTimeout);
+    };
+  }, []);
+
+  useEffect(() => {
+    setTypingUsers({});
+    Object.values(typingClearTimersRef.current).forEach(clearTimeout);
+    typingClearTimersRef.current = {};
+  }, [activeChannel]);
+
+  useEffect(() => {
+    setDmTypingUsers({});
+    Object.values(dmTypingClearTimersRef.current).forEach(clearTimeout);
+    dmTypingClearTimersRef.current = {};
+  }, [dmActiveConversationId]);
 
   // Referencje
   const guestIdRef = useRef(guestSessionId());
@@ -679,11 +793,11 @@ export default function App() {
   }, [activeServer, currentServerChannels, activeChannel]);
 
   useEffect(() => {
-    if (!fluxToken) initialNavSyncedRef.current = false;
-  }, [fluxToken]);
+    if (!devcordToken) initialNavSyncedRef.current = false;
+  }, [devcordToken]);
 
   useEffect(() => {
-    if (DEMO_MODE || !API_BASE_URL || !fluxToken) return;
+    if (DEMO_MODE || !API_BASE_URL || !devcordToken) return;
     if (servers.length === 0 || channels.length === 0) return;
     if (initialNavSyncedRef.current) return;
     const p = readChannelsPath();
@@ -696,18 +810,18 @@ export default function App() {
       setActiveChannel(p.cid);
     }
     initialNavSyncedRef.current = true;
-  }, [servers, channels, fluxToken]);
+  }, [servers, channels, devcordToken]);
 
   useEffect(() => {
-    if (DEMO_MODE || !API_BASE_URL || !fluxToken) return;
+    if (DEMO_MODE || !API_BASE_URL || !devcordToken) return;
     if (!activeServer || !activeChannel) return;
     const path = window.location.pathname || '';
     if (/^\/(invite|join)\//i.test(path)) return;
     writeChannelsPath(activeServer, activeChannel);
-  }, [activeServer, activeChannel, fluxToken]);
+  }, [activeServer, activeChannel, devcordToken]);
 
   useEffect(() => {
-    if (DEMO_MODE || !API_BASE_URL || !fluxToken) return;
+    if (DEMO_MODE || !API_BASE_URL || !devcordToken) return;
     const handler = () => {
       const p = readChannelsPath();
       if (p && servers.some((s) => s.id === p.sid) && channels.some((c) => c.id === p.cid && c.serverId === p.sid)) {
@@ -717,7 +831,7 @@ export default function App() {
     };
     window.addEventListener('popstate', handler);
     return () => window.removeEventListener('popstate', handler);
-  }, [fluxToken, servers, channels]);
+  }, [devcordToken, servers, channels]);
 
   useEffect(() => {
     if (!DEMO_MODE || !activeServer || !activeChannel) return;
@@ -725,7 +839,7 @@ export default function App() {
   }, [activeServer, activeChannel]);
 
   useEffect(() => {
-    if (!API_BASE_URL || !fluxToken) {
+    if (!API_BASE_URL || !devcordToken) {
       setMeUserId('');
       setSessionEmail('');
       return;
@@ -733,8 +847,8 @@ export default function App() {
     (async () => {
       try {
         const me = await apiClient('/auth/me');
-        if (me && typeof me === 'object' && 'id' in me && (me as { id: string }).id) {
-          setMeUserId((me as { id: string }).id);
+        if (me && typeof me === 'object' && 'id' in me && (me as { id: unknown }).id != null && String((me as { id: unknown }).id) !== '') {
+          setMeUserId(String((me as { id: unknown }).id));
           const em = (me as { email?: string }).email;
           if (typeof em === 'string') setSessionEmail(em);
           const dn = (me as { display_name?: string }).display_name;
@@ -750,7 +864,7 @@ export default function App() {
         setMeUserId('');
       }
     })();
-  }, [API_BASE_URL, fluxToken]);
+  }, [API_BASE_URL, devcordToken]);
 
   useEffect(() => {
     const path = window.location.pathname.replace(/\/$/, '') || '/';
@@ -770,7 +884,7 @@ export default function App() {
       setDeepJoinToken(null);
       return;
     }
-    if (!fluxToken) {
+    if (!devcordToken) {
       setDeepJoinToken(null);
       return;
     }
@@ -791,12 +905,12 @@ export default function App() {
     } else {
       setDeepJoinToken(null);
     }
-  }, [API_BASE_URL, fluxToken]);
+  }, [API_BASE_URL, devcordToken]);
 
   useEffect(() => {
     const fetchInitialData = async () => {
       try {
-        if (!API_BASE_URL || !fluxToken) return;
+        if (!API_BASE_URL || !devcordToken) return;
         const [apiServers, apiCategories, apiChannels] = await Promise.all([
           apiClient('/servers'),
           apiClient('/categories'),
@@ -804,8 +918,9 @@ export default function App() {
         ]);
         if (Array.isArray(apiServers)) {
           setServers(
-            apiServers.map((s: { id: string; name: string; iconKey?: string; icon?: string; color?: string; glow?: string; active?: boolean; inviteCode?: string }) => ({
+            apiServers.map((s: { id?: unknown; name: string; iconKey?: string; icon?: string; color?: string; glow?: string; active?: boolean; inviteCode?: string }) => ({
               ...s,
+              id: String(s.id ?? ''),
               icon: iconFromKey(s.iconKey ?? s.icon, Zap),
               active: s.active !== false,
               color: s.color ?? '#00eeff',
@@ -816,16 +931,21 @@ export default function App() {
         }
         if (Array.isArray(apiCategories)) {
           setCategories(
-            apiCategories.map((c: Category & { isExpanded?: boolean }) => ({
+            apiCategories.map((c: Category & { id?: unknown; serverId?: unknown; isExpanded?: boolean }) => ({
               ...c,
+              id: String(c.id ?? ''),
+              serverId: String(c.serverId ?? ''),
               isExpanded: c.isExpanded !== false,
             })),
           );
         }
         if (Array.isArray(apiChannels)) {
           setChannels(
-            apiChannels.map((ch: Channel) => ({
+            apiChannels.map((ch: Channel & { id?: unknown; serverId?: unknown; categoryId?: unknown }) => ({
               ...ch,
+              id: String(ch.id ?? ''),
+              serverId: String(ch.serverId ?? ''),
+              categoryId: ch.categoryId != null ? String(ch.categoryId) : undefined,
               icon: ch.type === 'voice' ? Radio : Hash,
             })),
           );
@@ -835,26 +955,30 @@ export default function App() {
       }
     };
     void fetchInitialData();
-  }, [API_BASE_URL, fluxToken]);
+  }, [API_BASE_URL, devcordToken]);
 
   useEffect(() => {
-    if (!API_BASE_URL || !fluxToken) return;
+    if (!API_BASE_URL || !devcordToken) return;
     if (servers.length === 0) {
       setActiveServer('');
       setActiveChannel('');
+      writePersonalHomePath();
       setTasks([]);
       setMessagesByChannel({});
       setWorkspaceRoles([]);
       setWorkspaceMembers([]);
       return;
     }
-    if (!activeServer || !servers.some((s) => s.id === activeServer)) {
+    if (activeServer === '') {
+      return;
+    }
+    if (!servers.some((s) => s.id === activeServer)) {
       setActiveServer(servers[0].id);
     }
-  }, [API_BASE_URL, fluxToken, servers, activeServer]);
+  }, [API_BASE_URL, devcordToken, servers, activeServer]);
 
   useEffect(() => {
-    if (!API_BASE_URL || !fluxToken || !activeServer) return;
+    if (!API_BASE_URL || !devcordToken || !activeServer) return;
     if (!servers.some((s) => s.id === activeServer)) return;
     (async () => {
       try {
@@ -864,10 +988,10 @@ export default function App() {
         /* ignore */
       }
     })();
-  }, [API_BASE_URL, fluxToken, activeServer, servers]);
+  }, [API_BASE_URL, devcordToken, activeServer, servers]);
 
   useEffect(() => {
-    if (!API_BASE_URL || !fluxToken || !activeServer) return;
+    if (!API_BASE_URL || !devcordToken || !activeServer) return;
     if (!servers.some((s) => s.id === activeServer)) return;
     let cancelled = false;
     const run = () => {
@@ -898,7 +1022,18 @@ export default function App() {
             const mid = String(m.id ?? '');
             let rid = m.roleId != null && String(m.roleId).length > 0 ? String(m.roleId) : fallbackRoleId;
             if (rid && !roleIdSet.has(rid)) rid = fallbackRoleId || mappedRoles[0]?.id || '';
-            return { ...m, id: mid, roleId: rid, avatarUrl: (m as any).avatar_url, nickColor: (m as any).nick_color, nickGlow: (m as any).nick_glow };
+            const raw = m as UserInfo & { nick?: string; role_ids?: unknown };
+            const roleIds = Array.isArray(raw.role_ids) ? raw.role_ids.map((x) => String(x)) : undefined;
+            return {
+              ...m,
+              id: mid,
+              roleId: rid,
+              roleIds,
+              nick: typeof raw.nick === 'string' ? raw.nick : undefined,
+              avatarUrl: (m as { avatar_url?: string }).avatar_url,
+              nickColor: (m as { nick_color?: string }).nick_color,
+              nickGlow: (m as { nick_glow?: string }).nick_glow,
+            } as UserInfo;
           });
           let rolesOut = mappedRoles;
           if (mappedRoles.length === 0 && mapped.length > 0) {
@@ -921,7 +1056,18 @@ export default function App() {
             rolesOut[0]?.id ??
             '__devcord_members';
           if (meUserId && !mapped.some((x) => x.id === meUserId)) {
-            mapped = [...mapped, { id: meUserId, name: localUserName, roleId: selfRid, status: 'online' as const, avatarUrl: localUserAvatar, nickColor: localUserColor, nickGlow: localUserGlow }];
+            mapped = [
+              ...mapped,
+              {
+                id: meUserId,
+                name: localUserName,
+                roleId: selfRid,
+                status: 'online' as const,
+                avatarUrl: localUserAvatar,
+                nickColor: localUserColor,
+                nickGlow: localUserGlow,
+              } as UserInfo,
+            ];
           }
           setWorkspaceRoles(rolesOut);
           setWorkspaceMembers(mapped);
@@ -941,10 +1087,10 @@ export default function App() {
       clearInterval(id);
       document.removeEventListener('visibilitychange', onVis);
     };
-  }, [API_BASE_URL, fluxToken, activeServer, servers, meUserId, localUserName, localUserAvatar, localUserColor, localUserGlow]);
+  }, [API_BASE_URL, devcordToken, activeServer, servers, meUserId, localUserName, localUserAvatar, localUserColor, localUserGlow]);
 
   useEffect(() => {
-    if (!API_BASE_URL || !fluxToken || !activeChannel) return;
+    if (!API_BASE_URL || !devcordToken || !activeChannel) return;
     if (!channels.some((c) => c.id === activeChannel)) return;
     (async () => {
       try {
@@ -965,7 +1111,7 @@ export default function App() {
         /* ignore */
       }
     })();
-  }, [API_BASE_URL, fluxToken, activeChannel, meUserId, channels]);
+  }, [API_BASE_URL, devcordToken, activeChannel, meUserId, channels]);
 
   useEffect(() => {
     setTypingUsers({});
@@ -1004,6 +1150,166 @@ export default function App() {
     [meUserId],
   );
 
+  const mergeDmMessage = useCallback(
+    (row: DmMessageRow) => {
+      const conv = row.conversationId;
+      if (!conv) return;
+      setDmMessagesByConversation((prev) => {
+        const list = [...(prev[conv] ?? [])];
+        const entry: ChatRow = {
+          id: row.id,
+          userId: row.userId,
+          time: row.time,
+          content: row.content,
+          isEdited: row.isEdited,
+          isMe: row.userId === meUserId,
+        };
+        const i = list.findIndex((m) => m.id === row.id);
+        if (i >= 0) {
+          list[i] = { ...list[i], ...entry };
+        } else {
+          const tmpIdx = list.findIndex(
+            (m) => m.id.startsWith('tmp_') && m.userId === row.userId && m.content === row.content,
+          );
+          if (tmpIdx >= 0) list[tmpIdx] = entry;
+          else list.push(entry);
+        }
+        return { ...prev, [conv]: list };
+      });
+      setDmApiConversations((inbox) =>
+        inbox.map((c) =>
+          c.id === conv ? { ...c, last_message: { id: row.id, content: row.content, time: row.time } } : c,
+        ),
+      );
+    },
+    [meUserId],
+  );
+
+  const openDmForPeer = useCallback(
+    async (peerId: string) => {
+      const pid = String(peerId);
+      setActiveServer('');
+      setActiveChannel('');
+      writePersonalHomePath();
+      setPersonalSidebarTab('messages');
+      if (!API_BASE_URL || !devcordToken) {
+        setDmPeerId(pid);
+        setDmActiveConversationId(null);
+        return;
+      }
+      try {
+        const res = (await apiClient('/dm/conversations', 'POST', { peer_user_id: pid })) as {
+          id: string;
+          peer?: { id: string; name: string; avatar_url?: string };
+        };
+        const cid = String(res?.id ?? '');
+        if (!cid) return;
+        const peer = res?.peer;
+        const peerUser: UserInfo = {
+          id: String(peer?.id ?? pid),
+          name: String(peer?.name ?? ''),
+          roleId: '__devcord_members',
+          status: 'online',
+          avatarUrl: peer?.avatar_url,
+        };
+        setDmApiConversations((prev) => {
+          if (prev.some((c) => c.id === cid)) return prev;
+          return [{ id: cid, peer: peerUser }, ...prev];
+        });
+        setWorkspaceMembers((prev) => (prev.some((m) => m.id === peerUser.id) ? prev : [...prev, peerUser]));
+        setDmActiveConversationId(cid);
+        setDmPeerId(peerUser.id);
+      } catch {
+        setDmPeerId(pid);
+        setDmActiveConversationId(null);
+      }
+    },
+    [API_BASE_URL, devcordToken],
+  );
+
+  const refreshFriendsData = useCallback(async () => {
+    if (!API_BASE_URL || !getStoredAuthToken()) return;
+    try {
+      const [incRaw, outRaw, listRaw] = await Promise.all([
+        apiClient('/friends/requests/incoming'),
+        apiClient('/friends/requests/outgoing'),
+        apiClient('/friends'),
+      ]);
+      if (Array.isArray(incRaw)) {
+        const rows = incRaw as { id: string; from: { id?: string; name?: string; avatar_url?: string } }[];
+        setFriendIncoming(
+          rows
+            .map((r) => {
+              const u = userFromFriendApi(r.from);
+              return u ? { id: String(r.id), from: u } : null;
+            })
+            .filter(Boolean) as { id: string; from: UserInfo }[],
+        );
+      }
+      if (Array.isArray(outRaw)) {
+        const rows = outRaw as { id: string; to: { id?: string; name?: string; avatar_url?: string } }[];
+        setFriendOutgoing(
+          rows
+            .map((r) => {
+              const u = userFromFriendApi(r.to);
+              return u ? { id: String(r.id), to: u } : null;
+            })
+            .filter(Boolean) as { id: string; to: UserInfo }[],
+        );
+      }
+      if (Array.isArray(listRaw)) {
+        setAcceptedFriends(
+          (listRaw as { id?: string; name?: string; avatar_url?: string }[])
+            .map((x) => userFromFriendApi(x))
+            .filter(Boolean) as UserInfo[],
+        );
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!API_BASE_URL || !devcordToken) return;
+    void refreshFriendsData();
+  }, [API_BASE_URL, devcordToken, refreshFriendsData]);
+
+  const sendFriendRequest = useCallback(
+    async (peerId: string) => {
+      try {
+        await apiClient('/friends/request', 'POST', { to_user_id: String(peerId) });
+        await refreshFriendsData();
+      } catch {
+        /* ignore */
+      }
+    },
+    [refreshFriendsData],
+  );
+
+  const acceptFriendByRequestId = useCallback(
+    async (requestId: string) => {
+      try {
+        await apiClient(`/friends/requests/${requestId}/accept`, 'POST');
+        await refreshFriendsData();
+      } catch {
+        /* ignore */
+      }
+    },
+    [refreshFriendsData],
+  );
+
+  const rejectFriendByRequestId = useCallback(
+    async (requestId: string) => {
+      try {
+        await apiClient(`/friends/requests/${requestId}/reject`, 'POST');
+        await refreshFriendsData();
+      } catch {
+        /* ignore */
+      }
+    },
+    [refreshFriendsData],
+  );
+
   const mergeUserFromWs = useCallback(
     (p: ChatUserUpdatedPayload) => {
       const uid = p.user_id;
@@ -1032,26 +1338,134 @@ export default function App() {
     [meUserId],
   );
 
-  const { sendTyping } = useChatSocket({
+  useEffect(() => {
+    setDmTypingUsers({});
+  }, [dmActiveConversationId]);
+
+  useEffect(() => {
+    if (!API_BASE_URL || !devcordToken) return;
+    void (async () => {
+      try {
+        const list = await apiClient('/dm/conversations');
+        if (!Array.isArray(list)) return;
+        const mapped = list.map(
+          (x: {
+            id: string;
+            peer: { id: string; name: string; avatar_url?: string };
+            last_message?: { id: string; content: string; time: string };
+          }) => ({
+            id: String(x.id),
+            peer: {
+              id: String(x.peer?.id ?? ''),
+              name: String(x.peer?.name ?? ''),
+              roleId: '__devcord_members',
+              status: 'online' as const,
+              avatarUrl: x.peer?.avatar_url,
+            },
+            last_message: x.last_message
+              ? {
+                  id: String(x.last_message.id),
+                  content: String(x.last_message.content),
+                  time: String(x.last_message.time),
+                }
+              : undefined,
+          }),
+        );
+        setDmApiConversations(mapped);
+      } catch {
+        /* ignore */
+      }
+    })();
+  }, [API_BASE_URL, devcordToken]);
+
+  useEffect(() => {
+    if (!API_BASE_URL || !devcordToken || !dmActiveConversationId) return;
+    void (async () => {
+      try {
+        const rows = await apiClient(`/dm/conversations/${dmActiveConversationId}/messages`);
+        if (!Array.isArray(rows)) return;
+        setDmMessagesByConversation((prev) => ({
+          ...prev,
+          [dmActiveConversationId]: (
+            rows as { id: string; userId: string; time: string; content: string; isEdited?: boolean }[]
+          ).map((r) => ({
+            id: r.id,
+            userId: r.userId,
+            time: r.time,
+            content: r.content,
+            isEdited: r.isEdited,
+            isMe: r.userId === myUserId,
+          })),
+        }));
+      } catch {
+        /* ignore */
+      }
+    })();
+  }, [API_BASE_URL, devcordToken, dmActiveConversationId, myUserId]);
+
+  const { sendTyping, sendTypingDm } = useChatSocket({
     apiBase: API_BASE_URL,
-    token: fluxToken || null,
-    channelId: activeChannel,
+    token: devcordToken || null,
+    channelId: activeServer !== '' ? activeChannel : null,
     onMessage: mergeChatMessage,
     onTyping: (ev) => {
-      if (ev.channelId !== activeChannel) return;
-      if (ev.userId === meUserId) return;
+      if (String(ev.channelId) !== String(activeChannel)) return;
+      if (String(ev.userId) === String(meUserId)) return;
+      const uid = String(ev.userId);
+      const prevT = typingClearTimersRef.current[uid];
+      if (prevT) clearTimeout(prevT);
+      delete typingClearTimersRef.current[uid];
       setTypingUsers((t) => {
         const next = { ...t };
-        if (ev.typing) next[ev.userId] = true;
-        else delete next[ev.userId];
+        if (ev.typing) next[uid] = true;
+        else delete next[uid];
         return next;
       });
+      if (ev.typing) {
+        typingClearTimersRef.current[uid] = setTimeout(() => {
+          setTypingUsers((t) => {
+            const n = { ...t };
+            delete n[uid];
+            return n;
+          });
+          delete typingClearTimersRef.current[uid];
+        }, 4800);
+      }
     },
-    onUserUpdated: API_BASE_URL && fluxToken ? mergeUserFromWs : undefined,
+    onUserUpdated: API_BASE_URL && devcordToken ? mergeUserFromWs : undefined,
+    dmConversationId: activeServer === '' ? dmActiveConversationId : null,
+    onDmMessage: API_BASE_URL && devcordToken ? mergeDmMessage : undefined,
+    onDmTyping:
+      API_BASE_URL && devcordToken
+        ? (ev) => {
+            if (String(ev.conversationId) !== String(dmActiveConversationIdRef.current)) return;
+            if (String(ev.userId) === String(meUserId)) return;
+            const uid = String(ev.userId);
+            const prevT = dmTypingClearTimersRef.current[uid];
+            if (prevT) clearTimeout(prevT);
+            delete dmTypingClearTimersRef.current[uid];
+            setDmTypingUsers((t) => {
+              const next = { ...t };
+              if (ev.typing) next[uid] = true;
+              else delete next[uid];
+              return next;
+            });
+            if (ev.typing) {
+              dmTypingClearTimersRef.current[uid] = setTimeout(() => {
+                setDmTypingUsers((t) => {
+                  const n = { ...t };
+                  delete n[uid];
+                  return n;
+                });
+                delete dmTypingClearTimersRef.current[uid];
+              }, 4800);
+            }
+          }
+        : undefined,
   });
 
   useEffect(() => {
-    if (!API_BASE_URL || !fluxToken || !isInputFocused) return;
+    if (!API_BASE_URL || !devcordToken || !isInputFocused) return;
     if (currentChannelMeta?.type !== 'text') return;
     if (!inputValue.trim()) {
       sendTyping(false);
@@ -1060,10 +1474,22 @@ export default function App() {
     sendTyping(true);
     const tid = window.setTimeout(() => sendTyping(false), 2800);
     return () => clearTimeout(tid);
-  }, [inputValue, isInputFocused, currentChannelMeta?.type, API_BASE_URL, fluxToken, sendTyping]);
+  }, [inputValue, isInputFocused, currentChannelMeta?.type, API_BASE_URL, devcordToken, sendTyping]);
+
+  useEffect(() => {
+    if (!API_BASE_URL || !devcordToken || activeServer !== '' || !dmActiveConversationId) return;
+    if (!dmInputValue.trim()) {
+      sendTypingDm(false);
+      return;
+    }
+    sendTypingDm(true);
+    const tid = window.setTimeout(() => sendTypingDm(false), 2800);
+    return () => clearTimeout(tid);
+  }, [dmInputValue, dmActiveConversationId, API_BASE_URL, devcordToken, activeServer, sendTypingDm]);
 
   const {
     phase: voicePhase,
+    error: voiceError,
     participants: voiceParticipants,
     localMuted,
     setLocalMuted,
@@ -1080,6 +1506,7 @@ export default function App() {
     roomId: activeVoiceChannel,
     userId: myUserId,
     micDeviceId,
+    accessToken: devcordToken,
     screenStream,
     cameraStream,
     screenBitrate: screenRes === 1440 ? 8000000 : screenRes === 1080 ? 4000000 : screenRes === 720 ? 1500000 : 800000,
@@ -1161,7 +1588,7 @@ export default function App() {
       await Promise.all(
         voiceCh.map(async (ch) => {
           try {
-            const r = await fetch(`/voice/peers?room=${encodeURIComponent(ch.id)}`);
+            const r = await fetch(voicePeersUrl(ch.id));
             if (!r.ok) return;
             const j = (await r.json()) as { user_ids?: string[] };
             updates[ch.id] = [...new Set(j.user_ids ?? [])].sort();
@@ -1568,6 +1995,7 @@ export default function App() {
         else {
           setActiveServer('');
           setActiveChannel('');
+          writePersonalHomePath();
           setTasks([]);
           setWorkspaceRoles([]);
           setWorkspaceMembers([]);
@@ -1812,6 +2240,14 @@ export default function App() {
     if (id === myUserId) return { id, name: localUserName, roleId: workspaceRoles[0]?.id ?? 'r1', status: 'online', avatarUrl: localUserAvatar, nickColor: localUserColor, nickGlow: localUserGlow };
     const u = workspaceMembers.find((x) => x.id === id);
     if (u) return u;
+    const dmPeer = dmApiConversations.find((c) => String(c.peer.id) === String(id))?.peer;
+    if (dmPeer) return dmPeer;
+    const af = acceptedFriends.find((x) => String(x.id) === String(id));
+    if (af) return af;
+    const fin = friendIncoming.find((r) => String(r.from.id) === String(id));
+    if (fin) return fin.from;
+    const fout = friendOutgoing.find((r) => String(r.to.id) === String(id));
+    if (fout) return fout.to;
     if (DEMO_MODE) {
       const u2 = mockUsers.find((x) => x.id === id);
       if (u2) return u2;
@@ -1844,6 +2280,23 @@ export default function App() {
     }
     return polled;
   };
+
+  const locateUserVoiceOnServer = useCallback(
+    (uid: string) => {
+      const srvName = servers.find((s) => s.id === activeServer)?.name ?? '';
+      for (const ch of channels) {
+        if (ch.serverId !== activeServer || ch.type !== 'voice') continue;
+        const polled = voicePeersByChannel[ch.id] ?? [];
+        const here = polled.some((p) => String(p) === String(uid));
+        const selfHere = String(uid) === String(myUserId) && String(activeVoiceChannel) === String(ch.id);
+        if (here || selfHere) {
+          return { channelId: String(ch.id), channelName: ch.name, serverName: srvName };
+        }
+      }
+      return null;
+    },
+    [channels, activeServer, voicePeersByChannel, myUserId, activeVoiceChannel, servers],
+  );
   const getFileIcon = (type: FileItem['type']) => {
     switch(type) { case 'image': return <ImageIcon size={16} />; case 'doc': return <FileText size={16} />; case 'audio': return <FileAudio size={16} />; case 'archive': return <FileArchive size={16} />; }
   };
@@ -1873,7 +2326,7 @@ export default function App() {
   const isMainViewVoice = currentChannelData?.type === 'voice';
   const uncategorizedChannels = currentServerChannels.filter(c => !c.categoryId);
 
-  if (API_BASE_URL && !fluxToken) {
+  if (API_BASE_URL && !devcordToken) {
     return (
       <AuthGate
         apiBase={API_BASE_URL}
@@ -1892,7 +2345,7 @@ export default function App() {
         onToken={(t) => {
           localStorage.setItem(AUTH_TOKEN_KEY, t);
           localStorage.removeItem(AUTH_TOKEN_LEGACY);
-          setFluxToken(t);
+          setDevcordToken(t);
         }}
       />
     );
@@ -1970,7 +2423,7 @@ export default function App() {
 
   return (
     <div
-      data-flux-theme={localTheme}
+      data-devcord-theme={localTheme}
       className={`flex h-screen w-full p-2 md:p-4 font-sans overflow-hidden relative transition-colors ${
         localTheme === 'light'
           ? 'bg-zinc-300 text-zinc-900 selection:bg-[#00eeff]/35'
@@ -1984,33 +2437,33 @@ export default function App() {
         .custom-scrollbar:hover::-webkit-scrollbar { display: block; }
         .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
-        [data-flux-theme="light"] .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); }
+        [data-devcord-theme="light"] .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); }
         .user-row:hover, .channel-row:hover { background-color: var(--hover-bg) !important; border-color: var(--hover-border) !important; }
         .loader-dot { animation: loader 1.4s infinite ease-in-out both; }
         .loader-dot:nth-child(1) { animation-delay: -0.32s; }
         .loader-dot:nth-child(2) { animation-delay: -0.16s; }
         @keyframes loader { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
-        [data-flux-theme="light"] .flux-sidebar .text-zinc-100,
-        [data-flux-theme="light"] .flux-main .text-zinc-100,
-        [data-flux-theme="light"] .flux-rightbar .text-zinc-100 { color: #18181b !important; }
-        [data-flux-theme="light"] .flux-sidebar .text-zinc-200,
-        [data-flux-theme="light"] .flux-main .text-zinc-200,
-        [data-flux-theme="light"] .flux-rightbar .text-zinc-200 { color: #27272a !important; }
-        [data-flux-theme="light"] .flux-sidebar .text-zinc-300,
-        [data-flux-theme="light"] .flux-main .text-zinc-300,
-        [data-flux-theme="light"] .flux-rightbar .text-zinc-300 { color: #3f3f46 !important; }
-        [data-flux-theme="light"] .flux-sidebar .text-zinc-400,
-        [data-flux-theme="light"] .flux-main .text-zinc-400,
-        [data-flux-theme="light"] .flux-rightbar .text-zinc-400 { color: #52525b !important; }
-        [data-flux-theme="light"] .flux-sidebar .text-zinc-500,
-        [data-flux-theme="light"] .flux-main .text-zinc-500,
-        [data-flux-theme="light"] .flux-rightbar .text-zinc-500 { color: #71717a !important; }
-        [data-flux-theme="light"] .flux-sidebar .text-zinc-600,
-        [data-flux-theme="light"] .flux-main .text-zinc-600,
-        [data-flux-theme="light"] .flux-rightbar .text-zinc-600 { color: #52525b !important; }
-        [data-flux-theme="light"] .flux-sidebar .text-white,
-        [data-flux-theme="light"] .flux-main .text-white,
-        [data-flux-theme="light"] .flux-rightbar .text-white { color: #0a0a0a !important; }
+        [data-devcord-theme="light"] .devcord-sidebar .text-zinc-100,
+        [data-devcord-theme="light"] .devcord-main .text-zinc-100,
+        [data-devcord-theme="light"] .devcord-rightbar .text-zinc-100 { color: #18181b !important; }
+        [data-devcord-theme="light"] .devcord-sidebar .text-zinc-200,
+        [data-devcord-theme="light"] .devcord-main .text-zinc-200,
+        [data-devcord-theme="light"] .devcord-rightbar .text-zinc-200 { color: #27272a !important; }
+        [data-devcord-theme="light"] .devcord-sidebar .text-zinc-300,
+        [data-devcord-theme="light"] .devcord-main .text-zinc-300,
+        [data-devcord-theme="light"] .devcord-rightbar .text-zinc-300 { color: #3f3f46 !important; }
+        [data-devcord-theme="light"] .devcord-sidebar .text-zinc-400,
+        [data-devcord-theme="light"] .devcord-main .text-zinc-400,
+        [data-devcord-theme="light"] .devcord-rightbar .text-zinc-400 { color: #52525b !important; }
+        [data-devcord-theme="light"] .devcord-sidebar .text-zinc-500,
+        [data-devcord-theme="light"] .devcord-main .text-zinc-500,
+        [data-devcord-theme="light"] .devcord-rightbar .text-zinc-500 { color: #71717a !important; }
+        [data-devcord-theme="light"] .devcord-sidebar .text-zinc-600,
+        [data-devcord-theme="light"] .devcord-main .text-zinc-600,
+        [data-devcord-theme="light"] .devcord-rightbar .text-zinc-600 { color: #52525b !important; }
+        [data-devcord-theme="light"] .devcord-sidebar .text-white,
+        [data-devcord-theme="light"] .devcord-main .text-white,
+        [data-devcord-theme="light"] .devcord-rightbar .text-white { color: #0a0a0a !important; }
       `}</style>
 
       {/* --- MENU KONTEKSTOWE --- */}
@@ -2040,7 +2493,7 @@ export default function App() {
                 <button
                   onClick={() => {
                     clearStoredAuthToken();
-                    setFluxToken('');
+                    setDevcordToken('');
                     setContextMenu(null);
                   }}
                   className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors w-full text-left"
@@ -2155,9 +2608,9 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => {
-                  setActiveServer('');
-                  setDmPeerId(String((contextMenu.data as UserInfo).id));
+                  const u = contextMenu.data as UserInfo;
                   setContextMenu(null);
+                  void openDmForPeer(u.id);
                 }}
                 className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-white/[0.05] rounded-lg transition-colors w-full text-left"
               >
@@ -2276,7 +2729,7 @@ export default function App() {
         </div>
       )}
 
-      {deepJoinToken && API_BASE_URL && fluxToken && (
+      {deepJoinToken && API_BASE_URL && devcordToken && (
         <div
           className="fixed inset-0 z-[160] flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm animate-in fade-in duration-200"
           onClick={(e) => e.stopPropagation()}
@@ -3029,7 +3482,7 @@ export default function App() {
 
       {/* --- STRUKTURA GŁÓWNA APLIKACJI --- */}
       <div
-        className={`flex h-full w-full rounded-[32px] border overflow-hidden relative transition-all duration-500 flux-shell ${
+        className={`flex h-full w-full rounded-[32px] border overflow-hidden relative transition-all duration-500 devcord-shell ${
           localTheme === 'light'
             ? 'bg-zinc-100 border-zinc-300/90 shadow-lg shadow-black/10'
             : 'bg-[#050505] border-white/[0.08] shadow-[0_0_80px_rgba(255,255,255,0.03)]'
@@ -3040,7 +3493,7 @@ export default function App() {
         {!isZenMode && (
           <aside 
             onContextMenu={(e) => handleContextMenu(e, 'workspace', null)}
-            className={`w-[280px] flex flex-col shrink-0 z-30 border-r transition-all duration-500 flux-sidebar ${
+            className={`w-[280px] flex flex-col shrink-0 z-30 border-r transition-all duration-500 devcord-sidebar ${
               localTheme === 'light' ? 'bg-zinc-50 border-zinc-200' : 'border-white/[0.04] bg-[#080808]'
             }`}
           >
@@ -3105,6 +3558,7 @@ export default function App() {
                             onClick={() => {
                               setActiveServer('');
                               setActiveChannel('');
+                              writePersonalHomePath();
                               setIsWorkspaceDropdownOpen(false);
                             }}
                             className="w-full flex items-center gap-3 p-2 rounded-xl transition-all duration-200 hover:bg-white/[0.05] group"
@@ -3175,8 +3629,29 @@ export default function App() {
             {activeServer === '' ? (
               <div className="flex-1 overflow-y-auto custom-scrollbar py-4 px-4 flex flex-col gap-2 relative min-h-0">
                 <div className="absolute inset-0 bg-[#00eeff]/[0.01] pointer-events-none rounded-xl"></div>
-                <div className="text-[10px] uppercase font-bold tracking-[0.2em] text-zinc-500 mb-2 px-2 flex items-center justify-between mt-2 relative z-10">
-                  <span>Wiadomości bezpośrednie</span>
+                <div className="relative z-10 flex rounded-xl border border-white/[0.08] bg-black/40 p-0.5 mb-2">
+                  <button
+                    type="button"
+                    onClick={() => setPersonalSidebarTab('messages')}
+                    className={`flex-1 py-2 px-2 rounded-lg text-[11px] font-bold uppercase tracking-wider transition-colors ${
+                      personalSidebarTab === 'messages'
+                        ? 'bg-[#00eeff]/15 text-[#00eeff] border border-[#00eeff]/25'
+                        : 'text-zinc-500 hover:text-zinc-300'
+                    }`}
+                  >
+                    Rozmowy
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPersonalSidebarTab('contacts')}
+                    className={`flex-1 py-2 px-2 rounded-lg text-[11px] font-bold uppercase tracking-wider transition-colors ${
+                      personalSidebarTab === 'contacts'
+                        ? 'bg-[#00eeff]/15 text-[#00eeff] border border-[#00eeff]/25'
+                        : 'text-zinc-500 hover:text-zinc-300'
+                    }`}
+                  >
+                    Znajomi
+                  </button>
                 </div>
                 {!API_BASE_URL ? (
                   <p className="text-xs text-zinc-500 px-2 leading-relaxed relative z-10">
@@ -3184,49 +3659,286 @@ export default function App() {
                   </p>
                 ) : !meUserId ? (
                   <p className="text-xs text-zinc-500 px-2 leading-relaxed relative z-10">Zaloguj się, aby pisać z członkami zespołu.</p>
-                ) : workspaceMembers.filter((m) => m.id !== meUserId).length === 0 ? (
-                  <p className="text-xs text-zinc-500 px-2 relative z-10">Brak innych członków — dołącz do serwera, aby zobaczyć kontakty.</p>
-                ) : (
-                  workspaceMembers
-                    .filter((m) => m.id !== meUserId)
-                    .map((m) => {
-                      const key = dmThreadKey(myUserId, m.id);
-                      const last = (dmMessagesByThread[key] ?? []).slice(-1)[0];
-                      const active = dmPeerId === m.id;
-                      return (
-                        <button
-                          key={m.id}
-                          type="button"
-                          onClick={() => setDmPeerId(m.id)}
-                          className={`relative z-10 flex items-center gap-3 p-2 rounded-xl border transition-colors text-zinc-300 hover:text-white w-full text-left group ${
-                            active
-                              ? 'bg-[#00eeff]/12 border-[#00eeff]/25'
-                              : 'hover:bg-[#00eeff]/10 border-transparent hover:border-[#00eeff]/15'
-                          }`}
-                        >
-                          <div className="relative shrink-0">
-                            {m.avatarUrl?.trim() ? (
-                              <img src={m.avatarUrl} alt="" className="w-8 h-8 rounded-[10px] object-cover border border-white/[0.1] group-hover:border-[#00eeff]/30 transition-colors" />
-                            ) : (
-                              <div className="w-8 h-8 rounded-[10px] bg-black border border-white/[0.1] flex items-center justify-center text-xs font-bold text-white group-hover:border-[#00eeff]/30 transition-colors">
-                                {m.name.charAt(0)}
+                ) : personalSidebarTab === 'messages' ? (
+                  <>
+                    {dmApiConversations.length === 0 ? (
+                      <p className="text-xs text-zinc-500 px-2 relative z-10 leading-relaxed">
+                        Brak rozmów PW. Otwórz profil osoby na serwerze i wybierz „Wyślij wiadomość”, albo przejdź do zakładki Znajomi.
+                      </p>
+                    ) : (
+                      <div className="relative z-10 space-y-1">
+                        {dmApiConversations.map((c) => {
+                          const active = dmActiveConversationId === c.id;
+                          const last = c.last_message?.content;
+                          const avSrc = c.peer.avatarUrl?.trim()
+                            ? resolveMediaUrl(API_BASE_URL || appPublicOrigin(), c.peer.avatarUrl) ?? c.peer.avatarUrl
+                            : '';
+                          return (
+                            <button
+                              key={c.id}
+                              type="button"
+                              onClick={() => {
+                                setDmActiveConversationId(c.id);
+                                setDmPeerId(c.peer.id);
+                              }}
+                              className={`flex items-center gap-3 p-2 rounded-xl border transition-colors text-zinc-300 hover:text-white w-full text-left group ${
+                                active
+                                  ? 'bg-[#00eeff]/12 border-[#00eeff]/25'
+                                  : 'hover:bg-[#00eeff]/10 border-transparent hover:border-[#00eeff]/15'
+                              }`}
+                            >
+                              <div className="relative shrink-0">
+                                {avSrc ? (
+                                  <img
+                                    src={avSrc}
+                                    alt=""
+                                    className="w-8 h-8 rounded-[10px] object-cover border border-white/[0.1] group-hover:border-[#00eeff]/30 transition-colors"
+                                  />
+                                ) : (
+                                  <div className="w-8 h-8 rounded-[10px] bg-black border border-white/[0.1] flex items-center justify-center text-xs font-bold text-white group-hover:border-[#00eeff]/30 transition-colors">
+                                    {c.peer.name.charAt(0)}
+                                  </div>
+                                )}
+                                <div className="absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full bg-emerald-500 border-[3px] border-[#080808]" />
                               </div>
-                            )}
-                            <div className="absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full bg-emerald-500 border-[3px] border-[#080808]" />
+                              <div className="flex flex-col min-w-0 flex-1">
+                                <NickLabel
+                                  user={c.peer}
+                                  fallbackColor="#e4e4e7"
+                                  className="text-sm font-semibold truncate group-hover:text-[#00eeff] transition-colors"
+                                />
+                                <span className="text-[10px] text-zinc-500 truncate">{last || 'Rozpocznij rozmowę…'}</span>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div className="relative z-10 space-y-4">
+                    {API_BASE_URL && meUserId ? (
+                      <>
+                        {friendIncoming.length > 0 && (
+                          <div>
+                            <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-500 px-2 mb-1.5">Zaproszenia</p>
+                            <div className="space-y-1">
+                              {friendIncoming.map((r) => {
+                                const m = r.from;
+                                const mAv = m.avatarUrl?.trim()
+                                  ? resolveMediaUrl(API_BASE_URL || appPublicOrigin(), m.avatarUrl) ?? m.avatarUrl
+                                  : '';
+                                return (
+                                  <div
+                                    key={r.id}
+                                    className="flex items-center gap-2 p-2 rounded-xl border border-white/[0.08] bg-black/20"
+                                  >
+                                    <div className="relative shrink-0">
+                                      {mAv ? (
+                                        <img src={mAv} alt="" className="w-8 h-8 rounded-[10px] object-cover border border-white/[0.1]" />
+                                      ) : (
+                                        <div className="w-8 h-8 rounded-[10px] bg-black border border-white/[0.1] flex items-center justify-center text-xs font-bold text-white">
+                                          {m.name.charAt(0)}
+                                        </div>
+                                      )}
+                                    </div>
+                                    <div className="flex flex-col min-w-0 flex-1">
+                                      <NickLabel user={m} fallbackColor="#e4e4e7" className="text-sm font-semibold truncate" />
+                                      <span className="text-[10px] text-zinc-500">chce dodać Cię do znajomych</span>
+                                    </div>
+                                    <div className="flex shrink-0 gap-1">
+                                      <button
+                                        type="button"
+                                        onClick={() => void acceptFriendByRequestId(r.id)}
+                                        className="px-2 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wide bg-[#00eeff]/20 text-[#00eeff] border border-[#00eeff]/30 hover:bg-[#00eeff]/30"
+                                      >
+                                        OK
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => void rejectFriendByRequestId(r.id)}
+                                        className="px-2 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wide text-zinc-500 hover:text-white hover:bg-white/[0.06]"
+                                      >
+                                        ×
+                                      </button>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
                           </div>
-                          <div className="flex flex-col min-w-0 flex-1">
-                            <NickLabel
-                              user={m}
-                              fallbackColor="#e4e4e7"
-                              className="text-sm font-semibold truncate group-hover:text-[#00eeff] transition-colors"
-                            />
-                            <span className="text-[10px] text-zinc-500 truncate">
-                              {last ? last.content : 'Rozpocznij rozmowę…'}
-                            </span>
+                        )}
+                        {friendOutgoing.length > 0 && (
+                          <div>
+                            <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-500 px-2 mb-1.5">Wysłane</p>
+                            <div className="space-y-1">
+                              {friendOutgoing.map((r) => {
+                                const m = r.to;
+                                const mAv = m.avatarUrl?.trim()
+                                  ? resolveMediaUrl(API_BASE_URL || appPublicOrigin(), m.avatarUrl) ?? m.avatarUrl
+                                  : '';
+                                return (
+                                  <div
+                                    key={r.id}
+                                    className="flex items-center gap-2 p-2 rounded-xl border border-white/[0.06] opacity-80"
+                                  >
+                                    {mAv ? (
+                                      <img src={mAv} alt="" className="w-8 h-8 rounded-[10px] object-cover border border-white/[0.1] shrink-0" />
+                                    ) : (
+                                      <div className="w-8 h-8 rounded-[10px] bg-black border border-white/[0.1] flex items-center justify-center text-xs font-bold text-white shrink-0">
+                                        {m.name.charAt(0)}
+                                      </div>
+                                    )}
+                                    <div className="min-w-0 flex-1">
+                                      <NickLabel user={m} fallbackColor="#e4e4e7" className="text-sm font-semibold truncate" />
+                                      <span className="text-[10px] text-zinc-500">oczekuje na akceptację</span>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
                           </div>
-                        </button>
-                      );
-                    })
+                        )}
+                        {acceptedFriends.length > 0 && (
+                          <div>
+                            <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-500 px-2 mb-1.5">Znajomi</p>
+                            <div className="space-y-1">
+                              {acceptedFriends.map((m) => {
+                                const mAv = m.avatarUrl?.trim()
+                                  ? resolveMediaUrl(API_BASE_URL || appPublicOrigin(), m.avatarUrl) ?? m.avatarUrl
+                                  : '';
+                                const active = dmPeerId === m.id && !!dmActiveConversationId;
+                                return (
+                                  <button
+                                    key={m.id}
+                                    type="button"
+                                    onClick={() => void openDmForPeer(m.id)}
+                                    className={`flex items-center gap-3 p-2 rounded-xl border transition-colors text-zinc-300 hover:text-white w-full text-left group ${
+                                      active
+                                        ? 'bg-[#00eeff]/12 border-[#00eeff]/25'
+                                        : 'hover:bg-[#00eeff]/10 border-transparent hover:border-[#00eeff]/15'
+                                    }`}
+                                  >
+                                    <div className="relative shrink-0">
+                                      {mAv ? (
+                                        <img
+                                          src={mAv}
+                                          alt=""
+                                          className="w-8 h-8 rounded-[10px] object-cover border border-white/[0.1] group-hover:border-[#00eeff]/30 transition-colors"
+                                        />
+                                      ) : (
+                                        <div className="w-8 h-8 rounded-[10px] bg-black border border-white/[0.1] flex items-center justify-center text-xs font-bold text-white group-hover:border-[#00eeff]/30 transition-colors">
+                                          {m.name.charAt(0)}
+                                        </div>
+                                      )}
+                                      <div className="absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full bg-emerald-500 border-[3px] border-[#080808]" />
+                                    </div>
+                                    <div className="flex flex-col min-w-0 flex-1">
+                                      <NickLabel
+                                        user={m}
+                                        fallbackColor="#e4e4e7"
+                                        className="text-sm font-semibold truncate group-hover:text-[#00eeff] transition-colors"
+                                      />
+                                      <span className="text-[10px] text-zinc-500 truncate">Wyślij wiadomość</span>
+                                    </div>
+                                    <UserCheck size={16} className="shrink-0 text-emerald-500/90" aria-hidden />
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    ) : null}
+                    <div>
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-500 px-2 mb-1.5">Kontakty z serwerów</p>
+                      {workspaceMembers.filter((m) => m.id !== meUserId).length === 0 ? (
+                        <p className="text-xs text-zinc-500 px-2 leading-relaxed">
+                          Dołącz do serwera, aby zobaczyć członków i wysłać zaproszenie do znajomych.
+                        </p>
+                      ) : (
+                        <div className="space-y-1">
+                          {workspaceMembers
+                            .filter((m) => m.id !== meUserId)
+                            .map((m) => {
+                              const key = dmThreadKey(myUserId, m.id);
+                              const lastLocal = (dmMessagesByThread[key] ?? []).slice(-1)[0];
+                              const active = API_BASE_URL ? dmPeerId === m.id && !!dmActiveConversationId : dmPeerId === m.id;
+                              const mAv = m.avatarUrl?.trim()
+                                ? resolveMediaUrl(API_BASE_URL || appPublicOrigin(), m.avatarUrl) ?? m.avatarUrl
+                                : '';
+                              const isFr = acceptedFriends.some((f) => f.id === m.id);
+                              const pendOut = friendOutgoing.some((o) => o.to.id === m.id);
+                              const pendIn = friendIncoming.some((i) => i.from.id === m.id);
+                              return (
+                                <button
+                                  key={m.id}
+                                  type="button"
+                                  onClick={() => void openDmForPeer(m.id)}
+                                  className={`flex items-center gap-3 p-2 rounded-xl border transition-colors text-zinc-300 hover:text-white w-full text-left group ${
+                                    active
+                                      ? 'bg-[#00eeff]/12 border-[#00eeff]/25'
+                                      : 'hover:bg-[#00eeff]/10 border-transparent hover:border-[#00eeff]/15'
+                                  }`}
+                                >
+                                  <div className="relative shrink-0">
+                                    {mAv ? (
+                                      <img
+                                        src={mAv}
+                                        alt=""
+                                        className="w-8 h-8 rounded-[10px] object-cover border border-white/[0.1] group-hover:border-[#00eeff]/30 transition-colors"
+                                      />
+                                    ) : (
+                                      <div className="w-8 h-8 rounded-[10px] bg-black border border-white/[0.1] flex items-center justify-center text-xs font-bold text-white group-hover:border-[#00eeff]/30 transition-colors">
+                                        {m.name.charAt(0)}
+                                      </div>
+                                    )}
+                                    <div className="absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full bg-emerald-500 border-[3px] border-[#080808]" />
+                                  </div>
+                                  <div className="flex flex-col min-w-0 flex-1">
+                                    <NickLabel
+                                      user={m}
+                                      fallbackColor="#e4e4e7"
+                                      className="text-sm font-semibold truncate group-hover:text-[#00eeff] transition-colors"
+                                    />
+                                    <span className="text-[10px] text-zinc-500 truncate">
+                                      {!API_BASE_URL && lastLocal ? lastLocal.content : 'Wyślij wiadomość'}
+                                    </span>
+                                  </div>
+                                  {API_BASE_URL && meUserId ? (
+                                    <span
+                                      className="shrink-0"
+                                      onClick={(e) => e.stopPropagation()}
+                                      onKeyDown={(e) => e.stopPropagation()}
+                                      role="presentation"
+                                    >
+                                      {isFr ? (
+                                        <span title="Znajomy">
+                                          <UserCheck size={16} className="text-emerald-500" />
+                                        </span>
+                                      ) : pendIn ? (
+                                        <span className="text-[10px] text-[#00eeff] font-semibold px-1">Zaproszenie</span>
+                                      ) : pendOut ? (
+                                        <span className="text-[10px] text-zinc-500 px-1">Wysłano</span>
+                                      ) : (
+                                        <button
+                                          type="button"
+                                          title="Zaproś do znajomych"
+                                          onClick={() => void sendFriendRequest(m.id)}
+                                          className="p-1.5 rounded-lg text-zinc-400 hover:text-[#00eeff] hover:bg-[#00eeff]/10 border border-transparent hover:border-[#00eeff]/20"
+                                        >
+                                          <UserPlus size={16} />
+                                        </button>
+                                      )}
+                                    </span>
+                                  ) : null}
+                                </button>
+                              );
+                            })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 )}
               </div>
             ) : (
@@ -3434,6 +4146,11 @@ export default function App() {
                           {servers.find((s) => s.id === activeServer)?.name ?? 'Serwer'} ·{' '}
                           {channels.find((c) => c.id === activeVoiceChannel)?.name ?? 'Kanał głosowy'}
                         </p>
+                        {voicePhase === 'error' && voiceError ? (
+                          <p className="text-[10px] text-red-400/90 mt-1 leading-snug break-words" title={voiceError}>
+                            {voiceError}
+                          </p>
+                        ) : null}
                       </div>
                     </div>
                     <div className="flex gap-1.5">
@@ -3507,7 +4224,7 @@ export default function App() {
 
         {/* --- 2. MAIN VIEW (CZAT / VOICE) --- */}
         <main
-          className={`flex-1 flex flex-col relative overflow-hidden z-0 border-l transition-all duration-500 flux-main ${
+          className={`flex-1 flex flex-col relative overflow-hidden z-0 border-l transition-all duration-500 devcord-main ${
             localTheme === 'light' ? 'bg-zinc-100 border-zinc-200' : 'bg-[#0a0a0c] border-white/[0.02]'
           }`}
         >
@@ -3518,14 +4235,61 @@ export default function App() {
                 {(() => {
                   const dmPeer = workspaceMembers.find((m) => m.id === dmPeerId) ?? getUser(dmPeerId);
                   const tKey = dmThreadKey(myUserId, dmPeerId);
-                  const dms = dmMessagesByThread[tKey] ?? [];
+                  const dms: (DmRow | ChatRow)[] =
+                    API_BASE_URL && dmActiveConversationId
+                      ? dmMessagesByConversation[dmActiveConversationId] ?? []
+                      : dmMessagesByThread[tKey] ?? [];
+                  const sendDmLocal = (trimmed: string) => {
+                    const row: DmRow = {
+                      id: `dm_${Date.now()}`,
+                      userId: myUserId,
+                      time: new Date().toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }),
+                      content: trimmed,
+                    };
+                    setDmMessagesByThread((prev) => ({
+                      ...prev,
+                      [tKey]: [...(prev[tKey] ?? []), row],
+                    }));
+                    setDmInputValue('');
+                  };
+                  const sendDmApi = async (trimmed: string) => {
+                    if (!dmActiveConversationId) return;
+                    const tmpId = `tmp_${Date.now()}`;
+                    setDmMessagesByConversation((prev) => ({
+                      ...prev,
+                      [dmActiveConversationId]: [
+                        ...(prev[dmActiveConversationId] ?? []),
+                        {
+                          id: tmpId,
+                          userId: myUserId,
+                          time: new Date().toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }),
+                          content: trimmed,
+                          isMe: true,
+                        },
+                      ],
+                    }));
+                    setDmInputValue('');
+                    try {
+                      await apiClient(`/dm/conversations/${dmActiveConversationId}/messages`, 'POST', {
+                        content: trimmed,
+                      });
+                    } catch {
+                      setDmMessagesByConversation((prev) => ({
+                        ...prev,
+                        [dmActiveConversationId]: (prev[dmActiveConversationId] ?? []).filter((r) => r.id !== tmpId),
+                      }));
+                    }
+                  };
                   return (
                     <>
                       <header className="shrink-0 h-16 flex items-center justify-between px-6 border-b border-white/[0.06] bg-[#0a0a0c]/90 backdrop-blur-md z-10">
                         <div className="flex items-center gap-3 min-w-0">
                           <button
                             type="button"
-                            onClick={() => setDmPeerId(null)}
+                            onClick={() => {
+                              setDmPeerId(null);
+                              setDmActiveConversationId(null);
+                            }}
                             className="text-xs text-zinc-500 hover:text-[#00eeff] font-semibold uppercase tracking-widest shrink-0"
                           >
                             ← Terminal
@@ -3541,6 +4305,18 @@ export default function App() {
                           <div className="min-w-0">
                             <NickLabel user={dmPeer} fallbackColor="#f4f4f5" className="font-bold text-base truncate block" />
                             <p className="text-[10px] text-zinc-500 uppercase tracking-widest">Wiadomość bezpośrednia</p>
+                            {API_BASE_URL &&
+                              Object.keys(dmTypingUsers).filter((u) => u !== myUserId).length > 0 && (
+                                <p className="text-[10px] text-[#00eeff]/90 mt-0.5 truncate">
+                                  {(() => {
+                                    const ids = Object.keys(dmTypingUsers).filter((u) => u !== myUserId);
+                                    const names = ids.map((id) => getUser(id).name);
+                                    if (names.length === 1) return `${names[0]} pisze…`;
+                                    if (names.length === 2) return `${names[0]} i ${names[1]} piszą…`;
+                                    return `${names[0]}, ${names[1]} i ${names.length - 2} innych pisze…`;
+                                  })()}
+                                </p>
+                              )}
                           </div>
                         </div>
                         <div className="flex items-center gap-1 shrink-0">
@@ -3569,11 +4345,14 @@ export default function App() {
                           </button>
                         </div>
                       </header>
-                      <div className="flex-1 overflow-y-auto custom-scrollbar px-6 py-6 relative z-10">
-                        <div className="max-w-3xl mx-auto w-full flex flex-col gap-3 pb-28">
+                      <div className="flex-1 overflow-y-auto custom-scrollbar px-4 py-6 relative z-10">
+                        <div className="w-full max-w-none flex flex-col gap-3 pb-28">
                           {dms.length === 0 ? (
                             <div className="rounded-2xl border border-dashed border-white/[0.1] bg-black/30 p-8 text-center text-zinc-500 text-sm">
-                              Zacznij rozmowę z <span className="text-zinc-300 font-semibold">{dmPeer.name}</span>. Historia jest zapisana lokalnie w tej przeglądarce.
+                              Zacznij rozmowę z <span className="text-zinc-300 font-semibold">{dmPeer.name}</span>.
+                              {API_BASE_URL
+                                ? ' Historia jest na serwerze i synchronizowana między urządzeniami.'
+                                : ' Historia jest zapisana lokalnie w tej przeglądarce.'}
                             </div>
                           ) : (
                             dms.map((row) => {
@@ -3584,9 +4363,24 @@ export default function App() {
                                   key={row.id}
                                   className={`flex gap-3 ${isMe ? 'flex-row-reverse' : ''}`}
                                 >
-                                  <div className="w-8 h-8 shrink-0 rounded-lg border border-white/[0.08] overflow-hidden bg-black flex items-center justify-center text-[10px] font-bold text-zinc-400">
+                                  <div
+                                    role="button"
+                                    tabIndex={0}
+                                    onClick={() => setProfileCardUser(u)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter' || e.key === ' ') {
+                                        e.preventDefault();
+                                        setProfileCardUser(u);
+                                      }
+                                    }}
+                                    className="w-8 h-8 shrink-0 rounded-lg border border-white/[0.08] overflow-hidden bg-black flex items-center justify-center text-[10px] font-bold text-zinc-400 cursor-pointer hover:opacity-90 transition-opacity"
+                                  >
                                     {u.avatarUrl?.trim() ? (
-                                      <img src={u.avatarUrl} alt="" className="w-full h-full object-cover" />
+                                      <img
+                                        src={resolveMediaUrl(API_BASE_URL || appPublicOrigin(), u.avatarUrl) ?? u.avatarUrl}
+                                        alt=""
+                                        className="w-full h-full object-cover"
+                                      />
                                     ) : (
                                       u.name.charAt(0)
                                     )}
@@ -3608,7 +4402,7 @@ export default function App() {
                         </div>
                       </div>
                       <div className="shrink-0 absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-[#0a0a0c] via-[#0a0a0c] to-transparent z-20">
-                        <div className="max-w-3xl mx-auto flex gap-2 items-end bg-[#111]/95 border border-white/[0.08] rounded-2xl p-2 backdrop-blur-xl shadow-[0_20px_50px_rgba(0,0,0,0.6)]">
+                        <div className="w-full flex gap-2 items-end bg-[#111]/95 border border-white/[0.08] rounded-2xl p-2 backdrop-blur-xl shadow-[0_20px_50px_rgba(0,0,0,0.6)]">
                           <textarea
                             value={dmInputValue}
                             onChange={(e) => setDmInputValue(e.target.value)}
@@ -3616,17 +4410,9 @@ export default function App() {
                               if (e.key === 'Enter' && !e.shiftKey) {
                                 e.preventDefault();
                                 if (!dmInputValue.trim()) return;
-                                const row: DmRow = {
-                                  id: `dm_${Date.now()}`,
-                                  userId: myUserId,
-                                  time: new Date().toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }),
-                                  content: dmInputValue.trim(),
-                                };
-                                setDmMessagesByThread((prev) => ({
-                                  ...prev,
-                                  [tKey]: [...(prev[tKey] ?? []), row],
-                                }));
-                                setDmInputValue('');
+                                const trimmed = dmInputValue.trim();
+                                if (API_BASE_URL && devcordToken && dmActiveConversationId) void sendDmApi(trimmed);
+                                else sendDmLocal(trimmed);
                               }
                             }}
                             placeholder={`Wiadomość do ${dmPeer.name}…`}
@@ -3637,17 +4423,9 @@ export default function App() {
                             type="button"
                             onClick={() => {
                               if (!dmInputValue.trim()) return;
-                              const row: DmRow = {
-                                id: `dm_${Date.now()}`,
-                                userId: myUserId,
-                                time: new Date().toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }),
-                                content: dmInputValue.trim(),
-                              };
-                              setDmMessagesByThread((prev) => ({
-                                ...prev,
-                                [tKey]: [...(prev[tKey] ?? []), row],
-                              }));
-                              setDmInputValue('');
+                              const trimmed = dmInputValue.trim();
+                              if (API_BASE_URL && devcordToken && dmActiveConversationId) void sendDmApi(trimmed);
+                              else sendDmLocal(trimmed);
                             }}
                             className="h-11 w-11 shrink-0 rounded-xl bg-[#00eeff] text-black flex items-center justify-center shadow-[0_0_20px_rgba(0,238,255,0.35)] disabled:opacity-40"
                             disabled={!dmInputValue.trim()}
@@ -3681,8 +4459,9 @@ export default function App() {
                       <li>Otwórz przestrzeń roboczą serwera (ikonka nad listą kanałów).</li>
                       <li>Wróć tutaj — w sekcji „Wiadomości bezpośrednie” zobaczysz członków zespołu.</li>
                       <li>
-                        Wiadomości PV są przechowywane lokalnie (ta przeglądarka). Połączenia głosowe PV używają tego samego stylu co reszta
-                        aplikacji; pełny most WebRTC dla DM wymaga osobnej usługi sygnalizacji na backendzie.
+                        {API_BASE_URL
+                          ? 'Wiadomości PV są zapisywane w bazie i widoczne po zalogowaniu z innej przeglądarki.'
+                          : 'Wiadomości PV są przechowywane lokalnie (ta przeglądarka).'}
                       </li>
                     </ol>
                     {servers.length > 0 && (
@@ -3710,7 +4489,11 @@ export default function App() {
               <div className="flex flex-wrap gap-3 justify-center">
                 <button
                   type="button"
-                  onClick={() => setActiveServer('')}
+                  onClick={() => {
+                    setActiveServer('');
+                    setActiveChannel('');
+                    writePersonalHomePath();
+                  }}
                   className="px-6 py-3 rounded-xl bg-[#00eeff] text-black font-bold text-sm shadow-[0_0_20px_rgba(0,238,255,0.35)] hover:scale-[1.02] transition-transform flex items-center gap-2"
                 >
                   <Terminal size={16} /> Przejdź do Terminala
@@ -3738,12 +4521,19 @@ export default function App() {
               {currentChannelData && <currentChannelData.icon size={20} style={{ color: currentChannelData.color }} />}
               <span className="tracking-tight font-bold text-lg" style={{ color: currentChannelData?.color, textShadow: `0 0 15px ${currentChannelData?.color}40` }}>{currentChannelData?.name}</span>
               <div className="w-[1px] h-4 bg-white/[0.1] mx-2 hidden md:block"></div>
-              <span className="text-xs text-zinc-500 hidden md:block font-normal">
+              <span className="text-xs text-zinc-500 hidden md:block font-normal truncate max-w-[min(28rem,40vw)]">
                 {isMainViewVoice
                   ? 'Aktywna komunikacja głosowa.'
-                  : Object.keys(typingUsers).filter((u) => u !== myUserId).length > 0
-                    ? 'Ktoś pisze…'
-                    : 'System operacyjny Devcord_.'}
+                  : (() => {
+                      const ids = Object.keys(typingUsers).filter((u) => u !== myUserId);
+                      if (ids.length === 0) return 'System operacyjny Devcord_.';
+                      const names = ids.map(
+                        (id) => workspaceMembers.find((m) => m.id === id)?.name ?? getUser(id).name,
+                      );
+                      if (names.length === 1) return `${names[0]} pisze…`;
+                      if (names.length === 2) return `${names[0]} i ${names[1]} piszą…`;
+                      return `${names[0]}, ${names[1]} i ${names.length - 2} innych pisze…`;
+                    })()}
               </span>
             </div>
             
@@ -3757,7 +4547,7 @@ export default function App() {
               <button onClick={() => setIsZenMode(!isZenMode)} className={`p-2 rounded-lg transition-all duration-300 ${isZenMode ? 'bg-[#00eeff] text-black shadow-[0_0_15px_rgba(0,238,255,0.4)]' : 'hover:text-white hover:bg-white/[0.05]'}`} title="Tryb Skupienia">
                 {isZenMode ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
               </button>
-              {!isZenMode && (
+              {!isZenMode && !(activeServer === '' && dmActiveConversationId) && (
                 <button onClick={() => { setActiveThread(null); setRightPanelTab(rightPanelTab === 'members' ? null : 'members'); }} className={`p-2 rounded-lg transition-colors ${(rightPanelTab && !activeThread) ? 'bg-white/[0.1] text-white' : 'hover:text-white hover:bg-white/[0.05]'}`}>
                   <Users size={18} />
                 </button>
@@ -4163,9 +4953,9 @@ export default function App() {
               {/* WIDOK CZATU TEKSTOWEGO */}
               <div 
                 onContextMenu={(e) => handleContextMenu(e, 'chatArea', null)}
-                className="flex-1 overflow-y-auto px-6 pt-6 pb-44 custom-scrollbar flex flex-col relative transition-all duration-500"
+                className="flex-1 overflow-y-auto px-4 pt-6 pb-44 custom-scrollbar flex flex-col relative transition-all duration-500"
               >
-                <div className={`${isZenMode ? 'max-w-3xl' : 'max-w-4xl'} mx-auto w-full flex flex-col mt-auto transition-all duration-500`}>
+                <div className="w-full max-w-none flex flex-col mt-auto transition-all duration-500">
                   
                   <div className="pb-6 border-b border-white/[0.05] mb-6 flex flex-col items-start mt-8">
                     <div className="w-16 h-16 rounded-3xl border flex items-center justify-center mb-6 shadow-lg" style={{ backgroundColor: `${currentChannelData?.color}10`, borderColor: `${currentChannelData?.color}30`, boxShadow: `0 0 30px ${currentChannelData?.color}20` }}>
@@ -4186,6 +4976,10 @@ export default function App() {
                     const groupTop =
                       idx === 0 ? '' : showHeader ? 'mt-6' : 'mt-1.5';
                     const rowPad = showHeader ? 'py-2' : 'py-0.5';
+                    const avatarSrc =
+                      !isAI && user.avatarUrl?.trim()
+                        ? resolveMediaUrl(API_BASE_URL || appPublicOrigin(), user.avatarUrl) ?? user.avatarUrl
+                        : '';
                     
                     return (
                       <div 
@@ -4196,13 +4990,27 @@ export default function App() {
                         <div className={`w-10 shrink-0 flex justify-center ${showHeader ? 'mt-1' : 'mt-0'}`}>
                           {showHeader ? (
                             <div 
+                              role={!isAI ? 'button' : undefined}
+                              tabIndex={!isAI ? 0 : undefined}
+                              onClick={(e) => {
+                                if (isAI) return;
+                                e.stopPropagation();
+                                setProfileCardUser(user);
+                              }}
+                              onKeyDown={(e) => {
+                                if (isAI) return;
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault();
+                                  setProfileCardUser(user);
+                                }
+                              }}
                               onContextMenu={(e) => { if(!isAI) handleContextMenu(e, 'user', user); }}
                               className={`w-10 h-10 rounded-xl border flex items-center justify-center font-bold text-sm shadow-inner overflow-hidden transition-opacity ${!isAI ? 'cursor-pointer hover:opacity-80' : ''} ${isAI ? 'bg-[#00eeff]/20 border-[#00eeff]/50 text-[#00eeff]' : 'bg-black border-white/[0.08] text-zinc-300'}`}
                             >
                               {isAI ? (
                                 <Sparkles size={18}/>
-                              ) : user.avatarUrl?.trim() ? (
-                                <img src={user.avatarUrl} alt="" className="w-full h-full object-cover" />
+                              ) : avatarSrc ? (
+                                <img src={avatarSrc} alt="" className="w-full h-full object-cover" />
                               ) : (
                                 user.name.charAt(0)
                               )}
@@ -4216,6 +5024,11 @@ export default function App() {
                           {showHeader && (
                             <div className="flex items-baseline gap-2 mb-1.5">
                               <span
+                                onClick={(e) => {
+                                  if (isAI) return;
+                                  e.stopPropagation();
+                                  setProfileCardUser(user);
+                                }}
                                 onContextMenu={(e) => {
                                   if (!isAI) handleContextMenu(e, 'user', user);
                                 }}
@@ -4235,9 +5048,17 @@ export default function App() {
                                 )}
                               </span>
                               {!isAI && role.name !== 'Member' && role.id !== 'r4' && (
-                                <div className="flex items-center gap-1.5 px-1.5 py-[2px] rounded text-[9px] font-bold uppercase tracking-wider border shadow-sm backdrop-blur-sm" style={{ backgroundColor: role.bg, borderColor: role.border, color: role.color, boxShadow: role.glow !== 'none' ? `0 0 8px ${role.bg}` : 'none' }}>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setProfileCardUser(user);
+                                  }}
+                                  className="flex items-center gap-1.5 px-1.5 py-[2px] rounded text-[9px] font-bold uppercase tracking-wider border shadow-sm backdrop-blur-sm cursor-pointer hover:brightness-110 transition-[filter]"
+                                  style={{ backgroundColor: role.bg, borderColor: role.border, color: role.color, boxShadow: role.glow !== 'none' ? `0 0 8px ${role.bg}` : 'none' }}
+                                >
                                   <role.icon size={10} strokeWidth={2.5} /><span>{role.name}</span>
-                                </div>
+                                </button>
                               )}
                               <span className="text-[10px] text-zinc-600 font-medium ml-1">{msg.time}</span>
                             </div>
@@ -4296,8 +5117,8 @@ export default function App() {
               </div>
 
               {/* INPUT CZATU */}
-              <div className="absolute bottom-6 left-0 right-0 px-6 flex justify-center pointer-events-none z-20">
-                <div className={`w-full ${isZenMode ? 'max-w-3xl' : 'max-w-4xl'} pointer-events-auto transition-all duration-500`}>
+              <div className="absolute bottom-6 left-0 right-0 px-4 flex justify-start pointer-events-none z-20">
+                <div className="w-full pointer-events-auto transition-all duration-500">
                   <div className={`bg-[#111111]/95 backdrop-blur-3xl border ${isInputFocused || isAIPromptOpen ? 'border-white/[0.2] bg-[#151515] shadow-[0_20px_60px_-15px_rgba(0,238,255,0.1)]' : 'border-white/[0.1] shadow-[0_20px_60px_-15px_rgba(0,0,0,1)]'} rounded-3xl p-1.5 flex flex-col transition-all overflow-hidden`}>
                     
                     {isAIPromptOpen && (
@@ -4452,9 +5273,12 @@ export default function App() {
         </main>
 
         {/* --- 4. INTELIGENTNY PRAWY PANEL (WĄTKI, ZADANIA, PLIKI) --- */}
-        {!isZenMode && (rightPanelTab || activeThread) && !(API_BASE_URL && servers.length === 0) && (
+        {!isZenMode &&
+          (rightPanelTab || activeThread) &&
+          !(API_BASE_URL && servers.length === 0) &&
+          !(activeServer === '' && dmActiveConversationId) && (
           <aside
-            className={`w-[320px] backdrop-blur-xl border-l flex flex-col shrink-0 z-20 transition-all duration-300 shadow-2xl flux-rightbar ${
+            className={`w-[320px] backdrop-blur-xl border-l flex flex-col shrink-0 z-20 transition-all duration-300 shadow-2xl devcord-rightbar ${
               localTheme === 'light' ? 'bg-zinc-50/95 border-zinc-200' : 'bg-[#080808]/80 border-white/[0.04]'
             }`}
           >
@@ -4523,13 +5347,18 @@ export default function App() {
                               {usersInRole.map(user => (
                                 <div 
                                   key={user.id} 
+                                  onClick={() => setProfileCardUser(user)}
                                   onContextMenu={(e) => handleContextMenu(e, 'user', user)}
                                   className="user-row flex items-center gap-3 px-2 py-1.5 rounded-lg cursor-pointer transition-all duration-300 border border-transparent" 
                                   style={{ '--hover-bg': role.bg, '--hover-border': role.border } as any}
                                 >
                                   <div className="relative">
                                     {user.avatarUrl?.trim() ? (
-                                      <img src={user.avatarUrl} alt="" className="w-8 h-8 rounded-xl object-cover border border-white/[0.08]" />
+                                      <img
+                                        src={resolveMediaUrl(API_BASE_URL || appPublicOrigin(), user.avatarUrl) ?? user.avatarUrl}
+                                        alt=""
+                                        className="w-8 h-8 rounded-xl object-cover border border-white/[0.08]"
+                                      />
                                     ) : (
                                       <div className="w-8 h-8 rounded-xl bg-black border border-white/[0.08] flex items-center justify-center text-xs font-bold transition-all duration-300" style={{ color: role.color }}>{user.name.charAt(0)}</div>
                                     )}
@@ -4628,186 +5457,68 @@ export default function App() {
       {profileCardUser &&
         (() => {
           const pc = profileCardUser;
-          const pr = getRole(pc.roleId);
-          const cardBg = '#111214';
-          const statusDot =
-            pc.status === 'online'
-              ? 'bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.65)]'
-              : pc.status === 'idle'
-                ? 'bg-amber-400'
-                : pc.status === 'dnd'
-                  ? 'bg-red-500'
-                  : 'bg-zinc-600';
-          let originLabel = 'Devcord_';
+          let originLabel = 'Devcord';
           try {
             originLabel = new URL(appPublicOrigin()).host || originLabel;
           } catch {
             /* ignore */
           }
+          const voiceAct = API_BASE_URL && activeServer ? locateUserVoiceOnServer(pc.id) : null;
+          const serverName = servers.find((s) => s.id === activeServer)?.name ?? 'Serwer';
+          const incomingFr = friendIncoming.find((r) => r.from.id === pc.id);
+          const friendRel =
+            !API_BASE_URL || !devcordToken || pc.id === myUserId
+              ? undefined
+              : acceptedFriends.some((f) => f.id === pc.id)
+                ? ('friend' as const)
+                : incomingFr
+                  ? ('incoming' as const)
+                  : friendOutgoing.some((o) => o.to.id === pc.id)
+                    ? ('pending' as const)
+                    : ('add' as const);
           return (
-            <div
-              className="fixed inset-0 z-[460] flex items-center justify-center p-4 sm:p-6 bg-black/80 backdrop-blur-md"
-              role="presentation"
-              onClick={() => setProfileCardUser(null)}
-            >
-              <div
-                className="w-full max-w-[420px] max-h-[90vh] overflow-y-auto custom-scrollbar rounded-2xl border border-white/[0.07] bg-[#111214]/96 backdrop-blur-2xl shadow-[0_24px_80px_rgba(0,0,0,0.85),0_0_60px_rgba(0,238,255,0.07)] ring-1 ring-white/[0.05]"
-                style={{ ['--card-surface' as string]: cardBg }}
-                onClick={(e) => e.stopPropagation()}
-                role="dialog"
-                aria-labelledby="profile-card-title"
-              >
-                <div className="relative h-[118px] overflow-hidden shrink-0">
-                  <div className="absolute inset-0 bg-gradient-to-br from-[#061018] via-[#12081c] to-[#050506]" />
-                  <div
-                    className="absolute -top-16 left-[12%] h-48 w-48 rounded-full bg-[#00eeff]/35 blur-[46px] motion-safe:animate-pulse"
-                    aria-hidden
-                  />
-                  <div
-                    className="absolute -top-12 right-[8%] h-44 w-44 rounded-full bg-fuchsia-600/40 blur-[42px] motion-safe:animate-pulse"
-                    style={{ animationDelay: '400ms' }}
-                    aria-hidden
-                  />
-                  <div className="absolute inset-0 bg-gradient-to-t from-[#111214] via-[#111214]/40 to-transparent" />
-                  <div className="absolute inset-0 opacity-[0.12] bg-[url('data:image/svg+xml,%3Csvg%20viewBox%3D%220%200%20256%20256%22%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3Cfilter%20id%3D%22n%22%3E%3CfeTurbulence%20type%3D%22fractalNoise%22%20baseFrequency%3D%220.9%22%20numOctaves%3D%224%22%2F%3E%3C%2Ffilter%3E%3Crect%20width%3D%22100%25%22%20height%3D%22100%25%22%20filter%3D%22url(%23n)%22%2F%3E%3C%2Fsvg%3E')]" />
-                  <button
-                    type="button"
-                    aria-label="Zamknij"
-                    onClick={() => setProfileCardUser(null)}
-                    className="absolute top-3 right-3 z-10 p-2 rounded-xl text-white/70 hover:text-white hover:bg-white/[0.08] transition-colors"
-                  >
-                    <X size={18} />
-                  </button>
-                </div>
-
-                <div className="relative px-5 pb-5 -mt-[52px]">
-                  <div className="flex items-start gap-4">
-                    <div className="relative shrink-0">
-                      <div
-                        className="w-[88px] h-[88px] rounded-full border-[4px] border-[#111214] bg-[#18181b] overflow-hidden shadow-[0_12px_40px_rgba(0,0,0,0.65)] ring-1 ring-white/[0.06]"
-                      >
-                        {pc.avatarUrl?.trim() ? (
-                          <img src={pc.avatarUrl} alt="" className="w-full h-full object-cover" />
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center text-3xl font-black text-zinc-200">
-                            {pc.name.charAt(0)}
-                          </div>
-                        )}
-                      </div>
-                      <div
-                        className={`absolute bottom-1 right-1 z-10 h-[18px] w-[18px] rounded-full border-[3px] border-[#111214] ${statusDot}`}
-                        title={pc.status}
-                      />
-                    </div>
-                    <div className="flex-1 min-w-0 pt-10 sm:pt-11">
-                      <button
-                        type="button"
-                        className="inline-flex items-center gap-1.5 max-w-full px-2.5 py-1 rounded-full bg-black/45 border border-white/[0.09] text-[11px] text-zinc-400 hover:border-[#00eeff]/25 hover:text-zinc-200 transition-colors"
-                        onClick={() => copyToClipboard(appPublicOrigin())}
-                      >
-                        <Globe size={12} className="text-[#00eeff]/80 shrink-0" />
-                        <span className="truncate font-medium">{originLabel}</span>
-                      </button>
-                    </div>
-                  </div>
-
-                  <h2 id="profile-card-title" className="mt-4 min-w-0">
-                    <NickLabel user={pc} fallbackColor="#f4f4f5" className="text-[22px] sm:text-2xl font-bold leading-tight tracking-tight block" />
-                  </h2>
-                  <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px] text-zinc-500">
-                    <span className="font-mono text-[11px] text-zinc-500 tabular-nums">id · {pc.id}</span>
-                    <span className="text-zinc-700 hidden sm:inline">·</span>
-                    <span
-                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider border"
-                      style={{
-                        backgroundColor: pr.bg,
-                        borderColor: pr.border,
-                        color: pr.color,
-                        boxShadow: pr.glow !== 'none' ? `0 0 12px ${pr.color}22` : undefined,
-                      }}
-                    >
-                      <pr.icon size={10} strokeWidth={2.5} />
-                      {pr.name}
-                    </span>
-                  </div>
-
-                  <div className="mt-5 flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setActiveServer('');
-                        setDmPeerId(pc.id);
-                        setProfileCardUser(null);
-                      }}
-                      className="flex-1 min-w-0 flex items-center justify-center gap-2 py-2.5 rounded-lg bg-[#00eeff] text-black text-sm font-bold shadow-[0_0_24px_rgba(0,238,255,0.22)] hover:brightness-110 transition-all"
-                    >
-                      <MessageSquare size={18} className="shrink-0" />
-                      Wiadomość
-                    </button>
-                    <button
-                      type="button"
-                      title="Połączenie głosowe"
-                      onClick={() => {
-                        setPvCall({ peerId: pc.id, status: 'ringing' });
-                        setProfileCardUser(null);
-                      }}
-                      className="shrink-0 w-11 h-11 rounded-lg flex items-center justify-center border border-white/[0.1] bg-[#2b2d31] text-zinc-200 hover:bg-[#35373c] hover:border-[#00eeff]/25 hover:text-[#00eeff] transition-colors"
-                    >
-                      <Phone size={18} />
-                    </button>
-                    <button
-                      type="button"
-                      title="Zaproś / więcej"
-                      onClick={() => {
-                        setActiveServer('');
-                        setDmPeerId(pc.id);
-                        setProfileCardUser(null);
-                      }}
-                      className="shrink-0 w-11 h-11 rounded-lg flex items-center justify-center border border-white/[0.1] bg-[#2b2d31] text-zinc-200 hover:bg-[#35373c] transition-colors"
-                    >
-                      <MoreHorizontal size={18} />
-                    </button>
-                  </div>
-
-                  <div className="mt-8 border-t border-white/[0.06] pt-5">
-                    <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500 mb-2">O użytkowniku</p>
-                    <p className="text-sm text-zinc-400 leading-relaxed">
-                      Publiczny opis profilu z API pojawi się tutaj po rozszerzeniu backendu. Avatar, nick i efekty Nitro są już synchronizowane globalnie.
-                    </p>
-                    <a
-                      href={appPublicOrigin() || '#'}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1.5 mt-3 text-xs font-semibold text-[#00eeff] hover:underline"
-                    >
-                      <ExternalLink size={12} />
-                      Otwórz przestrzeń Devcord
-                    </a>
-                  </div>
-
-                  <div className="mt-6">
-                    <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500 mb-2 flex items-center gap-1.5">
-                      <StickyNote size={12} className="text-zinc-600" />
-                      Notka (tylko u Ciebie)
-                    </p>
-                    <textarea
-                      value={profileCardNote}
-                      onChange={(e) => setProfileCardNote(e.target.value)}
-                      onBlur={() => {
-                        try {
-                          localStorage.setItem(`devcord_profile_note_${pc.id}`, profileCardNote);
-                        } catch {
-                          /* ignore */
-                        }
-                      }}
-                      placeholder="Kliknij, aby dodać notkę…"
-                      rows={3}
-                      className="w-full rounded-xl bg-black/35 border border-white/[0.08] text-[13px] text-zinc-200 placeholder:text-zinc-600 px-3 py-2.5 outline-none focus:border-[#00eeff]/35 resize-y min-h-[76px] custom-scrollbar"
-                    />
-                  </div>
-                </div>
-              </div>
-            </div>
+            <MemberProfileCard
+              user={pc}
+              workspaceRoles={workspaceRoles}
+              serverName={serverName}
+              voiceActivity={voiceAct}
+              apiBase={API_BASE_URL || appPublicOrigin()}
+              publicOrigin={appPublicOrigin()}
+              originLabel={originLabel}
+              note={profileCardNote}
+              onNoteChange={setProfileCardNote}
+              onSaveNote={(text) => {
+                try {
+                  localStorage.setItem(`devcord_profile_note_${pc.id}`, text);
+                } catch {
+                  /* ignore */
+                }
+              }}
+              onClose={() => setProfileCardUser(null)}
+              onDm={() => {
+                void openDmForPeer(pc.id);
+                setProfileCardUser(null);
+              }}
+              onVoiceCall={() => {
+                void (async () => {
+                  await openDmForPeer(pc.id);
+                  setPvCall({ peerId: pc.id, status: 'ringing' });
+                  setProfileCardUser(null);
+                })();
+              }}
+              onOpenVoiceChannel={() => {
+                const v = locateUserVoiceOnServer(pc.id);
+                if (!v) return;
+                setActiveVoiceChannel(v.channelId);
+                setProfileCardUser(null);
+              }}
+              onCopyOrigin={() => copyToClipboard(appPublicOrigin())}
+              friendRelation={friendRel}
+              incomingFriendRequestId={incomingFr?.id}
+              onAddFriend={() => void sendFriendRequest(pc.id)}
+              onAcceptFriendRequest={(id) => void acceptFriendByRequestId(id)}
+              onRejectFriendRequest={(id) => void rejectFriendByRequestId(id)}
+            />
           );
         })()}
 

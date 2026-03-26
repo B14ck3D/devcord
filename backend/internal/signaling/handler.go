@@ -3,22 +3,39 @@ package signaling
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/gorilla/websocket"
 )
 
-func ServeWS(hub *Hub) http.HandlerFunc {
+// ServeWS — gdy jwtSecret niepusty, wymaga query `access_token` (JWT devcord-api); sub musi zgadzać się z user_id w join_room.
+func ServeWS(hub *Hub, jwtSecret string) http.HandlerFunc {
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
 		CheckOrigin:     func(r *http.Request) bool { return true },
 	}
+	jwtSecret = strings.TrimSpace(jwtSecret)
 	return func(w http.ResponseWriter, r *http.Request) {
+		var authSub string
+		if jwtSecret != "" {
+			tok := strings.TrimSpace(r.URL.Query().Get("access_token"))
+			if tok == "" {
+				http.Error(w, "missing access_token", http.StatusUnauthorized)
+				return
+			}
+			sub, err := ParseDevcordAccessSub(jwtSecret, tok)
+			if err != nil {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			authSub = sub
+		}
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
-		client := newClient(hub, conn)
+		client := newClient(hub, conn, authSub)
 		go client.Serve()
 	}
 }
@@ -39,6 +56,8 @@ func (h *Hub) handleInbound(c *Client, data []byte) error {
 		return h.handleForwardICE(c, env.Payload)
 	case TypeVoiceState, TypeUserProfileUpdated:
 		return h.handleBroadcastToRoom(c, env.Type, env.Payload)
+	case TypeMediaState:
+		return h.handleMediaState(c, env.Payload)
 	case TypeLeave, TypeUserDisconnected:
 		h.unregister(c)
 		return nil
@@ -60,8 +79,15 @@ func (h *Hub) handleJoinRoom(c *Client, payload json.RawMessage) error {
 	if p.UserID == "" || p.RoomID == "" {
 		return ErrInvalidJoin
 	}
+	if c.authSub != "" && c.authSub != p.UserID {
+		return ErrJoinIdentityMismatch
+	}
 	c.userID = p.UserID
 	room := h.getOrCreateRoom(p.RoomID)
+	// Ta sama tożsamość z drugiej karty / po zerwaniu TCP bez leave — wyrzuć starą sesję zamiast ErrUserExists.
+	if existing := room.Get(p.UserID); existing != nil {
+		h.unregister(existing)
+	}
 	others, err := room.Add(c)
 	if err != nil {
 		c.userID = ""
@@ -72,9 +98,10 @@ func (h *Hub) handleJoinRoom(c *Client, payload json.RawMessage) error {
 
 	peerIDs := room.PeerIDs(c.userID)
 	bJoined, err := MarshalEnvelope(TypeJoined, JoinedPayload{
-		RoomID:  p.RoomID,
-		UserID:  p.UserID,
-		PeerIDs: peerIDs,
+		RoomID:    p.RoomID,
+		UserID:    p.UserID,
+		PeerIDs:   peerIDs,
+		PeerMedia: room.PeerMediaSnapshot(peerIDs),
 	})
 	if err != nil {
 		room.Remove(c.userID)
@@ -157,6 +184,21 @@ func (h *Hub) handleForwardICE(c *Client, payload json.RawMessage) error {
 		return ErrUnknownUser
 	}
 	return nil
+}
+
+func (h *Hub) handleMediaState(c *Client, payload json.RawMessage) error {
+	if c.room == nil {
+		return ErrNotJoined
+	}
+	var p MediaStatePayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return ErrBadPayload
+	}
+	if p.UserID == "" || p.UserID != c.userID {
+		return ErrBadPayload
+	}
+	c.room.SetPeerMedia(p.UserID, p.Screen, p.Camera)
+	return h.handleBroadcastToRoom(c, TypeMediaState, payload)
 }
 
 func (h *Hub) handleBroadcastToRoom(c *Client, msgType MessageType, payload json.RawMessage) error {

@@ -9,16 +9,16 @@ import (
 	"syscall"
 	"time"
 
-	"webrtc/signaling/internal/fluxapi"
+	"webrtc/signaling/internal/devcordapi"
 )
 
 func main() {
-	cfg := fluxapi.LoadConfig()
+	cfg := devcordapi.LoadConfig()
 	if cfg.DatabaseURL == "" {
 		log.Fatal("DATABASE_URL required")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	app, err := fluxapi.New(ctx, cfg)
+	app, err := devcordapi.New(ctx, cfg)
 	cancel()
 	if err != nil {
 		log.Fatalf("devcord api: %v", err)

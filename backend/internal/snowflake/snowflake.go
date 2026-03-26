@@ -16,7 +16,8 @@ const (
 	TypeRole         int64 = 6
 	TypeMessage      int64 = 7
 	TypeTask         int64 = 8
-	TypeInvite       int64 = 9
+	TypeInvite         int64 = 9
+	TypeDmConversation int64 = 10
 )
 
 const (

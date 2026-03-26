@@ -2,14 +2,20 @@ package signaling
 
 import "sync"
 
+type peerMediaFlags struct {
+	screen bool
+	camera bool
+}
+
 type Room struct {
 	id      string
 	mu      sync.RWMutex
 	clients map[string]*Client
+	media   map[string]peerMediaFlags
 }
 
 func newRoom(id string) *Room {
-	return &Room{id: id, clients: make(map[string]*Client)}
+	return &Room{id: id, clients: make(map[string]*Client), media: make(map[string]peerMediaFlags)}
 }
 
 func (r *Room) ID() string {
@@ -34,7 +40,25 @@ func (r *Room) Remove(userID string) *Client {
 	defer r.mu.Unlock()
 	c := r.clients[userID]
 	delete(r.clients, userID)
+	delete(r.media, userID)
 	return c
+}
+
+func (r *Room) SetPeerMedia(userID string, screen, camera bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.media[userID] = peerMediaFlags{screen: screen, camera: camera}
+}
+
+func (r *Room) PeerMediaSnapshot(peerIDs []string) []PeerMediaEntry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]PeerMediaEntry, 0, len(peerIDs))
+	for _, id := range peerIDs {
+		m := r.media[id]
+		out = append(out, PeerMediaEntry{UserID: id, Screen: m.screen, Camera: m.camera})
+	}
+	return out
 }
 
 func (r *Room) Get(userID string) *Client {

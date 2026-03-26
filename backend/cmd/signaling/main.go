@@ -24,6 +24,10 @@ func main() {
 	}
 
 	hub := signaling.NewHub()
+	jwtSecret := strings.TrimSpace(os.Getenv("SIGNALING_JWT_SECRET"))
+	if jwtSecret == "" {
+		jwtSecret = strings.TrimSpace(os.Getenv("JWT_SECRET"))
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -33,7 +37,7 @@ func main() {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok"))
 	})
-	mux.HandleFunc("/ws", signaling.ServeWS(hub))
+	mux.HandleFunc("/ws", signaling.ServeWS(hub, jwtSecret))
 	mux.HandleFunc("/voice/peers", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -56,6 +60,9 @@ func main() {
 	}
 
 	go func() {
+		if jwtSecret != "" {
+			log.Println("signaling: WebSocket requires access_token query (JWT)")
+		}
 		log.Println("signaling listening on", srv.Addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatal(err)

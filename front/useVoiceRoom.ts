@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createMicNoiseGate } from './micNoiseGate';
+import { buildRtcIceServers } from './voiceIceServers';
 
 export type VoicePhase =
   | 'idle'
@@ -10,13 +11,28 @@ export type VoicePhase =
   | 'connected'
   | 'error';
 
-const ICE_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
+/** API czasem zwraca id jako number — JSON wtedy ma user_id bez cudzysłowów; Go wymaga stringa w join_room. */
+function signalStrId(v: unknown): string {
+  if (v == null) return '';
+  return String(v);
+}
 
-function signalingWsURL(): string {
+function signalingWsURL(accessToken?: string): string {
   const env = import.meta.env.VITE_WS_URL;
-  if (env) return env;
-  const p = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${p}//${location.host}/ws`;
+  let base = env;
+  if (!base) {
+    const p = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    base = `${p}//${location.host}/ws`;
+  }
+  const t = accessToken?.trim();
+  if (!t) return base;
+  try {
+    const u = new URL(base, typeof window !== 'undefined' ? window.location.href : undefined);
+    u.searchParams.set('access_token', t);
+    return u.toString();
+  } catch {
+    return base;
+  }
 }
 
 type SigPayload = Record<string, unknown>;
@@ -80,8 +96,10 @@ function createSpeakingLevelMonitor(
 export function useVoiceRoom(opts: {
   enabled: boolean;
   roomId: string | null;
-  userId: string;
+  userId: string | number;
   micDeviceId: string;
+  /** JWT devcord-api — do query `access_token` gdy signaling wymaga SIGNALING_JWT_SECRET */
+  accessToken?: string;
   screenStream?: MediaStream | null;
   cameraStream?: MediaStream | null;
   /** Max bitrate for screen track output in bits per second */
@@ -99,6 +117,7 @@ export function useVoiceRoom(opts: {
     screenStream = null,
     cameraStream = null,
     screenBitrate,
+    accessToken = '',
     micSoftwareGate = false,
     micGateThresholdDb = -40,
   } = opts;
@@ -110,6 +129,13 @@ export function useVoiceRoom(opts: {
   const [speakingPeers, setSpeakingPeers] = useState<Record<string, boolean>>({});
   const [remoteScreenByUser, setRemoteScreenByUser] = useState<Record<string, MediaStream>>({});
   const [remoteVoiceState, setRemoteVoiceState] = useState<Record<string, { muted: boolean; deafened: boolean }>>({});
+  const [voiceDiagnostics, setVoiceDiagnostics] = useState({
+    backend: 'mesh' as const,
+    meshPeerConnectionCount: 0,
+    meshNegotiationMsLast: null as number | null,
+    meshTransportRttMs: null as number | null,
+    meshInboundPacketsLost: null as number | null,
+  });
 
   const wsRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -133,8 +159,10 @@ export function useVoiceRoom(opts: {
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const prevScreenTrackIdsRef = useRef<Set<string>>(new Set());
   const prevCameraTrackIdsRef = useRef<Set<string>>(new Set());
-  const userIdRef = useRef(userId);
-  userIdRef.current = userId;
+  const userIdNorm = signalStrId(userId);
+  const userIdRef = useRef(userIdNorm);
+  userIdRef.current = userIdNorm;
+  const negotiationStartRef = useRef<number | null>(null);
   const localMutedRef = useRef(localMuted);
   localMutedRef.current = localMuted;
   const localDeafenedRef = useRef(localDeafened);
@@ -151,6 +179,75 @@ export function useVoiceRoom(opts: {
   const sendSignal = useCallback((obj: unknown) => {
     const ws = wsRef.current;
     if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+  }, []);
+
+  const applyRemoteMediaFlags = useCallback((peerId: string, screen: boolean, camera: boolean) => {
+    const ms = remoteScreenTracksRef.current[peerId];
+    if (!ms) {
+      if (!screen && !camera) {
+        setRemoteScreenByUser((prev) => {
+          if (!prev[peerId]) return prev;
+          const n = { ...prev };
+          delete n[peerId];
+          return n;
+        });
+      }
+      return;
+    }
+    const isScreenHint = (t: MediaStreamTrack) => {
+      const h = (t.contentHint || '').toLowerCase();
+      const lab = (t.label || '').toLowerCase();
+      return h === 'detail' || lab.includes('screen') || lab.includes('display') || lab.includes('window');
+    };
+    const removeVideoIf = (pred: (t: MediaStreamTrack) => boolean) => {
+      for (const t of [...ms.getVideoTracks()]) {
+        if (pred(t)) {
+          try {
+            t.stop();
+          } catch {
+            /* ignore */
+          }
+          try {
+            ms.removeTrack(t);
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    };
+    if (!screen) {
+      const liveBefore = ms.getVideoTracks().filter((t) => t.readyState === 'live');
+      removeVideoIf(isScreenHint);
+      const liveAfter = ms.getVideoTracks().filter((t) => t.readyState === 'live');
+      if (liveBefore.length > 0 && liveAfter.length === liveBefore.length) {
+        for (const t of [...ms.getVideoTracks()]) {
+          try {
+            t.stop();
+          } catch {
+            /* ignore */
+          }
+          try {
+            ms.removeTrack(t);
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    }
+    if (!camera) {
+      removeVideoIf((t) => !isScreenHint(t));
+    }
+    const anyLive = ms.getVideoTracks().some((t) => t.readyState === 'live');
+    if (!anyLive) {
+      delete remoteScreenTracksRef.current[peerId];
+      setRemoteScreenByUser((prev) => {
+        const n = { ...prev };
+        delete n[peerId];
+        return n;
+      });
+    } else {
+      setRemoteScreenByUser((prev) => ({ ...prev, [peerId]: ms }));
+    }
   }, []);
 
   const disposeRemotePlayback = useCallback((peerId: string) => {
@@ -327,7 +424,7 @@ export function useVoiceRoom(opts: {
         await pc.setLocalDescription(offer);
         sendSignal({
           type: 'offer',
-          payload: { target_user_id: peerId, sdp: offer.sdp, type: offer.type },
+          payload: { target_user_id: signalStrId(peerId), sdp: offer.sdp, type: offer.type },
         });
       } catch {
         /* ignore */
@@ -372,6 +469,13 @@ export function useVoiceRoom(opts: {
       wsRef.current = null;
     }
     setParticipants([]);
+    setVoiceDiagnostics({
+      backend: 'mesh',
+      meshPeerConnectionCount: 0,
+      meshNegotiationMsLast: null,
+      meshTransportRttMs: null,
+      meshInboundPacketsLost: null,
+    });
   }, [disposeRemotePlayback]);
 
   useEffect(() => {
@@ -442,18 +546,47 @@ export function useVoiceRoom(opts: {
         );
 
         setPhase('connecting_signaling');
-        const ws = new WebSocket(signalingWsURL());
+        const wsUrl = signalingWsURL(accessToken);
+        const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
 
         await new Promise<void>((resolve, reject) => {
-          const t = window.setTimeout(() => reject(new Error('timeout WebSocket')), 15000);
-          ws.onopen = () => {
+          const t = window.setTimeout(
+            () =>
+              reject(
+                new Error(
+                  'Timeout WebSocket (15s). Sprawdź czy działa serwer signaling i nginx proxy /ws → :23623.',
+                ),
+              ),
+            15000,
+          );
+          let settled = false;
+          const ok = () => {
+            if (settled) return;
+            settled = true;
             window.clearTimeout(t);
             resolve();
           };
-          ws.onerror = () => {
+          const fail = (msg: string) => {
+            if (settled) return;
+            settled = true;
             window.clearTimeout(t);
-            reject(new Error('WebSocket'));
+            reject(new Error(msg));
+          };
+          ws.onopen = () => ok();
+          ws.onerror = () => {
+            fail(
+              location.protocol === 'https:' && wsUrl.startsWith('ws:')
+                ? 'WebSocket: używasz ws:// na stronie HTTPS — ustaw VITE_WS_URL=wss://…/ws przy buildzie.'
+                : `Nie udało się połączyć z ${wsUrl} (signaling). API (/api/ping) może działać osobno.`,
+            );
+          };
+          ws.onclose = (ev) => {
+            if (settled) return;
+            fail(
+              ev.reason?.trim() ||
+                `WebSocket zamknięty przed połączeniem (kod ${ev.code}). Sprawdź nginx /ws i proces signaling.`,
+            );
           };
         });
 
@@ -484,12 +617,12 @@ export function useVoiceRoom(opts: {
         const ensurePc = (peerId: string): RTCPeerConnection => {
           let pc = pcsRef.current.get(peerId);
           if (pc) return pc;
-          pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+          pc = new RTCPeerConnection({ iceServers: buildRtcIceServers() });
           pc.onicecandidate = (ev) => {
             if (ev.candidate) {
               sendSignal({
                 type: 'ice_candidate',
-                payload: { target_user_id: peerId, candidate: ev.candidate.toJSON() },
+                payload: { target_user_id: signalStrId(peerId), candidate: ev.candidate.toJSON() },
               });
             }
           };
@@ -501,9 +634,9 @@ export function useVoiceRoom(opts: {
                 ms.addTrack(ev.track);
               }
               remoteScreenTracksRef.current[peerId] = ms;
-              const msAny = ms as MediaStream & { __fluxScreenRem?: boolean };
-              if (!msAny.__fluxScreenRem) {
-                msAny.__fluxScreenRem = true;
+              const msAny = ms as MediaStream & { __devcordScreenRem?: boolean };
+              if (!msAny.__devcordScreenRem) {
+                msAny.__devcordScreenRem = true;
                 ms.addEventListener('removetrack', () => {
                   setRemoteScreenByUser((prev) => {
                     const next = { ...prev };
@@ -584,7 +717,7 @@ export function useVoiceRoom(opts: {
           await pc.setLocalDescription(offer);
           sendSignal({
             type: 'offer',
-            payload: { target_user_id: peerId, sdp: offer.sdp, type: offer.type },
+            payload: { target_user_id: signalStrId(peerId), sdp: offer.sdp, type: offer.type },
           });
         };
 
@@ -603,13 +736,42 @@ export function useVoiceRoom(opts: {
             const all = [uid, ...pids].filter(Boolean);
             setParticipants([...new Set(all)].sort());
             setPhase('negotiating');
-            for (const pid of pids) {
-              await connectToPeer(pid);
+            negotiationStartRef.current = performance.now();
+            const pm = pl.peer_media as { user_id: string; screen?: boolean; camera?: boolean }[] | undefined;
+            if (Array.isArray(pm)) {
+              for (const row of pm) {
+                if (row.user_id) {
+                  applyRemoteMediaFlags(row.user_id, !!row.screen, !!row.camera);
+                }
+              }
+            }
+            try {
+              for (const pid of pids) {
+                await connectToPeer(pid);
+              }
+            } catch (negErr) {
+              const m =
+                negErr instanceof Error ? negErr.message : 'Błąd negocjacji WebRTC';
+              setError(m);
+              setPhase('error');
+              cleanupAll();
+              return;
             }
             setPhase('connected');
+            if (negotiationStartRef.current != null) {
+              const ms = Math.round(performance.now() - negotiationStartRef.current);
+              negotiationStartRef.current = null;
+              setVoiceDiagnostics((d) => ({ ...d, meshNegotiationMsLast: ms }));
+            }
             sendSignal({
               type: 'voice_state',
               payload: { user_id: userIdRef.current, muted: localMutedRef.current, deafened: localDeafenedRef.current }
+            });
+            const scr = !!screenStreamRef.current?.getVideoTracks().some((t) => t.readyState === 'live');
+            const cam = !!cameraStreamRef.current?.getVideoTracks().some((t) => t.readyState === 'live');
+            sendSignal({
+              type: 'media_state',
+              payload: { user_id: userIdRef.current, screen: scr, camera: cam },
             });
             return;
           }
@@ -629,6 +791,14 @@ export function useVoiceRoom(opts: {
                 ...prev,
                 [uid]: { muted: !!pl.muted, deafened: !!pl.deafened }
               }));
+            }
+            return;
+          }
+
+          if (env.type === 'media_state') {
+            const uid = pl.user_id as string;
+            if (uid && uid !== userIdRef.current) {
+              applyRemoteMediaFlags(uid, !!pl.screen, !!pl.camera);
             }
             return;
           }
@@ -689,7 +859,7 @@ export function useVoiceRoom(opts: {
               await pc.setLocalDescription(answer);
               sendSignal({
                 type: 'answer',
-                payload: { target_user_id: from, sdp: answer.sdp, type: answer.type },
+                payload: { target_user_id: signalStrId(from), sdp: answer.sdp, type: answer.type },
               });
             } catch {
               /* ignore */
@@ -744,7 +914,12 @@ export function useVoiceRoom(opts: {
         };
 
         setPhase('joining_room');
-        ws.send(JSON.stringify({ type: 'join_room', payload: { user_id: userIdRef.current, room_id: roomId } }));
+        ws.send(
+          JSON.stringify({
+            type: 'join_room',
+            payload: { user_id: userIdRef.current, room_id: signalStrId(roomId) },
+          }),
+        );
       } catch (e) {
         if (cancelled) return;
         const msg =
@@ -766,15 +941,31 @@ export function useVoiceRoom(opts: {
   }, [
     enabled,
     roomId,
-    userId,
+    userIdNorm,
     micDeviceId,
+    accessToken,
     micSoftwareGate,
     cleanupAll,
     flushIce,
     sendSignal,
     flushSpeaking,
     syncRemoteAudioElement,
+    applyRemoteMediaFlags,
   ]);
+
+  useEffect(() => {
+    if (!enabled || !roomId || phase !== 'connected') return;
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const screen = !!screenStream?.getVideoTracks().some((t) => t.readyState === 'live');
+    const camera = !!cameraStream?.getVideoTracks().some((t) => t.readyState === 'live');
+    ws.send(
+      JSON.stringify({
+        type: 'media_state',
+        payload: { user_id: userIdNorm, screen, camera },
+      }),
+    );
+  }, [screenStream, cameraStream, phase, enabled, roomId, userIdNorm]);
 
   useEffect(() => {
     if (!enabled || !roomId) return;
@@ -798,10 +989,45 @@ export function useVoiceRoom(opts: {
     if (wsRef.current?.readyState === WebSocket.OPEN && phase === 'connected') {
       wsRef.current.send(JSON.stringify({
         type: 'voice_state',
-        payload: { user_id: userId, muted: localMuted, deafened: localDeafened }
+        payload: { user_id: userIdNorm, muted: localMuted, deafened: localDeafened }
       }));
     }
-  }, [localMuted, localDeafened, phase, userId]);
+  }, [localMuted, localDeafened, phase, userIdNorm]);
+
+  useEffect(() => {
+    if (!enabled || !roomId || phase !== 'connected') return;
+    const tick = async () => {
+      const n = pcsRef.current.size;
+      setVoiceDiagnostics((d) => ({ ...d, meshPeerConnectionCount: n }));
+      const first = [...pcsRef.current.values()][0];
+      if (!first) return;
+      try {
+        const stats = await first.getStats();
+        let rttMs: number | null = null;
+        let lost: number | null = null;
+        stats.forEach((rep) => {
+          const r = rep as unknown as Record<string, unknown>;
+          if (r.type === 'candidate-pair' && r.state === 'succeeded' && typeof r.currentRoundTripTime === 'number') {
+            const v = r.currentRoundTripTime * 1000;
+            if (rttMs == null || v < rttMs) rttMs = Math.round(v);
+          }
+          if (r.type === 'inbound-rtp' && r.kind === 'audio' && typeof r.packetsLost === 'number') {
+            lost = r.packetsLost as number;
+          }
+        });
+        setVoiceDiagnostics((d) => ({
+          ...d,
+          meshTransportRttMs: rttMs,
+          meshInboundPacketsLost: lost,
+        }));
+      } catch {
+        /* ignore */
+      }
+    };
+    void tick();
+    const id = window.setInterval(() => void tick(), 5000);
+    return () => clearInterval(id);
+  }, [enabled, roomId, phase]);
 
   return {
     phase,
@@ -816,5 +1042,6 @@ export function useVoiceRoom(opts: {
     remoteVoiceState,
     setUserVolume,
     setUserOutputMuted,
+    voiceDiagnostics,
   };
 }

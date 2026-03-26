@@ -2,7 +2,7 @@
 @tailwind components;
 @tailwind utilities;
 
-@keyframes flux-nick-gradient-shift {
+@keyframes devcord-nick-gradient-shift {
   0% {
     background-position: 0% center;
   }
@@ -11,31 +11,31 @@
   }
 }
 
-.flux-nick-gradient-shift {
-  animation: flux-nick-gradient-shift 5s linear infinite;
+.devcord-nick-gradient-shift {
+  animation: devcord-nick-gradient-shift 5s linear infinite;
 }
 
-@keyframes flux-nick-neon-pulse {
+@keyframes devcord-nick-neon-pulse {
   0%,
   100% {
     text-shadow:
-      0 0 6px var(--flux-neon1, #00eeff),
-      0 0 14px var(--flux-neon2, #ff00aa),
-      0 0 24px var(--flux-neon1, #00eeff);
+      0 0 6px var(--devcord-neon1, #00eeff),
+      0 0 14px var(--devcord-neon2, #ff00aa),
+      0 0 24px var(--devcord-neon1, #00eeff);
   }
   50% {
     text-shadow:
-      0 0 12px var(--flux-neon2, #ff00aa),
-      0 0 22px var(--flux-neon1, #00eeff),
-      0 0 34px var(--flux-neon2, #ff00aa);
+      0 0 12px var(--devcord-neon2, #ff00aa),
+      0 0 22px var(--devcord-neon1, #00eeff),
+      0 0 34px var(--devcord-neon2, #ff00aa);
   }
 }
 
-.flux-nick-neon-pulse {
-  animation: flux-nick-neon-pulse 2.2s ease-in-out infinite;
+.devcord-nick-neon-pulse {
+  animation: devcord-nick-neon-pulse 2.2s ease-in-out infinite;
 }
 
-@keyframes flux-nick-shimmer {
+@keyframes devcord-nick-shimmer {
   0% {
     background-position: -100% center;
   }
@@ -44,17 +44,17 @@
   }
 }
 
-.flux-nick-shimmer {
+.devcord-nick-shimmer {
   background-image: linear-gradient(
     110deg,
-    var(--flux-shimmer1, #00eeff) 0%,
+    var(--devcord-shimmer1, #00eeff) 0%,
     rgba(255, 255, 255, 0.45) 45%,
-    var(--flux-shimmer2, #ff00aa) 90%
+    var(--devcord-shimmer2, #ff00aa) 90%
   );
   background-size: 220% auto;
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  animation: flux-nick-shimmer 3.5s linear infinite;
-  filter: drop-shadow(0 0 8px var(--flux-shimmer1, #00eeff));
+  animation: devcord-nick-shimmer 3.5s linear infinite;
+  filter: drop-shadow(0 0 8px var(--devcord-shimmer1, #00eeff));
 }

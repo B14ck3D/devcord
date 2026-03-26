@@ -22,16 +22,19 @@ type Client struct {
 	userID  string
 	roomID  string
 	room    *Room
+	// authSub — JWT sub po weryfikacji przy upgrade (pusty = tryb bez auth).
+	authSub string
 	joinMu  sync.Mutex
 	closeMu sync.Mutex
 	closed  bool
 }
 
-func newClient(hub *Hub, conn *websocket.Conn) *Client {
+func newClient(hub *Hub, conn *websocket.Conn, authSub string) *Client {
 	return &Client{
-		hub:  hub,
-		conn: conn,
-		send: make(chan []byte, 256),
+		hub:     hub,
+		conn:    conn,
+		send:    make(chan []byte, 256),
+		authSub: authSub,
 	}
 }
 
