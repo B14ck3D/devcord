@@ -7,6 +7,7 @@ export type DevcordLocalSettings = {
     micDeviceId: string;
     micSoftwareGate: boolean;
     micGateThresholdDb: number;
+    rnnoiseEnabled: boolean;
   };
   screen: {
     fps: number;
@@ -35,6 +36,7 @@ const defaultSettings = (): DevcordLocalSettings => ({
     micDeviceId: '',
     micSoftwareGate: false,
     micGateThresholdDb: -40,
+    rnnoiseEnabled: true,
   },
   screen: { fps: 60, res: 1080 },
   userVoiceGain: {},
@@ -78,7 +80,11 @@ function parseStored(raw: string | null): DevcordLocalSettings | null {
       return {
         ...d,
         ...j,
-        audio: { ...d.audio, ...j.audio },
+        audio: {
+          ...d.audio,
+          ...j.audio,
+          rnnoiseEnabled: typeof j.audio?.rnnoiseEnabled === 'boolean' ? j.audio.rnnoiseEnabled : d.audio.rnnoiseEnabled,
+        },
         screen: { ...d.screen, ...j.screen },
         userVoiceGain: clampUserVoiceGainRecord(j.userVoiceGain),
         userOutputMuted: { ...(j.userOutputMuted ?? {}) },

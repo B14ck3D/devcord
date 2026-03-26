@@ -108,3 +108,50 @@ func (a *App) redisListDmMessages(ctx context.Context, convID int64, limit int) 
 func (a *App) redisInvalidateDmConversation(ctx context.Context, convID int64) error {
 	return a.rdb.Del(ctx, dmMsgListKey(convID)).Err()
 }
+
+type cachedDmTask struct {
+	ID             string `json:"id"`
+	ConversationID string `json:"conversation_id"`
+	Title          string `json:"title"`
+	AssigneeID     string `json:"assignee_id"`
+	Completed      bool   `json:"completed"`
+	SourceMsgID    string `json:"source_msg_id"`
+}
+
+func dmTaskListKey(convID int64) string {
+	return "devcord:dmtasks:" + strconv.FormatInt(convID, 10)
+}
+
+func (a *App) redisPushDmTask(ctx context.Context, convID int64, t cachedDmTask) error {
+	b, err := json.Marshal(t)
+	if err != nil {
+		return err
+	}
+	pipe := a.rdb.Pipeline()
+	pipe.LPush(ctx, dmTaskListKey(convID), string(b))
+	pipe.LTrim(ctx, dmTaskListKey(convID), 0, msgListMax-1)
+	_, err = pipe.Exec(ctx)
+	return err
+}
+
+func (a *App) redisListDmTasks(ctx context.Context, convID int64, limit int) ([]cachedDmTask, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	raw, err := a.rdb.LRange(ctx, dmTaskListKey(convID), 0, int64(limit-1)).Result()
+	if err != nil && err != redis.Nil {
+		return nil, err
+	}
+	out := make([]cachedDmTask, 0, len(raw))
+	for _, s := range raw {
+		var t cachedDmTask
+		if json.Unmarshal([]byte(s), &t) == nil {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+
+func (a *App) redisInvalidateDmTasks(ctx context.Context, convID int64) error {
+	return a.rdb.Del(ctx, dmTaskListKey(convID)).Err()
+}

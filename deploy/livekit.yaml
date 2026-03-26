@@ -1,0 +1,15 @@
+# Devcord VoiceKit — konfiguracja LiveKit SFU (upstream OSS).
+# Uruchomienie: livekit-server --config /ścieżka/do/livekit.yaml --bind 127.0.0.1
+# port: wewnętrzny HTTP LiveKit (nginx TLS na :7880 → proxy do 127.0.0.1:7882 — ten sam port nie może być użyty przez nginx i LiveKit naraz).
+
+port: 7882
+
+keys:
+  devcord_key: devcord_secret
+
+rtc:
+  node_ip: 45.134.108.220
+  port_range_start: 50000
+  port_range_end: 60000
+  tcp_port: 7881
+  use_external_ip: true

@@ -55,6 +55,15 @@ func (a *App) handleChatWS(w http.ResponseWriter, r *http.Request) {
 		uid:             uid,
 	}
 	go wc.writePump()
+	ctxInit, cancelInit := context.WithTimeout(context.Background(), 5*time.Second)
+	raw, errInit := a.voiceInitialStatePayload(ctxInit, uid)
+	cancelInit()
+	if errInit == nil {
+		select {
+		case wc.send <- raw:
+		default:
+		}
+	}
 	wc.readPump()
 }
 

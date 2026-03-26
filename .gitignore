@@ -4,3 +4,4 @@ node_modules/
 !.env.production
 
 stoatchat-main/
+for-web-main/

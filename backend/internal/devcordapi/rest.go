@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"webrtc/signaling/internal/snowflake"
 )
 
@@ -724,20 +725,43 @@ func (a *App) handleDeleteMessage(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleListTasks(w http.ResponseWriter, r *http.Request) {
 	uid := userIDFromReq(r)
 	sidStr := r.URL.Query().Get("serverId")
-	sid, err := parseID(sidStr)
-	if err != nil {
-		jsonErr(w, http.StatusBadRequest, "serverId")
-		return
-	}
+	chStr := r.URL.Query().Get("channelId")
 	ctx := r.Context()
-	mem, _ := a.isServerMember(ctx, uid, sid)
-	if !mem {
-		jsonErr(w, http.StatusForbidden, "forbidden")
-		return
+	var rows pgx.Rows
+	var err error
+	if strings.TrimSpace(chStr) != "" {
+		chID, e := parseID(chStr)
+		if e != nil {
+			jsonErr(w, http.StatusBadRequest, "channelId")
+			return
+		}
+		ok, e := a.dmMember(ctx, uid, chID)
+		if e != nil {
+			jsonErr(w, http.StatusInternalServerError, "query")
+			return
+		}
+		if !ok {
+			jsonErr(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		rows, err = a.pool.Query(ctx, `
+			SELECT id, title, assignee_id, completed, source_msg_id
+			FROM tasks WHERE channel_id = $1 ORDER BY created_at DESC`, chID)
+	} else {
+		sid, e := parseID(sidStr)
+		if e != nil {
+			jsonErr(w, http.StatusBadRequest, "serverId")
+			return
+		}
+		mem, _ := a.isServerMember(ctx, uid, sid)
+		if !mem {
+			jsonErr(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		rows, err = a.pool.Query(ctx, `
+			SELECT id, title, assignee_id, completed, source_msg_id
+			FROM tasks WHERE server_id = $1 ORDER BY created_at DESC`, sid)
 	}
-	rows, err := a.pool.Query(ctx, `
-		SELECT id, title, assignee_id, completed, source_msg_id
-		FROM tasks WHERE server_id = $1 ORDER BY created_at DESC`, sid)
 	if err != nil {
 		jsonErr(w, http.StatusInternalServerError, "query")
 		return
@@ -787,16 +811,47 @@ func (a *App) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, http.StatusBadRequest, "json")
 		return
 	}
-	sid, err := parseID(body.ServerID)
-	if err != nil || strings.TrimSpace(body.Title) == "" {
+	if strings.TrimSpace(body.Title) == "" {
 		jsonErr(w, http.StatusBadRequest, "invalid")
 		return
 	}
 	ctx := r.Context()
-	mem, _ := a.isServerMember(ctx, uid, sid)
-	if !mem {
-		jsonErr(w, http.StatusForbidden, "forbidden")
-		return
+	var sid *int64
+	var ch *int64
+	if strings.TrimSpace(body.ChannelID) != "" && strings.TrimSpace(body.ServerID) == "" {
+		cid, e := parseID(body.ChannelID)
+		if e != nil {
+			jsonErr(w, http.StatusBadRequest, "channelId")
+			return
+		}
+		ok, e := a.dmMember(ctx, uid, cid)
+		if e != nil {
+			jsonErr(w, http.StatusInternalServerError, "query")
+			return
+		}
+		if !ok {
+			jsonErr(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		ch = &cid
+	} else {
+		srvID, e := parseID(body.ServerID)
+		if e != nil {
+			jsonErr(w, http.StatusBadRequest, "serverId")
+			return
+		}
+		mem, _ := a.isServerMember(ctx, uid, srvID)
+		if !mem {
+			jsonErr(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		sid = &srvID
+		if body.ChannelID != "" {
+			c, e := parseID(body.ChannelID)
+			if e == nil {
+				ch = &c
+			}
+		}
 	}
 	tid, err := a.gen.Next(snowflake.TypeTask)
 	if err != nil {
@@ -815,13 +870,6 @@ func (a *App) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		s, err := parseID(body.SourceMsgID)
 		if err == nil {
 			src = &s
-		}
-	}
-	var ch *int64
-	if body.ChannelID != "" {
-		c, err := parseID(body.ChannelID)
-		if err == nil {
-			ch = &c
 		}
 	}
 	if _, err := a.pool.Exec(ctx, `INSERT INTO tasks (id, server_id, channel_id, title, assignee_id, source_msg_id) VALUES ($1,$2,$3,$4,$5,$6)`,
@@ -847,13 +895,25 @@ func (a *App) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	var sid int64
-	if err := a.pool.QueryRow(ctx, `SELECT server_id FROM tasks WHERE id = $1`, tid).Scan(&sid); err != nil {
+	var sid *int64
+	var chID *int64
+	if err := a.pool.QueryRow(ctx, `SELECT server_id, channel_id FROM tasks WHERE id = $1`, tid).Scan(&sid, &chID); err != nil {
 		jsonErr(w, http.StatusNotFound, "task")
 		return
 	}
-	mem, _ := a.isServerMember(ctx, uid, sid)
-	if !mem {
+	if sid != nil {
+		mem, _ := a.isServerMember(ctx, uid, *sid)
+		if !mem {
+			jsonErr(w, http.StatusForbidden, "forbidden")
+			return
+		}
+	} else if chID != nil {
+		ok, err := a.dmMember(ctx, uid, *chID)
+		if err != nil || !ok {
+			jsonErr(w, http.StatusForbidden, "forbidden")
+			return
+		}
+	} else {
 		jsonErr(w, http.StatusForbidden, "forbidden")
 		return
 	}
@@ -874,13 +934,25 @@ func (a *App) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	var sid int64
-	if err := a.pool.QueryRow(ctx, `SELECT server_id FROM tasks WHERE id = $1`, tid).Scan(&sid); err != nil {
+	var sid *int64
+	var chID *int64
+	if err := a.pool.QueryRow(ctx, `SELECT server_id, channel_id FROM tasks WHERE id = $1`, tid).Scan(&sid, &chID); err != nil {
 		jsonErr(w, http.StatusNotFound, "task")
 		return
 	}
-	mem, _ := a.isServerMember(ctx, uid, sid)
-	if !mem {
+	if sid != nil {
+		mem, _ := a.isServerMember(ctx, uid, *sid)
+		if !mem {
+			jsonErr(w, http.StatusForbidden, "forbidden")
+			return
+		}
+	} else if chID != nil {
+		ok, err := a.dmMember(ctx, uid, *chID)
+		if err != nil || !ok {
+			jsonErr(w, http.StatusForbidden, "forbidden")
+			return
+		}
+	} else {
 		jsonErr(w, http.StatusForbidden, "forbidden")
 		return
 	}

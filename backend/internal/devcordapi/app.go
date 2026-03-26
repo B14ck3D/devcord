@@ -73,6 +73,7 @@ func (a *App) Router() http.Handler {
 	r.Get("/api/ping", a.handlePublicPing)
 
 	r.Route("/api", func(r chi.Router) {
+		r.Post("/voice/livekit-webhook", a.handleLiveKitWebhook)
 		r.Post("/auth/register", a.handleRegister)
 		r.Post("/auth/verify", a.handleVerify)
 		r.Post("/auth/login", a.handleLogin)
@@ -116,6 +117,12 @@ func (a *App) Router() http.Handler {
 			r.Get("/dm/conversations", a.handleListDmConversations)
 			r.Get("/dm/conversations/{id}/messages", a.handleListDmMessages)
 			r.Post("/dm/conversations/{id}/messages", a.handleCreateDmMessage)
+			r.Get("/dm/conversations/{id}/tasks", a.handleListDmTasks)
+			r.Post("/dm/conversations/{id}/tasks", a.handleCreateDmTask)
+			r.Put("/dm/tasks/{id}", a.handleUpdateDmTask)
+			r.Delete("/dm/tasks/{id}", a.handleDeleteDmTask)
+			r.Post("/dm/conversations/{id}/calls", a.handleCreateDmCall)
+			r.Post("/dm/calls/{id}/{action}", a.handleDmCallAction)
 
 			r.Post("/friends/request", a.handleFriendRequestCreate)
 			r.Get("/friends/requests/incoming", a.handleFriendRequestsIncoming)

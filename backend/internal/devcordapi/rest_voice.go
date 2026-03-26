@@ -11,7 +11,7 @@ import (
 	"webrtc/signaling/internal/snowflake"
 )
 
-// GET /api/voice/livekit-token?channel_id=... — JWT do LiveKit; room = devcord_<server_id>_<channel_id>.
+// GET /api/voice/livekit-token?channel_id=... lub ?dm_conversation_id=...
 func (a *App) handleVoiceLiveKitToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		jsonErr(w, http.StatusMethodNotAllowed, "method")
@@ -25,6 +25,45 @@ func (a *App) handleVoiceLiveKitToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uid := userIDFromReq(r)
+	dmConvIDStr := strings.TrimSpace(r.URL.Query().Get("dm_conversation_id"))
+	if dmConvIDStr != "" {
+		convID, err := strconv.ParseInt(dmConvIDStr, 10, 64)
+		if err != nil || convID <= 0 {
+			jsonErr(w, http.StatusBadRequest, "dm_conversation_id")
+			return
+		}
+		ctx := r.Context()
+		ok, err := a.dmMember(ctx, uid, convID)
+		if err != nil {
+			jsonErr(w, http.StatusInternalServerError, "query")
+			return
+		}
+		if !ok {
+			jsonErr(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		roomName := fmt.Sprintf("dm_%d", convID)
+		identity := strconv.FormatInt(uid, 10)
+		tok, err := auth.NewAccessToken(key, sec).
+			AddGrant(&auth.VideoGrant{
+				RoomJoin: true,
+				Room:     roomName,
+			}).
+			SetIdentity(identity).
+			SetValidFor(15 * time.Minute).
+			ToJWT()
+		if err != nil {
+			jsonErr(w, http.StatusInternalServerError, "token")
+			return
+		}
+		jsonWrite(w, http.StatusOK, map[string]interface{}{
+			"token":     tok,
+			"url":       url,
+			"room_name": roomName,
+			"mode":      "dm",
+		})
+		return
+	}
 	chIDStr := strings.TrimSpace(r.URL.Query().Get("channel_id"))
 	if chIDStr == "" {
 		jsonErr(w, http.StatusBadRequest, "channel_id required")

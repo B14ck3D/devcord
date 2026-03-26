@@ -1,0 +1,18 @@
+[Unit]
+Description=Devcord VoiceKit (LiveKit SFU)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/devcord-voicekit
+ExecStart=/opt/devcord-voicekit/bin/livekit-server --config /etc/devcord/livekit.yaml --bind 127.0.0.1
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+KillMode=mixed
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

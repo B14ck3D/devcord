@@ -24,6 +24,40 @@ export type DmMessageRow = {
   isEdited?: boolean;
 };
 
+export type DmTaskEvent = {
+  type: 'dm_task_created' | 'dm_task_updated' | 'dm_task_deleted';
+  conversationId: string;
+  id: string;
+  title?: string;
+  assigneeId?: string;
+  completed?: boolean;
+  sourceMsgId?: string;
+};
+
+export type DmCallStateEvent = {
+  callId: string;
+  conversationId: string;
+  fromUserId: string;
+  toUserId: string;
+  status: 'ringing' | 'connected' | 'rejected' | 'ended';
+  kind?: 'audio' | 'video';
+};
+
+/** Snapshot z Redisa / WS przy starcie połączenia czatu. */
+export type VoiceInitialStatePayload = {
+  channels: Record<string, string[]>;
+  conversations: Record<string, string[]>;
+};
+
+/** Przyrost po webhooku LiveKit (pełna lista w pokoju). */
+export type VoiceRoomStatePayload = {
+  room_name: string;
+  user_ids: string[];
+  channel_id?: string;
+  server_id?: string;
+  conversation_id?: string;
+};
+
 export function useChatSocket(opts: {
   apiBase: string;
   token: string | null;
@@ -41,6 +75,10 @@ export function useChatSocket(opts: {
   dmConversationId?: string | null;
   onDmMessage?: (row: DmMessageRow) => void;
   onDmTyping?: (ev: { conversationId: string; userId: string; typing: boolean }) => void;
+  onDmTaskEvent?: (ev: DmTaskEvent) => void;
+  onDmCallState?: (ev: DmCallStateEvent) => void;
+  onVoiceInitialState?: (payload: VoiceInitialStatePayload) => void;
+  onVoiceRoomState?: (payload: VoiceRoomStatePayload) => void;
 }) {
   const {
     apiBase,
@@ -52,6 +90,10 @@ export function useChatSocket(opts: {
     dmConversationId = null,
     onDmMessage,
     onDmTyping,
+    onDmTaskEvent,
+    onDmCallState,
+    onVoiceInitialState,
+    onVoiceRoomState,
   } = opts;
   const wsRef = useRef<WebSocket | null>(null);
   const chRef = useRef<string | null>(null);
@@ -61,11 +103,19 @@ export function useChatSocket(opts: {
   const onUserUpdatedRef = useRef(onUserUpdated);
   const onDmMessageRef = useRef(onDmMessage);
   const onDmTypingRef = useRef(onDmTyping);
+  const onDmTaskEventRef = useRef(onDmTaskEvent);
+  const onDmCallStateRef = useRef(onDmCallState);
+  const onVoiceInitialStateRef = useRef(onVoiceInitialState);
+  const onVoiceRoomStateRef = useRef(onVoiceRoomState);
   onMessageRef.current = onMessage;
   onTypingRef.current = onTyping;
   onUserUpdatedRef.current = onUserUpdated;
   onDmMessageRef.current = onDmMessage;
   onDmTypingRef.current = onDmTyping;
+  onDmTaskEventRef.current = onDmTaskEvent;
+  onDmCallStateRef.current = onDmCallState;
+  onVoiceInitialStateRef.current = onVoiceInitialState;
+  onVoiceRoomStateRef.current = onVoiceRoomState;
 
   const subscribeOpenChannels = useCallback((ws: WebSocket) => {
     const ch = chRef.current;
@@ -124,6 +174,31 @@ export function useChatSocket(opts: {
             });
           }
         }
+        if ((d.type === 'dm_task_created' || d.type === 'dm_task_updated' || d.type === 'dm_task_deleted') && d.payload) {
+          const p = d.payload as Record<string, unknown>;
+          onDmTaskEventRef.current?.({
+            type: d.type,
+            conversationId: String(p.conversationId ?? ''),
+            id: String(p.id ?? ''),
+            title: typeof p.title === 'string' ? p.title : undefined,
+            assigneeId: typeof p.assigneeId === 'string' ? p.assigneeId : undefined,
+            completed: typeof p.completed === 'boolean' ? p.completed : undefined,
+            sourceMsgId: typeof p.sourceMsgId === 'string' ? p.sourceMsgId : undefined,
+          });
+        }
+        if (d.type === 'dm_call_state' && d.payload) {
+          const p = d.payload as Record<string, unknown>;
+          const status = String(p.status ?? '') as DmCallStateEvent['status'];
+          if (!status) return;
+          onDmCallStateRef.current?.({
+            callId: String(p.callId ?? ''),
+            conversationId: String(p.conversationId ?? ''),
+            fromUserId: String(p.fromUserId ?? ''),
+            toUserId: String(p.toUserId ?? ''),
+            status,
+            kind: String(p.kind ?? 'audio') === 'video' ? 'video' : 'audio',
+          });
+        }
         if (d.type === 'user_updated' && d.payload && onUserUpdatedRef.current) {
           const p = d.payload as Record<string, unknown>;
           const uid = String(p.user_id ?? '');
@@ -134,6 +209,37 @@ export function useChatSocket(opts: {
             avatar_url: typeof p.avatar_url === 'string' ? p.avatar_url : undefined,
             nick_color: typeof p.nick_color === 'string' ? p.nick_color : undefined,
             nick_glow: typeof p.nick_glow === 'string' ? p.nick_glow : undefined,
+          });
+        }
+        if (d.type === 'voice_initial_state' && d.payload && onVoiceInitialStateRef.current) {
+          const p = d.payload as Record<string, unknown>;
+          const chRaw = p.channels;
+          const convRaw = p.conversations;
+          const channels: Record<string, string[]> = {};
+          const conversations: Record<string, string[]> = {};
+          if (chRaw && typeof chRaw === 'object' && !Array.isArray(chRaw)) {
+            for (const [k, v] of Object.entries(chRaw as Record<string, unknown>)) {
+              if (!Array.isArray(v)) continue;
+              channels[String(k)] = v.map((x) => String(x));
+            }
+          }
+          if (convRaw && typeof convRaw === 'object' && !Array.isArray(convRaw)) {
+            for (const [k, v] of Object.entries(convRaw as Record<string, unknown>)) {
+              if (!Array.isArray(v)) continue;
+              conversations[String(k)] = v.map((x) => String(x));
+            }
+          }
+          onVoiceInitialStateRef.current({ channels, conversations });
+        }
+        if (d.type === 'voice_room_state' && d.payload && onVoiceRoomStateRef.current) {
+          const p = d.payload as Record<string, unknown>;
+          const userIds = Array.isArray(p.user_ids) ? (p.user_ids as unknown[]).map((x) => String(x)) : [];
+          onVoiceRoomStateRef.current({
+            room_name: String(p.room_name ?? ''),
+            user_ids: userIds,
+            channel_id: typeof p.channel_id === 'string' ? p.channel_id : undefined,
+            server_id: typeof p.server_id === 'string' ? p.server_id : undefined,
+            conversation_id: typeof p.conversation_id === 'string' ? p.conversation_id : undefined,
           });
         }
       } catch {
