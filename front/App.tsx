@@ -1,4 +1,12 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback, useReducer } from 'react';
+import { useChatStore } from './store/chatStore';
+import type { ChatRow } from './store/chatStore';
+import { ChatMessage } from './messaging/ChatMessage';
+import { MessageInput } from './messaging/MessageInput';
+import { ServerRail } from './layout/ServerRail';
+import { ChannelSidebar } from './layout/ChannelSidebar';
+import { ChatColumn } from './layout/ChatColumn';
+import { MemberColumn } from './layout/MemberColumn';
 import { useLiveKitVoice, VOICE_PEER_GAIN_MAX, VOICE_PEER_GAIN_MIN } from './useLiveKitVoice';
 import { VoiceSidebarParticipantRow, VoiceStageParticipantTile } from './VoiceSpeakingUi';
 import type { VoicePhase } from './voicePhase';
@@ -19,10 +27,10 @@ import {
   Headphones, MessageSquare, Compass, Shield,
   Crown, Terminal, Sparkles, Code, Coffee, Radio, Zap,
   ChevronsUpDown, Check, Maximize2, Minimize2, Bookmark,
-  ListTodo, Bold, Italic, Code as CodeIcon, Link, FileText, Image as ImageIcon,
+  ListTodo, Link, FileText, Image as ImageIcon,
   Command as CmdIcon, User, Moon, LogOut, 
   X, MicOff, PhoneOff, Palette, BellRing, MessageSquareShare,
-  UploadCloud, Copy, Smile, MonitorUp, Monitor, Trash2, Edit2, MoreVertical, CheckSquare, Square, Download, FileAudio, FileArchive, Eye, UserCheck, UserMinus, BellOff, LogIn, Server, Link2, CopyPlus, ChevronDown, FolderPlus, Pin, SlidersHorizontal, VolumeX, Wifi, MoreHorizontal, StickyNote, ExternalLink, Globe
+  UploadCloud, Copy, MonitorUp, Monitor, Trash2, Edit2, MoreVertical, CheckSquare, Square, Download, FileAudio, FileArchive, Eye, UserCheck, UserMinus, BellOff, LogIn, Server, Link2, CopyPlus, ChevronDown, FolderPlus, Pin, SlidersHorizontal, VolumeX, Wifi, MoreHorizontal, StickyNote, ExternalLink, Globe
 } from 'lucide-react';
 
 // ============================================================================
@@ -279,7 +287,6 @@ function userFromFriendApi(p: { id?: string; name?: string; avatar_url?: string 
 }
 type Category = { id: string; name: string; isExpanded: boolean; serverId: string };
 type Channel = { id: string; name: string; type: 'text' | 'voice'; color: string; icon: React.ElementType; unread?: boolean; categoryId?: string; serverId: string };
-type ChatRow = { id: string; userId: string; time: string; content: string; isMe?: boolean; isEdited?: boolean; reactions?: { emoji: string; count: number; userReacted: boolean }[] };
 type TaskItem = { id: string; title: string; assigneeId: string; completed: boolean; sourceMsgId?: string };
 type DmTaskItem = { id: string; conversationId: string; title: string; assigneeId: string; completed: boolean; sourceMsgId?: string };
 type FileItem = { id: string; name: string; size: string; type: 'image' | 'doc' | 'audio' | 'archive'; uploaderId: string; date: string };
@@ -555,23 +562,6 @@ export default function App() {
   const [channels, setChannels] = useState<Channel[]>(() => (DEMO_MODE ? initialChannels : []));
   const [tasks, setTasks] = useState<TaskItem[]>(() => (DEMO_MODE ? initialTasks : []));
   const [files, setFiles] = useState<FileItem[]>(() => (DEMO_MODE ? initialFiles : []));
-  const [messagesByChannel, setMessagesByChannel] = useState<Record<string, ChatRow[]>>(() =>
-    DEMO_MODE
-      ? {
-          c1: [
-            { id: 'm1', userId: 'u2', time: '10:00', content: 'Siema, widzieliście nowe makiety od Ani?' },
-            {
-              id: 'm2',
-              userId: 'u3',
-              time: '10:05',
-              content: 'Wrzuciłam je do zakładki pliki 🚀',
-              reactions: [{ emoji: '🔥', count: 2, userReacted: true }],
-            },
-          ],
-        }
-      : ({} as Record<string, ChatRow[]>),
-  );
-
   // Stany Nawigacji
   const [activeServer, setActiveServer] = useState(() => (DEMO_MODE ? 's1' : ''));
   const [isWorkspaceDropdownOpen, setIsWorkspaceDropdownOpen] = useState(false);
@@ -663,8 +653,8 @@ export default function App() {
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
   const [voiceMixPanelOpen, setVoiceMixPanelOpen] = useState(false);
   /** Obecność z Redisa / WS (kto jest w pokoju LiveKit), niezależnie od lokalnego połączenia RTC. */
-  const [voicePresenceByChannel, setVoicePresenceByChannel] = useState<Record<string, string[]>>({});
-  const [voicePresenceByConversation, setVoicePresenceByConversation] = useState<Record<string, string[]>>({});
+  const voicePresenceByChannel = useChatStore((s) => s.voicePresenceByChannel);
+  const voicePresenceByConversation = useChatStore((s) => s.voicePresenceByConversation);
 
   const [dmPeerId, setDmPeerId] = useState<string | null>(null);
   const [dmInputValue, setDmInputValue] = useState('');
@@ -1046,7 +1036,7 @@ export default function App() {
       setActiveChannel('');
       writePersonalHomePath();
       setTasks([]);
-      setMessagesByChannel({});
+      useChatStore.getState().clearMessages();
       setWorkspaceRoles([]);
       setWorkspaceMembers([]);
       return;
@@ -1178,9 +1168,9 @@ export default function App() {
       try {
         const rows = await apiClient(`/channels/${activeChannel}/messages`);
         if (!Array.isArray(rows)) return;
-        setMessagesByChannel((prev) => ({
-          ...prev,
-          [activeChannel]: rows.map((r: { id: string; userId: string; time: string; content: string; isEdited?: boolean }) => ({
+        useChatStore.getState().setChannelMessages(
+          activeChannel,
+          rows.map((r: { id: string; userId: string; time: string; content: string; isEdited?: boolean }) => ({
             id: r.id,
             userId: r.userId,
             time: r.time,
@@ -1188,7 +1178,7 @@ export default function App() {
             isEdited: r.isEdited,
             isMe: r.userId === meUserId,
           })),
-        }));
+        );
       } catch {
         /* ignore */
       }
@@ -1199,8 +1189,8 @@ export default function App() {
     setTypingUsers({});
   }, [activeChannel]);
 
-  const messages = messagesByChannel[activeChannel] ?? [];
   const myUserId = API_BASE_URL ? meUserId : guestIdRef.current;
+  const messages = useChatStore((s) => s.messagesByChannel[activeChannel] ?? []);
 
   const voiceDmActive = useMemo(
     () => !!(dmCallState?.status === 'connected' && dmCallState.conversationId),
@@ -1210,32 +1200,9 @@ export default function App() {
 
   const mergeChatMessage = useCallback(
     (row: { channelId: string; id: string; userId: string; content: string; time: string; isEdited?: boolean }) => {
-      const ch = row.channelId;
-      if (!ch) return;
-      setMessagesByChannel((prev) => {
-        const list = [...(prev[ch] ?? [])];
-        const i = list.findIndex((m) => m.id === row.id);
-        const entry: ChatRow = {
-          id: row.id,
-          userId: row.userId,
-          time: row.time,
-          content: row.content,
-          isEdited: row.isEdited,
-          isMe: row.userId === meUserId,
-        };
-        if (i >= 0) {
-          list[i] = { ...list[i], ...entry };
-        } else {
-          const tmpIdx = list.findIndex(
-            (m) => m.id.startsWith('tmp_') && m.userId === row.userId && m.content === row.content,
-          );
-          if (tmpIdx >= 0) list[tmpIdx] = entry;
-          else list.push(entry);
-        }
-        return { ...prev, [ch]: list };
-      });
+      useChatStore.getState().mergeChannelMessage(row, myUserId);
     },
-    [meUserId],
+    [myUserId],
   );
 
   const mergeDmMessage = useCallback(
@@ -1718,31 +1685,18 @@ export default function App() {
     onVoiceInitialState:
       API_BASE_URL && devcordToken
         ? (p) => {
-            setVoicePresenceByChannel({ ...p.channels });
-            setVoicePresenceByConversation({ ...p.conversations });
+            useChatStore.getState().setVoicePresenceByChannel({ ...p.channels });
+            useChatStore.getState().setVoicePresenceByConversation({ ...p.conversations });
           }
         : undefined,
     onVoiceRoomState:
       API_BASE_URL && devcordToken
         ? (p) => {
-            const chId = p.channel_id;
-            if (chId) {
-              setVoicePresenceByChannel((prev) => {
-                const next = { ...prev };
-                if (p.user_ids.length === 0) delete next[chId];
-                else next[chId] = [...p.user_ids];
-                return next;
-              });
-            }
-            const convId = p.conversation_id;
-            if (convId) {
-              setVoicePresenceByConversation((prev) => {
-                const next = { ...prev };
-                if (p.user_ids.length === 0) delete next[convId];
-                else next[convId] = [...p.user_ids];
-                return next;
-              });
-            }
+            useChatStore.getState().mergeVoiceRoomEvent({
+              channel_id: p.channel_id,
+              conversation_id: p.conversation_id,
+              user_ids: p.user_ids,
+            });
           }
         : undefined,
   });
@@ -2320,32 +2274,34 @@ export default function App() {
       setIsAILoading(true); setInputValue(''); setIsAIPromptOpen(false);
       setTimeout(() => {
         setIsAILoading(false);
-        setMessagesByChannel((prev) => ({
-          ...prev, [activeChannel]: [...(prev[activeChannel] ?? []), { 
-            id: `ai_${Date.now()}`, userId: 'devcord_ai', time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), 
-            content: `**Devcord AI:** Przeanalizowałem Twoje zapytanie: "${content}". Gotowe rozwiązanie:\n\n\`\`\`javascript\nconst devcordNode = new DevcordNode();\ndevcordNode.connect();\n\`\`\``, 
-            isMe: false 
-          }],
-        }));
+        useChatStore.getState().appendChannelMessage(activeChannel, {
+          id: `ai_${Date.now()}`,
+          userId: 'devcord_ai',
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          content: `**Devcord AI:** Przeanalizowałem Twoje zapytanie: "${content}". Gotowe rozwiązanie:\n\n\`\`\`javascript\nconst devcordNode = new DevcordNode();\ndevcordNode.connect();\n\`\`\``,
+          isMe: false,
+        });
       }, 1500);
       return;
     }
 
     try {
       const tempId = `tmp_${Date.now()}`;
-      setMessagesByChannel((prev) => ({
-        ...prev,
-        [activeChannel]: [...(prev[activeChannel] ?? []), { id: tempId, userId: myUserId, time: timeString, content, isMe: true }],
-      }));
+      useChatStore.getState().appendChannelMessage(activeChannel, {
+        id: tempId,
+        userId: myUserId,
+        time: timeString,
+        content,
+        isMe: true,
+      });
       setInputValue('');
       const res = (await apiClient(`/channels/${activeChannel}/messages`, 'POST', { content })) as { id?: string; userId?: string; time?: string } | null;
       if (res?.id) {
-        setMessagesByChannel((prev) => ({
-          ...prev,
-          [activeChannel]: (prev[activeChannel] ?? []).map((m) =>
-            m.id === tempId ? { ...m, id: res.id!, userId: res.userId ?? myUserId, time: res.time ?? m.time } : m,
-          ),
-        }));
+        useChatStore.getState().patchChannelMessage(activeChannel, tempId, {
+          id: res.id!,
+          userId: res.userId ?? myUserId,
+          time: res.time ?? timeString,
+        });
       }
     } catch (e) {
       console.error(e);
@@ -2355,7 +2311,7 @@ export default function App() {
   const deleteMessage = async (msgId: string) => {
     try {
       await apiClient(`/messages/${msgId}`, 'DELETE');
-      setMessagesByChannel(prev => ({ ...prev, [activeChannel]: prev[activeChannel].filter(m => m.id !== msgId) }));
+      useChatStore.getState().removeChannelMessage(activeChannel, msgId);
       if (activeThread?.id === msgId) setActiveThread(null);
       setContextMenu(null);
     } catch(e) { console.error(e); }
@@ -2404,9 +2360,13 @@ export default function App() {
       
       const newFile: FileItem = { id: `f_${Date.now()}`, name: 'wspolny_zrzut.png', size: '2.1 MB', type: 'image', uploaderId: myUserId, date: 'Przed chwilą' };
       setFiles([newFile, ...files]); setRightPanelTab('files');
-      setMessagesByChannel((prev) => ({
-        ...prev, [activeChannel]: [...(prev[activeChannel] ?? []), { id: `m_${Date.now()}`, userId: myUserId, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), content: 'Wrzuciłem nowy plik do zakładki pliki: **wspolny_zrzut.png** 🚀', isMe: true }],
-      }));
+      useChatStore.getState().appendChannelMessage(activeChannel, {
+        id: `m_${Date.now()}`,
+        userId: myUserId,
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        content: 'Wrzuciłem nowy plik do zakładki pliki: **wspolny_zrzut.png** 🚀',
+        isMe: true,
+      });
     } catch(e) { console.error(e); }
   };
 
@@ -2446,8 +2406,7 @@ export default function App() {
       setDmApiConversations([]);
       setDmMessagesByConversation({});
       setDmTasksByConversation({});
-      setVoicePresenceByChannel({});
-      setVoicePresenceByConversation({});
+      useChatStore.getState().clearVoicePresence();
     },
     [disconnectVoice],
   );
@@ -2716,46 +2675,20 @@ export default function App() {
   return (
     <div
       data-devcord-theme={localTheme}
-      className={`flex h-screen w-full p-2 md:p-4 font-sans overflow-hidden relative transition-colors ${
-        localTheme === 'light'
-          ? 'bg-zinc-300 text-zinc-900 selection:bg-[#00eeff]/35'
-          : 'bg-[#000000] text-zinc-200 selection:bg-[#00eeff]/30 selection:text-white'
-      }`}
+      className="flex h-screen w-full p-1.5 overflow-hidden relative"
+      style={{ background: '#191919', color: 'var(--md-sys-color-on-surface)', fontFamily: 'Inter, system-ui, sans-serif', userSelect: 'none' }}
       onDragEnter={handleDragEnter} onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop} 
       onContextMenu={(e) => handleContextMenu(e, 'general', null)}
     >
       <style>{`
         .custom-scrollbar::-webkit-scrollbar { width: 4px; height: 4px; display: none; }
         .custom-scrollbar:hover::-webkit-scrollbar { display: block; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
-        [data-devcord-theme="light"] .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); }
-        .user-row:hover, .channel-row:hover { background-color: var(--hover-bg) !important; border-color: var(--hover-border) !important; }
         .loader-dot { animation: loader 1.4s infinite ease-in-out both; }
         .loader-dot:nth-child(1) { animation-delay: -0.32s; }
         .loader-dot:nth-child(2) { animation-delay: -0.16s; }
         @keyframes loader { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
-        [data-devcord-theme="light"] .devcord-sidebar .text-zinc-100,
-        [data-devcord-theme="light"] .devcord-main .text-zinc-100,
-        [data-devcord-theme="light"] .devcord-rightbar .text-zinc-100 { color: #18181b !important; }
-        [data-devcord-theme="light"] .devcord-sidebar .text-zinc-200,
-        [data-devcord-theme="light"] .devcord-main .text-zinc-200,
-        [data-devcord-theme="light"] .devcord-rightbar .text-zinc-200 { color: #27272a !important; }
-        [data-devcord-theme="light"] .devcord-sidebar .text-zinc-300,
-        [data-devcord-theme="light"] .devcord-main .text-zinc-300,
-        [data-devcord-theme="light"] .devcord-rightbar .text-zinc-300 { color: #3f3f46 !important; }
-        [data-devcord-theme="light"] .devcord-sidebar .text-zinc-400,
-        [data-devcord-theme="light"] .devcord-main .text-zinc-400,
-        [data-devcord-theme="light"] .devcord-rightbar .text-zinc-400 { color: #52525b !important; }
-        [data-devcord-theme="light"] .devcord-sidebar .text-zinc-500,
-        [data-devcord-theme="light"] .devcord-main .text-zinc-500,
-        [data-devcord-theme="light"] .devcord-rightbar .text-zinc-500 { color: #71717a !important; }
-        [data-devcord-theme="light"] .devcord-sidebar .text-zinc-600,
-        [data-devcord-theme="light"] .devcord-main .text-zinc-600,
-        [data-devcord-theme="light"] .devcord-rightbar .text-zinc-600 { color: #52525b !important; }
-        [data-devcord-theme="light"] .devcord-sidebar .text-white,
-        [data-devcord-theme="light"] .devcord-main .text-white,
-        [data-devcord-theme="light"] .devcord-rightbar .text-white { color: #0a0a0a !important; }
+        .devcord-category-body[data-open="false"] { max-height: 0; overflow: hidden; opacity: 0; transition: max-height 0.2s ease, opacity 0.15s ease; }
+        .devcord-category-body[data-open="true"] { max-height: 2000px; opacity: 1; transition: max-height 0.25s ease, opacity 0.15s ease; }
       `}</style>
 
       {/* --- MENU KONTEKSTOWE --- */}
@@ -3776,78 +3709,93 @@ export default function App() {
 
       {/* --- STRUKTURA GŁÓWNA APLIKACJI --- */}
       <div
-        className={`flex h-full w-full rounded-[32px] border overflow-hidden relative transition-all duration-500 devcord-shell ${
-          localTheme === 'light'
-            ? 'bg-zinc-100 border-zinc-300/90 shadow-lg shadow-black/10'
-            : 'bg-[#050505] border-white/[0.08] shadow-[0_0_80px_rgba(255,255,255,0.03)]'
-        }`}
+        className="flex h-full w-full rounded-md3-xli overflow-hidden relative devcord-shell"
+        style={{ background: 'var(--md-sys-color-surface-container-low)' }}
       >
         
         {/* --- 1. LEWY PANEL (NAV) --- */}
         {!isZenMode && (
-          <aside 
-            onContextMenu={(e) => handleContextMenu(e, 'workspace', null)}
-            className={`w-[280px] flex flex-col shrink-0 z-30 border-r transition-all duration-500 devcord-sidebar ${
-              localTheme === 'light' ? 'bg-zinc-50 border-zinc-200' : 'border-white/[0.04] bg-[#080808]'
-            }`}
-          >
-            {/* Workspace Switcher */}
-            <div className="relative px-4 pt-6 pb-2 z-50">
+          <div className="flex shrink-0 z-30 min-h-0">
+            <ServerRail
+              activeServerId={activeServer}
+              personalActive={activeServer === ''}
+              servers={servers.map((s) => ({
+                id: s.id,
+                name: s.name,
+                icon: s.icon,
+              }))}
+              onSelectPersonal={() => {
+                setActiveServer('');
+                setActiveChannel('');
+                writePersonalHomePath();
+                setIsWorkspaceDropdownOpen(false);
+              }}
+              onSelectServer={(id) => {
+                setActiveServer(id);
+                setIsWorkspaceDropdownOpen(false);
+              }}
+              onAddServer={() => setCreateServerModal('create')}
+              onContextMenuServer={(e, server) => {
+                const full = servers.find((x) => x.id === server.id);
+                if (full) handleContextMenu(e, 'server', full);
+              }}
+            />
+            <ChannelSidebar onContextMenu={(e) => handleContextMenu(e, 'workspace', null)}>
+            {/* Workspace header */}
+            <div className="relative px-[var(--gap-md)] pt-4 pb-2 z-50 flex-shrink-0">
               {API_BASE_URL && servers.length === 0 ? (
-                <div className="rounded-2xl border border-white/[0.08] bg-black/40 p-4">
-                  <p className="text-xs text-zinc-500 uppercase tracking-widest font-bold mb-3">Serwery</p>
-                  <p className="text-sm text-zinc-400 mb-4 leading-relaxed">Utwórz pierwszą przestrzeń albo dołącz kodem.</p>
+                <div className="rounded-md3-md p-3" style={{ background: 'var(--md-sys-color-surface-container)', border: '1px solid var(--md-sys-color-outline-variant)' }}>
+                  <p className="text-xs font-bold uppercase tracking-widest mb-2" style={{ color: 'var(--md-sys-color-outline)' }}>Serwery</p>
+                  <p className="text-sm mb-3 leading-relaxed" style={{ color: 'var(--md-sys-color-on-surface-variant)' }}>Utwórz pierwszą przestrzeń albo dołącz kodem.</p>
                   <button
                     type="button"
                     onClick={() => setCreateServerModal('create')}
-                    className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-[#00eeff] text-black font-bold text-sm shadow-[0_0_16px_rgba(0,238,255,0.25)]"
+                    className="w-full flex items-center justify-center gap-2 py-2.5 rounded-md3-md text-sm font-semibold"
+                    style={{ background: 'var(--md-sys-color-primary-container)', color: 'var(--md-sys-color-on-primary-container)' }}
                   >
-                    <Plus size={18} />
-                    Utwórz serwer
+                    <Plus size={16} /> Utwórz serwer
                   </button>
                   <button
                     type="button"
                     onClick={() => setCreateServerModal('join')}
-                    className="w-full mt-2 flex items-center justify-center gap-2 py-3 rounded-xl border border-white/[0.1] text-zinc-200 text-sm font-semibold hover:bg-white/[0.05]"
+                    className="w-full mt-1.5 flex items-center justify-center gap-2 py-2.5 rounded-md3-md text-sm font-semibold transition-colors"
+                    style={{ color: 'var(--md-sys-color-on-surface-variant)', border: '1px solid var(--md-sys-color-outline-variant)' }}
                   >
-                    <LogIn size={16} />
-                    Dołącz do serwera
+                    <LogIn size={16} /> Dołącz do serwera
                   </button>
                 </div>
               ) : (
                 (() => {
-                  const terminalServerData = { id: '', name: 'Terminal Osobisty', color: '#00eeff', glow: '0 0 15px rgba(0,238,255,0.1)', icon: Terminal };
-                  const activeServerData = activeServer === '' ? terminalServerData : (servers.find((s) => s.id === activeServer) || servers[0]);
-                  if (!activeServerData) return null;
+                  const activeServerData = activeServer === '' ? null : servers.find((s) => s.id === activeServer);
+                  const displayName = activeServer === '' ? 'Terminal Osobisty' : (activeServerData?.name ?? 'Serwer');
+                  const DisplayIcon = activeServer === '' ? Terminal : (activeServerData?.icon ?? Terminal);
                   return (
                     <>
                       <button
                         onClick={() => setIsWorkspaceDropdownOpen(!isWorkspaceDropdownOpen)}
-                        className="w-full flex items-center gap-3 p-2.5 rounded-2xl border transition-all duration-300 group hover:brightness-125 bg-black/50 backdrop-blur-md"
+                        className="w-full flex items-center gap-[var(--gap-md)] px-[var(--gap-md)] py-[var(--gap-sm)] rounded-md3-xl transition-colors"
                         style={{
-                          borderColor: `${activeServerData.color}30`,
-                          boxShadow: isWorkspaceDropdownOpen ? activeServerData.glow : `0 0 15px ${activeServerData.color}10`,
+                          height: 48,
+                          background: isWorkspaceDropdownOpen ? 'var(--md-sys-color-surface-container)' : 'transparent',
+                          color: 'var(--md-sys-color-on-surface)',
                         }}
+                        onMouseEnter={e => (e.currentTarget.style.background = 'var(--md-sys-color-surface-container)')}
+                        onMouseLeave={e => (e.currentTarget.style.background = isWorkspaceDropdownOpen ? 'var(--md-sys-color-surface-container)' : 'transparent')}
                       >
                         <div
-                          className="w-10 h-10 rounded-xl flex items-center justify-center transition-all"
-                          style={{ backgroundColor: `${activeServerData.color}20`, color: activeServerData.color }}
+                          className="w-8 h-8 rounded-md3-sm flex items-center justify-center flex-shrink-0"
+                          style={{ background: 'var(--md-sys-color-primary-container)', color: 'var(--md-sys-color-on-primary-container)' }}
                         >
-                          <activeServerData.icon size={20} />
+                          <DisplayIcon size={18} />
                         </div>
-                        <div className="flex flex-col items-start flex-1 min-w-0">
-                          <span
-                            className="text-[15px] font-bold truncate w-full text-left tracking-wide"
-                            style={{ color: activeServerData.color, textShadow: `0 0 10px ${activeServerData.color}40` }}
-                          >
-                            {activeServerData.name}
-                          </span>
-                          <span className="text-[10px] text-zinc-500 font-medium uppercase tracking-widest mt-0.5">Przestrzeń robocza</span>
-                        </div>
-                        <ChevronsUpDown size={16} className="text-zinc-600 group-hover:text-zinc-300 transition-colors mr-1" />
+                        <span className="text-[15px] font-semibold truncate flex-1 text-left">{displayName}</span>
+                        <ChevronsUpDown size={16} style={{ color: 'var(--md-sys-color-outline)', flexShrink: 0 }} />
                       </button>
                       {isWorkspaceDropdownOpen && (
-                        <div className="absolute top-[calc(100%-4px)] left-4 right-4 mt-2 bg-[#0c0c0e]/95 backdrop-blur-3xl border border-white/[0.1] rounded-2xl shadow-[0_20px_60px_rgba(0,0,0,0.9)] p-2 flex flex-col gap-1 z-50">
+                        <div
+                          className="absolute top-[calc(100%-4px)] left-0 right-0 mx-[var(--gap-md)] mt-1 rounded-md3-md shadow-md3 p-1.5 flex flex-col gap-0.5 z-50 animate-modal-in"
+                          style={{ background: 'var(--md-sys-color-surface-container-highest)', border: '1px solid var(--md-sys-color-outline-variant)' }}
+                        >
                           <button
                             onClick={() => {
                               setActiveServer('');
@@ -3855,15 +3803,19 @@ export default function App() {
                               writePersonalHomePath();
                               setIsWorkspaceDropdownOpen(false);
                             }}
-                            className="w-full flex items-center gap-3 p-2 rounded-xl transition-all duration-200 hover:bg-white/[0.05] group"
+                            className="w-full flex items-center gap-[var(--gap-md)] px-[var(--gap-md)] py-[var(--gap-sm)] rounded-md3-md text-sm transition-colors"
+                            style={{
+                              color: activeServer === '' ? 'var(--md-sys-color-on-primary-container)' : 'var(--md-sys-color-on-surface)',
+                              background: activeServer === '' ? 'var(--md-sys-color-primary-container)' : 'transparent',
+                            }}
+                            onMouseEnter={e => { if (activeServer !== '') e.currentTarget.style.background = 'var(--md-sys-color-surface-container)'; }}
+                            onMouseLeave={e => { if (activeServer !== '') e.currentTarget.style.background = 'transparent'; }}
                           >
-                            <div className="w-8 h-8 rounded-lg flex items-center justify-center transition-transform group-hover:scale-105" style={{ color: '#00eeff', backgroundColor: 'rgba(0,238,255,0.15)', border: '1px solid rgba(0,238,255,0.3)' }}>
-                              <Terminal size={14} />
-                            </div>
-                            <span className="text-sm font-semibold tracking-wide flex-1 text-left" style={{ color: '#00eeff' }}>Terminal Osobisty</span>
-                            {activeServer === '' && <Check size={16} className="ml-auto text-[#00eeff]" />}
+                            <Terminal size={16} className="flex-shrink-0" />
+                            <span className="flex-1 text-left font-medium">Terminal Osobisty</span>
+                            {activeServer === '' && <Check size={14} />}
                           </button>
-                          <div className="h-px bg-white/[0.05] my-1 mx-2"></div>
+                          {servers.length > 0 && <div className="h-px my-1" style={{ background: 'var(--md-sys-color-outline-variant)' }} />}
                           {servers.map((server) => (
                             <button
                               key={server.id}
@@ -3872,44 +3824,39 @@ export default function App() {
                                 setIsWorkspaceDropdownOpen(false);
                               }}
                               onContextMenu={(e) => handleContextMenu(e, 'server', server)}
-                              className="w-full flex items-center gap-3 p-2 rounded-xl transition-all duration-200 hover:bg-white/[0.05] group"
+                              className="w-full flex items-center gap-[var(--gap-md)] px-[var(--gap-md)] py-[var(--gap-sm)] rounded-md3-md text-sm transition-colors"
+                              style={{
+                                color: activeServer === server.id ? 'var(--md-sys-color-on-primary-container)' : 'var(--md-sys-color-on-surface)',
+                                background: activeServer === server.id ? 'var(--md-sys-color-primary-container)' : 'transparent',
+                              }}
+                              onMouseEnter={e => { if (activeServer !== server.id) e.currentTarget.style.background = 'var(--md-sys-color-surface-container)'; }}
+                              onMouseLeave={e => { if (activeServer !== server.id) e.currentTarget.style.background = 'transparent'; }}
                             >
-                              <div
-                                className="w-8 h-8 rounded-lg flex items-center justify-center transition-transform group-hover:scale-105"
-                                style={{ color: server.color, backgroundColor: `${server.color}15`, border: `1px solid ${server.color}30` }}
-                              >
+                              <div className="w-6 h-6 rounded-md3-xs flex items-center justify-center flex-shrink-0" style={{ background: 'var(--md-sys-color-secondary-container)', color: 'var(--md-sys-color-on-secondary-container)' }}>
                                 <server.icon size={14} />
                               </div>
-                              <span className="text-sm font-semibold tracking-wide" style={{ color: server.color }}>
-                                {server.name}
-                              </span>
-                              {activeServer === server.id && <Check size={16} className="ml-auto" style={{ color: server.color }} />}
+                              <span className="flex-1 text-left font-medium truncate">{server.name}</span>
+                              {activeServer === server.id && <Check size={14} />}
                             </button>
                           ))}
-                          <div className="h-px bg-white/[0.05] my-1 mx-2"></div>
+                          <div className="h-px my-1" style={{ background: 'var(--md-sys-color-outline-variant)' }} />
                           <button
-                            onClick={() => {
-                              setCreateServerModal('create');
-                              setIsWorkspaceDropdownOpen(false);
-                            }}
-                            className="w-full flex items-center gap-3 p-2 rounded-xl transition-all duration-200 hover:bg-white/[0.05] text-zinc-400 hover:text-[#00eeff]"
+                            onClick={() => { setCreateServerModal('create'); setIsWorkspaceDropdownOpen(false); }}
+                            className="w-full flex items-center gap-[var(--gap-md)] px-[var(--gap-md)] py-[var(--gap-sm)] rounded-md3-md text-sm transition-colors"
+                            style={{ color: 'var(--md-sys-color-on-surface-variant)' }}
+                            onMouseEnter={e => (e.currentTarget.style.background = 'var(--md-sys-color-surface-container)')}
+                            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                           >
-                            <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-white/[0.02] border border-white/[0.05]">
-                              <Plus size={14} />
-                            </div>
-                            <span className="text-sm font-semibold tracking-wide">Utwórz serwer</span>
+                            <Plus size={16} className="flex-shrink-0" /> <span className="font-medium">Utwórz serwer</span>
                           </button>
                           <button
-                            onClick={() => {
-                              setCreateServerModal('join');
-                              setIsWorkspaceDropdownOpen(false);
-                            }}
-                            className="w-full flex items-center gap-3 p-2 rounded-xl transition-all duration-200 hover:bg-white/[0.05] text-zinc-400 hover:text-[#00eeff]"
+                            onClick={() => { setCreateServerModal('join'); setIsWorkspaceDropdownOpen(false); }}
+                            className="w-full flex items-center gap-[var(--gap-md)] px-[var(--gap-md)] py-[var(--gap-sm)] rounded-md3-md text-sm transition-colors"
+                            style={{ color: 'var(--md-sys-color-on-surface-variant)' }}
+                            onMouseEnter={e => (e.currentTarget.style.background = 'var(--md-sys-color-surface-container)')}
+                            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                           >
-                            <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-white/[0.02] border border-white/[0.05]">
-                              <LogIn size={14} />
-                            </div>
-                            <span className="text-sm font-semibold tracking-wide">Dołącz do serwera</span>
+                            <LogIn size={16} className="flex-shrink-0" /> <span className="font-medium">Dołącz do serwera</span>
                           </button>
                         </div>
                       )}
@@ -3921,31 +3868,25 @@ export default function App() {
 
             {/* LISTA KANAŁÓW I KATEGORII */}
             {activeServer === '' ? (
-              <div className="flex-1 overflow-y-auto custom-scrollbar py-4 px-4 flex flex-col gap-2 relative min-h-0">
-                <div className="absolute inset-0 bg-[#00eeff]/[0.01] pointer-events-none rounded-xl"></div>
-                <div className="relative z-10 flex rounded-xl border border-white/[0.08] bg-black/40 p-0.5 mb-2">
-                  <button
-                    type="button"
-                    onClick={() => setPersonalSidebarTab('messages')}
-                    className={`flex-1 py-2 px-2 rounded-lg text-[11px] font-bold uppercase tracking-wider transition-colors ${
-                      personalSidebarTab === 'messages'
-                        ? 'bg-[#00eeff]/15 text-[#00eeff] border border-[#00eeff]/25'
-                        : 'text-zinc-500 hover:text-zinc-300'
-                    }`}
-                  >
-                    Rozmowy
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setPersonalSidebarTab('contacts')}
-                    className={`flex-1 py-2 px-2 rounded-lg text-[11px] font-bold uppercase tracking-wider transition-colors ${
-                      personalSidebarTab === 'contacts'
-                        ? 'bg-[#00eeff]/15 text-[#00eeff] border border-[#00eeff]/25'
-                        : 'text-zinc-500 hover:text-zinc-300'
-                    }`}
-                  >
-                    Znajomi
-                  </button>
+              <div className="flex-1 overflow-y-auto custom-scrollbar py-2 px-[var(--gap-sm)] flex flex-col gap-1 min-h-0">
+                <div
+                  className="flex rounded-md3-md p-0.5 mx-[var(--gap-sm)] mb-1 flex-shrink-0"
+                  style={{ background: 'var(--md-sys-color-surface-container)' }}
+                >
+                  {(['messages', 'contacts'] as const).map((tab) => (
+                    <button
+                      key={tab}
+                      type="button"
+                      onClick={() => setPersonalSidebarTab(tab)}
+                      className="flex-1 py-1.5 rounded-md3-sm text-[12px] font-semibold transition-colors"
+                      style={{
+                        background: personalSidebarTab === tab ? 'var(--md-sys-color-surface-container-high)' : 'transparent',
+                        color: personalSidebarTab === tab ? 'var(--md-sys-color-on-surface)' : 'var(--md-sys-color-on-surface-variant)',
+                      }}
+                    >
+                      {tab === 'messages' ? 'Rozmowy' : 'Znajomi'}
+                    </button>
+                  ))}
                 </div>
                 {!API_BASE_URL ? (
                   <p className="text-xs text-zinc-500 px-2 leading-relaxed relative z-10">
@@ -3960,7 +3901,7 @@ export default function App() {
                         Brak rozmów PW. Otwórz profil osoby na serwerze i wybierz „Wyślij wiadomość”, albo przejdź do zakładki Znajomi.
                       </p>
                     ) : (
-                      <div className="relative z-10 space-y-1">
+                      <div className="flex flex-col gap-0.5">
                         {dmApiConversations.map((c) => {
                           const active = dmActiveConversationId === c.id;
                           const last = c.last_message?.content;
@@ -3975,33 +3916,29 @@ export default function App() {
                                 setDmActiveConversationId(c.id);
                                 setDmPeerId(c.peer.id);
                               }}
-                              className={`flex items-center gap-3 p-2 rounded-xl border transition-colors text-zinc-300 hover:text-white w-full text-left group ${
-                                active
-                                  ? 'bg-[#00eeff]/12 border-[#00eeff]/25'
-                                  : 'hover:bg-[#00eeff]/10 border-transparent hover:border-[#00eeff]/15'
-                              }`}
+                              className="menu-btn"
+                              data-active={active}
+                              style={active ? { background: 'var(--md-sys-color-primary-container)', color: 'var(--md-sys-color-on-primary-container)' } : undefined}
                             >
-                              <div className="relative shrink-0">
+                              <div className="relative shrink-0 flex-shrink-0">
                                 {avSrc ? (
-                                  <img
-                                    src={avSrc}
-                                    alt=""
-                                    className="w-8 h-8 rounded-[10px] object-cover border border-white/[0.1] group-hover:border-[#00eeff]/30 transition-colors"
-                                  />
+                                  <img src={avSrc} alt="" className="w-8 h-8 rounded-full object-cover" />
                                 ) : (
-                                  <div className="w-8 h-8 rounded-[10px] bg-black border border-white/[0.1] flex items-center justify-center text-xs font-bold text-white group-hover:border-[#00eeff]/30 transition-colors">
+                                  <div
+                                    className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold"
+                                    style={{ background: 'var(--md-sys-color-secondary-container)', color: 'var(--md-sys-color-on-secondary-container)' }}
+                                  >
                                     {c.peer.name.charAt(0)}
                                   </div>
                                 )}
-                                <div className="absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full bg-emerald-500 border-[3px] border-[#080808]" />
-                              </div>
-                              <div className="flex flex-col min-w-0 flex-1">
-                                <NickLabel
-                                  user={c.peer}
-                                  fallbackColor="#e4e4e7"
-                                  className="text-sm font-semibold truncate group-hover:text-[#00eeff] transition-colors"
+                                <div
+                                  className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2"
+                                  style={{ background: 'var(--color-status-online)', borderColor: 'var(--md-sys-color-surface-container-low)' }}
                                 />
-                                <span className="text-[10px] text-zinc-500 truncate">{last || 'Rozpocznij rozmowę…'}</span>
+                              </div>
+                              <div className="flex flex-col min-w-0 flex-1 overflow-hidden">
+                                <NickLabel user={c.peer} fallbackColor="var(--md-sys-color-on-surface)" className="text-sm font-semibold truncate" />
+                                <span className="text-[11px] truncate" style={{ color: 'var(--md-sys-color-outline)' }}>{last || 'Rozpocznij rozmowę…'}</span>
                               </div>
                             </button>
                           );
@@ -4025,35 +3962,36 @@ export default function App() {
                                 return (
                                   <div
                                     key={r.id}
-                                    className="flex items-center gap-2 p-2 rounded-xl border border-white/[0.08] bg-black/20"
+                                    className="flex items-center gap-[var(--gap-md)] px-[var(--gap-md)] py-[var(--gap-sm)] rounded-md3-md"
+                                    style={{ background: 'var(--md-sys-color-surface-container)', border: '1px solid var(--md-sys-color-outline-variant)' }}
                                   >
-                                    <div className="relative shrink-0">
-                                      {mAv ? (
-                                        <img src={mAv} alt="" className="w-8 h-8 rounded-[10px] object-cover border border-white/[0.1]" />
-                                      ) : (
-                                        <div className="w-8 h-8 rounded-[10px] bg-black border border-white/[0.1] flex items-center justify-center text-xs font-bold text-white">
-                                          {m.name.charAt(0)}
-                                        </div>
-                                      )}
-                                    </div>
+                                    {mAv ? (
+                                      <img src={mAv} alt="" className="w-8 h-8 rounded-full object-cover shrink-0" />
+                                    ) : (
+                                      <div className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold shrink-0" style={{ background: 'var(--md-sys-color-secondary-container)', color: 'var(--md-sys-color-on-secondary-container)' }}>
+                                        {m.name.charAt(0)}
+                                      </div>
+                                    )}
                                     <div className="flex flex-col min-w-0 flex-1">
-                                      <NickLabel user={m} fallbackColor="#e4e4e7" className="text-sm font-semibold truncate" />
-                                      <span className="text-[10px] text-zinc-500">chce dodać Cię do znajomych</span>
+                                      <NickLabel user={m} fallbackColor="var(--md-sys-color-on-surface)" className="text-sm font-semibold truncate" />
+                                      <span className="text-[11px]" style={{ color: 'var(--md-sys-color-outline)' }}>chce dodać Cię do znajomych</span>
                                     </div>
                                     <div className="flex shrink-0 gap-1">
                                       <button
                                         type="button"
                                         onClick={() => void acceptFriendByRequestId(r.id)}
-                                        className="px-2 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wide bg-[#00eeff]/20 text-[#00eeff] border border-[#00eeff]/30 hover:bg-[#00eeff]/30"
+                                        className="px-2 py-1 rounded-md3-sm text-[11px] font-semibold"
+                                        style={{ background: 'var(--md-sys-color-primary-container)', color: 'var(--md-sys-color-on-primary-container)' }}
                                       >
-                                        OK
+                                        Akceptuj
                                       </button>
                                       <button
                                         type="button"
                                         onClick={() => void rejectFriendByRequestId(r.id)}
-                                        className="px-2 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wide text-zinc-500 hover:text-white hover:bg-white/[0.06]"
+                                        className="px-2 py-1 rounded-md3-sm text-[11px] font-semibold"
+                                        style={{ color: 'var(--md-sys-color-on-surface-variant)' }}
                                       >
-                                        ×
+                                        Odrzuć
                                       </button>
                                     </div>
                                   </div>
@@ -4107,35 +4045,25 @@ export default function App() {
                                     key={m.id}
                                     type="button"
                                     onClick={() => void openDmForPeer(m.id)}
-                                    className={`flex items-center gap-3 p-2 rounded-xl border transition-colors text-zinc-300 hover:text-white w-full text-left group ${
-                                      active
-                                        ? 'bg-[#00eeff]/12 border-[#00eeff]/25'
-                                        : 'hover:bg-[#00eeff]/10 border-transparent hover:border-[#00eeff]/15'
-                                    }`}
+                                    className="menu-btn"
+                                    data-active={active}
+                                    style={active ? { background: 'var(--md-sys-color-primary-container)', color: 'var(--md-sys-color-on-primary-container)' } : undefined}
                                   >
-                                    <div className="relative shrink-0">
+                                    <div className="relative shrink-0 flex-shrink-0">
                                       {mAv ? (
-                                        <img
-                                          src={mAv}
-                                          alt=""
-                                          className="w-8 h-8 rounded-[10px] object-cover border border-white/[0.1] group-hover:border-[#00eeff]/30 transition-colors"
-                                        />
+                                        <img src={mAv} alt="" className="w-8 h-8 rounded-full object-cover" />
                                       ) : (
-                                        <div className="w-8 h-8 rounded-[10px] bg-black border border-white/[0.1] flex items-center justify-center text-xs font-bold text-white group-hover:border-[#00eeff]/30 transition-colors">
+                                        <div className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold" style={{ background: 'var(--md-sys-color-secondary-container)', color: 'var(--md-sys-color-on-secondary-container)' }}>
                                           {m.name.charAt(0)}
                                         </div>
                                       )}
-                                      <div className="absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full bg-emerald-500 border-[3px] border-[#080808]" />
+                                      <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2" style={{ background: 'var(--color-status-online)', borderColor: 'var(--md-sys-color-surface-container-low)' }} />
                                     </div>
-                                    <div className="flex flex-col min-w-0 flex-1">
-                                      <NickLabel
-                                        user={m}
-                                        fallbackColor="#e4e4e7"
-                                        className="text-sm font-semibold truncate group-hover:text-[#00eeff] transition-colors"
-                                      />
-                                      <span className="text-[10px] text-zinc-500 truncate">Wyślij wiadomość</span>
+                                    <div className="flex flex-col min-w-0 flex-1 overflow-hidden">
+                                      <NickLabel user={m} fallbackColor="var(--md-sys-color-on-surface)" className="text-sm font-semibold truncate" />
+                                      <span className="text-[11px] truncate" style={{ color: 'var(--md-sys-color-outline)' }}>Wyślij wiadomość</span>
                                     </div>
-                                    <UserCheck size={16} className="shrink-0 text-emerald-500/90" aria-hidden />
+                                    <UserCheck size={14} style={{ color: 'var(--color-status-online)', flexShrink: 0 }} />
                                   </button>
                                 );
                               })}
@@ -4164,38 +4092,28 @@ export default function App() {
                               const isFr = acceptedFriends.some((f) => f.id === m.id);
                               const pendOut = friendOutgoing.some((o) => o.to.id === m.id);
                               const pendIn = friendIncoming.some((i) => i.from.id === m.id);
-                              return (
+                                return (
                                 <button
                                   key={m.id}
                                   type="button"
                                   onClick={() => void openDmForPeer(m.id)}
-                                  className={`flex items-center gap-3 p-2 rounded-xl border transition-colors text-zinc-300 hover:text-white w-full text-left group ${
-                                    active
-                                      ? 'bg-[#00eeff]/12 border-[#00eeff]/25'
-                                      : 'hover:bg-[#00eeff]/10 border-transparent hover:border-[#00eeff]/15'
-                                  }`}
+                                  className="menu-btn"
+                                  data-active={active}
+                                  style={active ? { background: 'var(--md-sys-color-primary-container)', color: 'var(--md-sys-color-on-primary-container)' } : undefined}
                                 >
-                                  <div className="relative shrink-0">
+                                  <div className="relative shrink-0 flex-shrink-0">
                                     {mAv ? (
-                                      <img
-                                        src={mAv}
-                                        alt=""
-                                        className="w-8 h-8 rounded-[10px] object-cover border border-white/[0.1] group-hover:border-[#00eeff]/30 transition-colors"
-                                      />
+                                      <img src={mAv} alt="" className="w-8 h-8 rounded-full object-cover" />
                                     ) : (
-                                      <div className="w-8 h-8 rounded-[10px] bg-black border border-white/[0.1] flex items-center justify-center text-xs font-bold text-white group-hover:border-[#00eeff]/30 transition-colors">
+                                      <div className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold" style={{ background: 'var(--md-sys-color-secondary-container)', color: 'var(--md-sys-color-on-secondary-container)' }}>
                                         {m.name.charAt(0)}
                                       </div>
                                     )}
-                                    <div className="absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full bg-emerald-500 border-[3px] border-[#080808]" />
+                                    <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2" style={{ background: 'var(--color-status-online)', borderColor: 'var(--md-sys-color-surface-container-low)' }} />
                                   </div>
-                                  <div className="flex flex-col min-w-0 flex-1">
-                                    <NickLabel
-                                      user={m}
-                                      fallbackColor="#e4e4e7"
-                                      className="text-sm font-semibold truncate group-hover:text-[#00eeff] transition-colors"
-                                    />
-                                    <span className="text-[10px] text-zinc-500 truncate">
+                                  <div className="flex flex-col min-w-0 flex-1 overflow-hidden">
+                                    <NickLabel user={m} fallbackColor="var(--md-sys-color-on-surface)" className="text-sm font-semibold truncate" />
+                                    <span className="text-[11px] truncate" style={{ color: 'var(--md-sys-color-outline)' }}>
                                       {!API_BASE_URL && lastLocal ? lastLocal.content : 'Wyślij wiadomość'}
                                     </span>
                                   </div>
@@ -4207,21 +4125,22 @@ export default function App() {
                                       role="presentation"
                                     >
                                       {isFr ? (
-                                        <span title="Znajomy">
-                                          <UserCheck size={16} className="text-emerald-500" />
-                                        </span>
+                                        <UserCheck size={14} style={{ color: 'var(--color-status-online)' }} />
                                       ) : pendIn ? (
-                                        <span className="text-[10px] text-[#00eeff] font-semibold px-1">Zaproszenie</span>
+                                        <span className="text-[10px] font-semibold px-1" style={{ color: 'var(--md-sys-color-primary)' }}>Zaproszenie</span>
                                       ) : pendOut ? (
-                                        <span className="text-[10px] text-zinc-500 px-1">Wysłano</span>
+                                        <span className="text-[10px] px-1" style={{ color: 'var(--md-sys-color-outline)' }}>Wysłano</span>
                                       ) : (
                                         <button
                                           type="button"
                                           title="Zaproś do znajomych"
                                           onClick={() => void sendFriendRequest(m.id)}
-                                          className="p-1.5 rounded-lg text-zinc-400 hover:text-[#00eeff] hover:bg-[#00eeff]/10 border border-transparent hover:border-[#00eeff]/20"
+                                          className="p-1.5 rounded-md3-sm transition-colors"
+                                          style={{ color: 'var(--md-sys-color-on-surface-variant)' }}
+                                          onMouseEnter={e => (e.currentTarget.style.background = 'var(--md-sys-color-surface-container)')}
+                                          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                                         >
-                                          <UserPlus size={16} />
+                                          <UserPlus size={14} />
                                         </button>
                                       )}
                                     </span>
@@ -4236,276 +4155,247 @@ export default function App() {
                 )}
               </div>
             ) : (
-            <div className="flex-1 overflow-y-auto custom-scrollbar py-2 px-4 flex flex-col gap-6">
-              
-              {/* KANAŁY BEZ KATEGORII */}
-              {uncategorizedChannels.length > 0 && (
-                <div className="flex flex-col gap-1">
-                  {uncategorizedChannels.map(channel => {
-                    const isVoice = channel.type === 'voice';
-                    const isActiveVoice = activeVoiceChannel === channel.id;
-                    const isViewed = activeChannel === channel.id;
-                    const participantsOnChannel = isVoice ? userIdsOnVoiceChannel(channel.id) : [];
-                    const sidebarVoiceVad = isVoice && activeVoiceChannel === channel.id && voicePhase === 'connected';
+            <div className="flex-1 overflow-y-auto custom-scrollbar py-2 flex flex-col min-h-0">
 
-                    return (
-                      <div key={channel.id} className="flex flex-col">
-                        <button 
-                          onClick={() => handleChannelClick(channel)} 
-                          onContextMenu={(e) => handleContextMenu(e, 'channel', channel)}
-                          className="channel-row flex items-center gap-2.5 py-1.5 px-3 rounded-lg text-sm transition-all duration-200 group border border-transparent min-w-0" 
-                          style={isViewed || isActiveVoice ? { backgroundColor: `${channel.color}15`, borderColor: `${channel.color}30` } : { '--hover-bg': `${channel.color}10`, '--hover-border': `${channel.color}20` } as any}
-                        >
-                          {isVoice && isActiveVoice ? (
-                            <div className="w-4 h-4 flex items-center justify-center relative shrink-0"><Volume2 size={16} style={{ color: channel.color }} className="animate-pulse" /></div>
-                          ) : (
-                            <channel.icon size={16} style={{ color: isViewed ? channel.color : undefined }} className={`shrink-0 ${!isViewed ? "text-zinc-500 group-hover:brightness-150 transition-all" : ""}`} />
-                          )}
-                          <span className={`truncate min-w-0 flex-1 text-left ${isViewed || isActiveVoice ? 'font-semibold' : 'text-zinc-400 group-hover:text-zinc-200'}`} style={isViewed || isActiveVoice ? { color: channel.color, textShadow: `0 0 10px ${channel.color}40` } : {}}>{channel.name}</span>
-                          {isVoice && participantsOnChannel.length > 0 && (
-                            <span className="shrink-0 text-[10px] font-bold tabular-nums text-zinc-500 px-1.5 py-0.5 rounded-md bg-white/[0.04] border border-white/[0.06]" title="Na kanale głosowym">
-                              {participantsOnChannel.length}
-                            </span>
-                          )}
-                          {!isVoice && channel.unread && !isViewed && <div className="ml-auto w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: channel.color, boxShadow: `0 0 8px ${channel.color}` }}></div>}
-                        </button>
-                        
-                        {isVoice && participantsOnChannel.length > 0 && (
-                          <div className="ml-8 mt-1.5 mb-1 flex flex-col gap-1.5">
-                            {participantsOnChannel.map((uid) => {
-                              const u = getUser(uid);
-                              const isMe = uid === myUserId;
-                              return (
-                                <VoiceSidebarParticipantRow
-                                  key={uid}
-                                  user={u}
-                                  isMe={isMe}
-                                  voicePhaseConnected={voicePhase === 'connected'}
-                                  sidebarVoiceVad={sidebarVoiceVad}
-                                  isSpeaking={!!speakingPeers[uid]}
-                                  onContextMenu={(e) => handleContextMenu(e, 'user', u)}
-                                />
-                              );
-                            })}
-                          </div>
+              {/* Channel helper */}
+              {(() => {
+                const renderChannelRow = (channel: typeof uncategorizedChannels[0]) => {
+                  const isVoice = channel.type === 'voice';
+                  const isActiveVoice = activeVoiceChannel === channel.id;
+                  const isViewed = activeChannel === channel.id;
+                  const isActive = isViewed || isActiveVoice;
+                  const participantsOnChannel = isVoice ? userIdsOnVoiceChannel(channel.id) : [];
+                  const sidebarVoiceVad = isVoice && activeVoiceChannel === channel.id && voicePhase === 'connected';
+                  return (
+                    <div key={channel.id} className="flex flex-col">
+                      <button
+                        onClick={() => handleChannelClick(channel)}
+                        onContextMenu={(e) => handleContextMenu(e, 'channel', channel)}
+                        className="menu-btn"
+                        data-active={isActive}
+                        style={isActive
+                          ? { background: 'var(--md-sys-color-primary-container)', color: 'var(--md-sys-color-on-primary-container)' }
+                          : undefined}
+                      >
+                        {isVoice && isActiveVoice ? (
+                          <Volume2 size={16} className="shrink-0" style={{ color: 'var(--md-sys-color-primary)' }} />
+                        ) : (
+                          <channel.icon size={16} className="shrink-0" style={{ color: isActive ? 'inherit' : 'var(--md-sys-color-on-surface-variant)' }} />
                         )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-
-              {/* RENDER KATEGORII */}
-              {currentServerCategories.map(cat => {
-                const catChannels = currentServerChannels.filter(c => c.categoryId === cat.id);
-                return (
-                  <div key={cat.id}>
-                    <div 
-                      className="mb-2 px-2 flex items-center justify-between text-zinc-600 group cursor-pointer"
-                      onContextMenu={(e) => handleContextMenu(e, 'category', cat)}
-                    >
-                      <div className="flex items-center gap-1 hover:text-zinc-300 transition-colors" onClick={() => toggleCategory(cat.id)}>
-                        <ChevronDown size={14} className={`transition-transform ${!cat.isExpanded ? '-rotate-90' : ''}`} />
-                        <span className="text-[10px] uppercase tracking-[0.2em] font-bold">{cat.name}</span>
-                      </div>
-                      <Plus size={14} onClick={(e) => { e.stopPropagation(); setCreateChannelModal({ categoryId: cat.id }); setNewChannelType('text'); }} className="opacity-0 group-hover:opacity-100 hover:text-[#00eeff] transition-all" />
+                        <span className="truncate min-w-0 flex-1 text-left font-medium">{channel.name}</span>
+                        {isVoice && participantsOnChannel.length > 0 && (
+                          <span
+                            className="shrink-0 text-[11px] font-semibold tabular-nums px-1.5 py-0.5 rounded-md3-xs"
+                            style={{ background: 'var(--md-sys-color-surface-container)', color: 'var(--md-sys-color-on-surface-variant)' }}
+                          >
+                            {participantsOnChannel.length}
+                          </span>
+                        )}
+                        {!isVoice && channel.unread && !isViewed && (
+                          <span
+                            className="shrink-0 w-2 h-2 rounded-full"
+                            style={{ background: 'var(--md-sys-color-primary)' }}
+                            aria-label="Nieprzeczytane"
+                          />
+                        )}
+                      </button>
+                      {isVoice && participantsOnChannel.length > 0 && (
+                        <div className="ms-[calc(var(--gap-md)*2+16px)] flex flex-col gap-0.5 mt-0.5 mb-1">
+                          {participantsOnChannel.map((uid) => {
+                            const u = getUser(uid);
+                            return (
+                              <VoiceSidebarParticipantRow
+                                key={uid}
+                                user={u}
+                                isMe={uid === myUserId}
+                                voicePhaseConnected={voicePhase === 'connected'}
+                                sidebarVoiceVad={sidebarVoiceVad}
+                                isSpeaking={!!speakingPeers[uid]}
+                                onContextMenu={(e) => handleContextMenu(e, 'user', u)}
+                              />
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
-                    
-                    {cat.isExpanded && (
-                      <div className="flex flex-col gap-1">
-                        {catChannels.length === 0 && <span className="px-4 py-1 text-[11px] text-zinc-600 italic">Kategoria jest pusta</span>}
-                        {catChannels.map(channel => {
-                          const isVoice = channel.type === 'voice';
-                          const isActiveVoice = activeVoiceChannel === channel.id;
-                          const isViewed = activeChannel === channel.id;
-                          const participantsOnChannel = isVoice ? userIdsOnVoiceChannel(channel.id) : [];
-                          const sidebarVoiceVad = isVoice && activeVoiceChannel === channel.id && voicePhase === 'connected';
-
-                          return (
-                            <div key={channel.id} className="flex flex-col">
-                              <button 
-                                onClick={() => handleChannelClick(channel)} 
-                                onContextMenu={(e) => handleContextMenu(e, 'channel', channel)}
-                                className="channel-row flex items-center gap-2.5 py-1.5 px-3 rounded-lg text-sm transition-all duration-200 group border border-transparent min-w-0" 
-                                style={isViewed || isActiveVoice ? { backgroundColor: `${channel.color}15`, borderColor: `${channel.color}30` } : { '--hover-bg': `${channel.color}10`, '--hover-border': `${channel.color}20` } as any}
-                              >
-                                {isVoice && isActiveVoice ? (
-                                  <div className="w-4 h-4 flex items-center justify-center relative shrink-0"><Volume2 size={16} style={{ color: channel.color }} className="animate-pulse" /></div>
-                                ) : (
-                                  <channel.icon size={16} style={{ color: isViewed ? channel.color : undefined }} className={`shrink-0 ${!isViewed ? "text-zinc-500 group-hover:brightness-150 transition-all" : ""}`} />
-                                )}
-                                <span className={`truncate min-w-0 flex-1 text-left ${isViewed || isActiveVoice ? 'font-semibold' : 'text-zinc-400 group-hover:text-zinc-200'}`} style={isViewed || isActiveVoice ? { color: channel.color, textShadow: `0 0 10px ${channel.color}40` } : {}}>{channel.name}</span>
-                                {isVoice && participantsOnChannel.length > 0 && (
-                                  <span className="shrink-0 text-[10px] font-bold tabular-nums text-zinc-500 px-1.5 py-0.5 rounded-md bg-white/[0.04] border border-white/[0.06]" title="Na kanale głosowym">
-                                    {participantsOnChannel.length}
-                                  </span>
-                                )}
-                                {!isVoice && channel.unread && !isViewed && <div className="ml-auto w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: channel.color, boxShadow: `0 0 8px ${channel.color}` }}></div>}
-                              </button>
-                              
-                              {/* Voice Participants */}
-                              {isVoice && participantsOnChannel.length > 0 && (
-                                <div className="ml-8 mt-1.5 mb-1 flex flex-col gap-1.5">
-                                  {participantsOnChannel.map((uid) => {
-                                    const u = getUser(uid);
-                                    const isMe = uid === myUserId;
-                                    return (
-                                      <VoiceSidebarParticipantRow
-                                        key={uid}
-                                        user={u}
-                                        isMe={isMe}
-                                        voicePhaseConnected={voicePhase === 'connected'}
-                                        sidebarVoiceVad={sidebarVoiceVad}
-                                        isSpeaking={!!speakingPeers[uid]}
-                                        onContextMenu={(e) => handleContextMenu(e, 'user', u)}
-                                      />
-                                    );
-                                  })}
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
+                  );
+                };
+                return (
+                  <>
+                    {uncategorizedChannels.length > 0 && (
+                      <div className="flex flex-col mb-2">
+                        {uncategorizedChannels.map(renderChannelRow)}
                       </div>
                     )}
-                  </div>
+                    {currentServerCategories.map(cat => {
+                      const catChannels = currentServerChannels.filter(c => c.categoryId === cat.id);
+                      return (
+                        <div key={cat.id} className="mb-2">
+                          <div
+                            className="flex items-center justify-between px-[calc(var(--gap-lg)+5px)] pt-2.5 pb-1 cursor-pointer select-none group"
+                            style={{ color: 'var(--md-sys-color-on-surface-variant)' }}
+                            onClick={() => toggleCategory(cat.id)}
+                            onContextMenu={(e) => handleContextMenu(e, 'category', cat)}
+                          >
+                            <div className="flex items-center gap-[var(--gap-sm)] flex-1 min-w-0">
+                              <ChevronDown
+                                size={12}
+                                className="transition-transform duration-200 flex-shrink-0"
+                                style={{ transform: !cat.isExpanded ? 'rotate(-90deg)' : 'none' }}
+                              />
+                              <span className="text-[11px] uppercase tracking-[0.15em] font-bold truncate"
+                                style={{ color: 'var(--md-sys-color-on-surface-variant)' }}
+                              >{cat.name}</span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); setCreateChannelModal({ categoryId: cat.id }); setNewChannelType('text'); }}
+                              className="opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-white/10 flex-shrink-0"
+                            >
+                              <Plus size={14} />
+                            </button>
+                          </div>
+                          <div className="devcord-category-body flex flex-col" data-open={cat.isExpanded ? 'true' : 'false'}>
+                            {catChannels.length === 0 && (
+                              <span className="px-[var(--gap-lg)] py-1 text-[11px] italic" style={{ color: 'var(--md-sys-color-outline)' }}>
+                                Kategoria jest pusta
+                              </span>
+                            )}
+                            {catChannels.map(renderChannelRow)}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </>
                 );
-              })}
+              })()}
             </div>
             )}
 
             {API_BASE_URL && activeVoiceChannel && (
-              <div className="shrink-0 px-3 py-2.5 border-t border-white/[0.06] bg-black/35 space-y-2">
+              <div
+                className="shrink-0 px-[var(--gap-md)] py-[var(--gap-md)] flex flex-col gap-[var(--gap-sm)]"
+                style={{ borderTop: '1px solid var(--md-sys-color-outline-variant)', background: 'var(--md-sys-color-surface-container)' }}
+              >
+                {/* Connection status */}
                 <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-1.5 min-w-0">
-                    <Wifi size={14} className={`shrink-0 ${voicePingOk ? 'text-emerald-400' : 'text-red-400'}`} />
+                  <div className="flex items-center gap-[var(--gap-sm)] min-w-0">
+                    <div
+                      className="w-2 h-2 rounded-full flex-shrink-0"
+                      style={{ background: voicePhase === 'connected' ? 'var(--color-status-online)' : voicePhase === 'error' ? 'var(--md-sys-color-error)' : 'var(--color-status-idle)' }}
+                    />
                     <span
-                      className={`text-[10px] font-semibold leading-tight truncate ${voicePingOk ? 'text-emerald-400' : 'text-red-400'}`}
+                      className="text-[11px] font-semibold truncate"
+                      style={{ color: voicePhase === 'connected' ? 'var(--md-sys-color-primary)' : voicePhase === 'error' ? 'var(--md-sys-color-error)' : 'var(--md-sys-color-outline)' }}
                     >
-                      {voicePingOk ? 'Serwer odpowiada' : 'Brak odpowiedzi'}
+                      {voicePhase === 'connected' ? 'Połączono' : voicePhase === 'error' ? 'Błąd' : voicePhase === 'idle' ? 'Rozłączono' : 'Łączenie…'}
+                    </span>
+                    <span className="text-[10px] truncate" style={{ color: 'var(--md-sys-color-outline)' }}>
+                      {channels.find((c) => c.id === activeVoiceChannel)?.name ?? 'Kanał głosowy'}
                     </span>
                   </div>
-                  <span className="text-[10px] text-zinc-500 tabular-nums shrink-0 font-mono text-right max-w-[55%] leading-tight">
-                    {voicePingRttMs != null ? (
-                      <>
-                        RTT {voicePingRttMs} ms
-                        {voicePingServerMs != null ? ` · srv ${voicePingServerMs} ms` : ''}
-                      </>
-                    ) : (
-                      '—'
-                    )}
-                  </span>
+                  {voicePingRttMs != null && (
+                    <span className="text-[10px] shrink-0 font-mono tabular-nums" style={{ color: 'var(--md-sys-color-outline)' }}>
+                      {voicePingRttMs}ms
+                    </span>
+                  )}
                 </div>
-                    <div className="flex items-start justify-between gap-2 pt-1 border-t border-white/[0.04]">
-                      <div className="min-w-0 flex-1">
-                        <p
-                          className={`text-[11px] font-bold leading-tight ${
-                            voicePhase === 'connected'
-                              ? 'text-emerald-400'
-                              : voicePhase === 'error'
-                                ? 'text-red-400'
-                                : 'text-amber-400'
-                          }`}
-                        >
-                          {voicePhase === 'connected'
-                            ? 'Nawiązano połączenie'
-                            : voicePhase === 'error'
-                              ? 'Błąd połączenia głosowego'
-                              : voicePhase === 'idle'
-                                ? 'Rozłączono'
-                                : 'Łączenie…'}
-                        </p>
-                        <p className="text-[10px] text-zinc-500 truncate mt-0.5 flex items-center gap-1">
-                          <Radio size={10} className="shrink-0 text-zinc-600" />
-                          {servers.find((s) => s.id === activeServer)?.name ?? 'Serwer'} ·{' '}
-                          {channels.find((c) => c.id === activeVoiceChannel)?.name ?? 'Kanał głosowy'}
-                        </p>
-                        {voicePhase === 'error' && voiceError ? (
-                          <p className="text-[10px] text-red-400/90 mt-1 leading-snug break-words" title={voiceError}>
-                            {voiceError}
-                          </p>
-                        ) : null}
-                      </div>
-                    </div>
-                    <div className="flex gap-1.5">
-                      <button
-                        type="button"
-                        title={
-                          voicePhase !== 'connected'
-                            ? 'Najpierw połączenie z kanałem'
-                            : cameraStream
-                              ? 'Wyłącz kamerę'
-                              : 'Włącz kamerę'
-                        }
-                        disabled={voicePhase !== 'connected'}
-                        onClick={() => void toggleCameraShare()}
-                        className={`flex-1 h-9 rounded-lg flex items-center justify-center border transition-colors ${
-                          cameraStream
-                            ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
-                            : 'bg-white/[0.05] border-white/[0.08] text-zinc-300 hover:bg-white/[0.08]'
-                        } disabled:opacity-40 disabled:pointer-events-none`}
-                      >
-                        <Video size={16} />
-                      </button>
-                      <button
-                        type="button"
-                        title={
-                          voicePhase !== 'connected'
-                            ? 'Najpierw połączenie z kanałem'
-                            : screenStream
-                              ? 'Zakończ udostępnianie ekranu'
-                              : 'Udostępnij ekran'
-                        }
-                        disabled={voicePhase !== 'connected'}
-                        onClick={() => void toggleScreenShare()}
-                        className={`flex-1 h-9 rounded-lg flex items-center justify-center border transition-colors ${
-                          screenStream
-                            ? 'bg-[#00eeff]/20 border-[#00eeff]/40 text-[#00eeff]'
-                            : 'bg-white/[0.05] border-white/[0.08] text-zinc-300 hover:bg-white/[0.08]'
-                        } disabled:opacity-40 disabled:pointer-events-none`}
-                      >
-                        <MonitorUp size={16} />
-                      </button>
-                    </div>
+                {voicePhase === 'error' && voiceError && (
+                  <p className="text-[10px] leading-snug break-words" style={{ color: 'var(--md-sys-color-error)' }}>{voiceError}</p>
+                )}
+                {/* Action buttons */}
+                <div className="voice-actions self-stretch justify-center" style={{ borderRadius: 'var(--borderRadius-md)', padding: '4px', gap: 4 }}>
+                  <button
+                    type="button"
+                    title={cameraStream ? 'Wyłącz kamerę' : 'Włącz kamerę'}
+                    disabled={voicePhase !== 'connected'}
+                    onClick={() => void toggleCameraShare()}
+                    className="flex-1 h-8 rounded-md3-sm flex items-center justify-center transition-colors disabled:opacity-40"
+                    style={{
+                      background: cameraStream ? 'var(--md-sys-color-primary-container)' : 'var(--md-sys-color-surface-container-high)',
+                      color: cameraStream ? 'var(--md-sys-color-on-primary-container)' : 'var(--md-sys-color-on-surface-variant)',
+                    }}
+                  >
+                    <Video size={15} />
+                  </button>
+                  <button
+                    type="button"
+                    title={screenStream ? 'Zakończ udostępnianie' : 'Udostępnij ekran'}
+                    disabled={voicePhase !== 'connected'}
+                    onClick={() => void toggleScreenShare()}
+                    className="flex-1 h-8 rounded-md3-sm flex items-center justify-center transition-colors disabled:opacity-40"
+                    style={{
+                      background: screenStream ? 'var(--md-sys-color-primary-container)' : 'var(--md-sys-color-surface-container-high)',
+                      color: screenStream ? 'var(--md-sys-color-on-primary-container)' : 'var(--md-sys-color-on-surface-variant)',
+                    }}
+                  >
+                    <MonitorUp size={15} />
+                  </button>
+                </div>
               </div>
             )}
 
-            <div className="h-16 border-t border-white/[0.04] bg-black/40 p-2 flex items-center z-50">
-              <div onClick={() => setIsSettingsOpen(true)} className="flex items-center gap-2 flex-1 hover:bg-white/[0.05] p-1.5 rounded-lg cursor-pointer transition-colors">
-                <div className="relative">
+            {/* User bar */}
+            <div
+              className="shrink-0 flex items-center gap-[var(--gap-sm)] px-[var(--gap-sm)] py-[var(--gap-sm)] z-50"
+              style={{ borderTop: '1px solid var(--md-sys-color-outline-variant)', background: 'var(--md-sys-color-surface-container)' }}
+            >
+              <button
+                type="button"
+                onClick={() => setIsSettingsOpen(true)}
+                className="flex items-center gap-[var(--gap-md)] flex-1 min-w-0 px-[var(--gap-sm)] py-[var(--gap-sm)] rounded-md3-xl cursor-pointer transition-colors"
+                style={{ color: 'var(--md-sys-color-on-surface)' }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'var(--md-sys-color-surface-container-high)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+              >
+                <div className="relative flex-shrink-0">
                   {localUserAvatar?.trim() ? (
-                    <img src={localUserAvatar} alt="" className="w-8 h-8 rounded-lg object-cover border border-white/[0.1] shadow-[0_0_15px_rgba(255,255,255,0.08)]" />
+                    <img src={localUserAvatar} alt="" className="w-8 h-8 rounded-full object-cover" />
                   ) : (
-                    <div className="w-8 h-8 rounded-lg bg-black border border-white/[0.1] text-white flex items-center justify-center font-bold text-sm shadow-[0_0_15px_rgba(255,255,255,0.1)]">{localUserName.charAt(0)}</div>
+                    <div
+                      className="w-8 h-8 rounded-full flex items-center justify-center font-bold text-sm"
+                      style={{ background: 'var(--md-sys-color-secondary-container)', color: 'var(--md-sys-color-on-secondary-container)' }}
+                    >
+                      {localUserName.charAt(0)}
+                    </div>
                   )}
-                  <div className="absolute -bottom-1 -right-1 w-3 h-3 bg-emerald-500 border-2 border-[#080808] rounded-full shadow-[0_0_10px_rgba(16,185,129,0.5)]"></div>
+                  <div
+                    className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2"
+                    style={{ background: 'var(--color-status-online)', borderColor: 'var(--md-sys-color-surface-container)' }}
+                  />
                 </div>
                 <div className="flex flex-col overflow-hidden min-w-0">
                   <NickLabel
                     user={{ name: localUserName, nickColor: localUserColor, nickGlow: localUserGlow }}
-                    fallbackColor="#fff"
-                    className="text-xs font-bold truncate leading-tight block"
+                    fallbackColor="var(--md-sys-color-on-surface)"
+                    className="text-sm font-semibold truncate leading-tight"
                   />
-                  <span className="text-[10px] text-zinc-500 truncate leading-tight">{API_BASE_URL ? 'Zalogowany' : 'Ty (Gość)'}</span>
+                  <span className="text-[11px] truncate leading-tight" style={{ color: 'var(--md-sys-color-outline)' }}>
+                    {API_BASE_URL ? 'Online' : 'Gość'}
+                  </span>
                 </div>
-              </div>
-              <div className="flex items-center gap-0.5 text-zinc-500">
-                <button onClick={() => setIsSettingsOpen(true)} className="p-1.5 hover:text-white hover:bg-white/[0.05] rounded-md transition-colors"><Settings size={16} /></button>
-              </div>
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsSettingsOpen(true)}
+                className="flex-shrink-0 p-1.5 rounded-md3-sm transition-colors"
+                style={{ color: 'var(--md-sys-color-on-surface-variant)' }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'var(--md-sys-color-surface-container-high)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                title="Ustawienia"
+              >
+                <Settings size={16} />
+              </button>
             </div>
-          </aside>
+            </ChannelSidebar>
+          </div>
         )}
 
         {/* --- 2. MAIN VIEW (CZAT / VOICE) --- */}
-        <main
-          className={`flex-1 flex flex-col relative overflow-hidden z-0 border-l transition-all duration-500 devcord-main ${
-            localTheme === 'light' ? 'bg-zinc-100 border-zinc-200' : 'bg-[#0a0a0c] border-white/[0.02]'
-          }`}
-        >
+        <ChatColumn>
           {activeServer === '' ? (
             dmPeerId && myUserId ? (
-              <div className="flex-1 flex flex-col bg-[#0a0a0c] relative overflow-hidden min-h-0">
-                <div className="absolute inset-0 bg-gradient-to-b from-[#00eeff]/[0.06] to-transparent pointer-events-none opacity-50" />
+              <div className="flex-1 flex flex-col relative overflow-hidden min-h-0" style={{ background: 'var(--md-sys-color-surface-container-low)' }}>
                 {(() => {
                   const dmPeer = workspaceMembers.find((m) => m.id === dmPeerId) ?? getUser(dmPeerId);
                   const tKey = dmThreadKey(myUserId, dmPeerId);
@@ -4556,50 +4446,47 @@ export default function App() {
                   };
                   return (
                     <>
-                      <header className="shrink-0 h-16 flex items-center justify-between px-6 border-b border-white/[0.06] bg-[#0a0a0c]/90 backdrop-blur-md z-10">
-                        <div className="flex items-center gap-3 min-w-0">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setDmPeerId(null);
-                              setDmActiveConversationId(null);
-                              writePersonalHomePath();
-                            }}
-                            className="text-xs text-zinc-500 hover:text-[#00eeff] font-semibold uppercase tracking-widest shrink-0"
-                          >
-                            ← Terminal
-                          </button>
-                          <div className="w-px h-6 bg-white/[0.08]" />
+                      <header
+                        className="shrink-0 h-12 flex items-center justify-between px-4 gap-[var(--gap-md)] z-10"
+                        style={{ borderBottom: '1px solid var(--md-sys-color-outline-variant)', background: 'var(--md-sys-color-surface-container-low)' }}
+                      >
+                        <div className="flex items-center gap-[var(--gap-md)] min-w-0 flex-1 overflow-hidden">
                           {dmPeer.avatarUrl?.trim() ? (
-                            <img src={dmPeer.avatarUrl} alt="" className="w-9 h-9 rounded-xl object-cover border border-white/[0.08]" />
+                            <img src={dmPeer.avatarUrl} alt="" className="w-8 h-8 rounded-full object-cover flex-shrink-0" />
                           ) : (
-                            <div className="w-9 h-9 rounded-xl bg-black border border-white/[0.08] flex items-center justify-center text-xs font-bold text-white">
+                            <div
+                              className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0"
+                              style={{ background: 'var(--md-sys-color-secondary-container)', color: 'var(--md-sys-color-on-secondary-container)' }}
+                            >
                               {dmPeer.name.charAt(0)}
                             </div>
                           )}
-                          <div className="min-w-0">
-                            <NickLabel user={dmPeer} fallbackColor="#f4f4f5" className="font-bold text-base truncate block" />
-                            <p className="text-[10px] text-zinc-500 uppercase tracking-widest">Wiadomość bezpośrednia</p>
-                            {API_BASE_URL &&
-                              Object.keys(dmTypingUsers).filter((u) => u !== myUserId).length > 0 && (
-                                <p className="text-[10px] text-[#00eeff]/90 mt-0.5 truncate">
-                                  {(() => {
-                                    const ids = Object.keys(dmTypingUsers).filter((u) => u !== myUserId);
-                                    const names = ids.map((id) => getUser(id).name);
-                                    if (names.length === 1) return `${names[0]} pisze…`;
-                                    if (names.length === 2) return `${names[0]} i ${names[1]} piszą…`;
-                                    return `${names[0]}, ${names[1]} i ${names.length - 2} innych pisze…`;
-                                  })()}
-                                </p>
-                              )}
+                          <div className="min-w-0 overflow-hidden">
+                            <NickLabel user={dmPeer} fallbackColor="var(--md-sys-color-on-surface)" className="font-semibold text-[15px] truncate block leading-tight" />
+                            {API_BASE_URL && Object.keys(dmTypingUsers).filter((u) => u !== myUserId).length > 0 ? (
+                              <p className="text-[11px] truncate leading-tight" style={{ color: 'var(--md-sys-color-primary)' }}>
+                                {(() => {
+                                  const ids = Object.keys(dmTypingUsers).filter((u) => u !== myUserId);
+                                  const names = ids.map((id) => getUser(id).name);
+                                  if (names.length === 1) return `${names[0]} pisze…`;
+                                  if (names.length === 2) return `${names[0]} i ${names[1]} piszą…`;
+                                  return `${names[0]}, ${names[1]} i ${names.length - 2} innych pisze…`;
+                                })()}
+                              </p>
+                            ) : (
+                              <p className="text-[11px] leading-tight truncate" style={{ color: 'var(--md-sys-color-outline)' }}>Wiadomość bezpośrednia</p>
+                            )}
                           </div>
                         </div>
-                        <div className="flex items-center gap-1 shrink-0">
+                        <div className="flex items-center gap-0.5 shrink-0">
                           <button
                             type="button"
                             title="Rozmowa głosowa PV"
                             onClick={() => void startDmCall('audio')}
-                            className="p-2.5 rounded-xl text-zinc-400 hover:text-[#00eeff] hover:bg-[#00eeff]/10 border border-transparent hover:border-[#00eeff]/25 transition-all"
+                            className="p-2 rounded-md3-sm transition-colors"
+                            style={{ color: 'var(--md-sys-color-on-surface-variant)' }}
+                            onMouseEnter={e => (e.currentTarget.style.background = 'var(--md-sys-color-surface-container)')}
+                            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                           >
                             <Phone size={18} />
                           </button>
@@ -4607,61 +4494,80 @@ export default function App() {
                             type="button"
                             title="Rozmowa wideo PV"
                             onClick={() => void startDmCall('video')}
-                            className="p-2.5 rounded-xl text-zinc-400 hover:text-[#00eeff] hover:bg-[#00eeff]/10 border border-transparent hover:border-[#00eeff]/25 transition-all"
+                            className="p-2 rounded-md3-sm transition-colors"
+                            style={{ color: 'var(--md-sys-color-on-surface-variant)' }}
+                            onMouseEnter={e => (e.currentTarget.style.background = 'var(--md-sys-color-surface-container)')}
+                            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                           >
                             <Video size={18} />
                           </button>
                           <button
                             type="button"
                             onClick={() => setProfileCardUser(dmPeer)}
-                            className="p-2.5 rounded-xl text-zinc-400 hover:text-white hover:bg-white/[0.06] border border-white/[0.06] transition-all ml-1"
+                            className="p-2 rounded-md3-sm transition-colors"
+                            style={{ color: 'var(--md-sys-color-on-surface-variant)' }}
+                            onMouseEnter={e => (e.currentTarget.style.background = 'var(--md-sys-color-surface-container)')}
+                            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                           >
                             <User size={18} />
                           </button>
                         </div>
                       </header>
-                      <div className="flex-1 overflow-y-auto custom-scrollbar px-4 py-6 relative z-10">
-                        <div className="w-full max-w-none flex flex-col gap-3 pb-28">
+                      <div className="flex-1 overflow-y-auto custom-scrollbar px-4 py-3 relative z-10">
+                        <div className="w-full max-w-none flex flex-col pb-4">
                           {dms.length === 0 ? (
-                            <div className="rounded-2xl border border-dashed border-white/[0.1] bg-black/30 p-8 text-center text-zinc-500 text-sm">
-                              Zacznij rozmowę z <span className="text-zinc-300 font-semibold">{dmPeer.name}</span>.
+                            <div
+                              className="rounded-md3-md p-8 text-center text-sm"
+                              style={{ border: '1px dashed var(--md-sys-color-outline-variant)', color: 'var(--md-sys-color-on-surface-variant)' }}
+                            >
+                              Zacznij rozmowę z <span className="font-semibold" style={{ color: 'var(--md-sys-color-on-surface)' }}>{dmPeer.name}</span>.
                               {API_BASE_URL
                                 ? ' Historia jest na serwerze i synchronizowana między urządzeniami.'
                                 : ' Historia jest zapisana lokalnie w tej przeglądarce.'}
                             </div>
                           ) : (
                             dms.map((row, idx, arr) => {
-                              const showHeader = idx === 0 || arr[idx - 1].userId !== row.userId;
+                              const isTail = idx > 0 && arr[idx - 1].userId === row.userId;
                               const u = getUser(row.userId);
                               const isMe = row.userId === myUserId;
                               const avatarSrc = u.avatarUrl?.trim()
                                 ? resolveMediaUrl(API_BASE_URL || appPublicOrigin(), u.avatarUrl) ?? u.avatarUrl
                                 : '';
                               return (
-                                <div key={row.id} className={`group flex gap-3 -mx-2 px-2 rounded-lg ${showHeader ? 'mt-4 py-1.5' : 'mt-0.5 py-0.5'} hover:bg-white/[0.02]`}>
-                                  <div className="w-8 shrink-0 flex justify-center">
-                                    {showHeader ? (
-                                      <button
-                                        type="button"
-                                        onClick={() => setProfileCardUser(u)}
-                                        className="w-8 h-8 rounded-lg border border-white/[0.08] overflow-hidden bg-black flex items-center justify-center text-[10px] font-bold text-zinc-400 hover:opacity-90 transition-opacity"
+                                <div
+                                  key={row.id}
+                                  className="msg-row relative flex py-0.5 rounded-md3-md hover:bg-surf-ch transition-colors"
+                                  style={{ marginTop: isTail ? 0 : 'var(--message-group-spacing)' }}
+                                >
+                                  <div className="flex-shrink-0 flex justify-end items-start py-0.5 px-[var(--gap-sm)]" style={{ width: 54 }}>
+                                    {!isTail ? (
+                                      <button type="button" onClick={() => setProfileCardUser(u)}
+                                        className="w-9 h-9 rounded-md3-md overflow-hidden hover:ring-2 hover:ring-primary/40 transition-all"
                                       >
-                                        {avatarSrc ? <img src={avatarSrc} alt="" className="w-full h-full object-cover" /> : u.name.charAt(0)}
+                                        {avatarSrc ? (
+                                          <img src={avatarSrc} alt="" className="w-full h-full object-cover" />
+                                        ) : (
+                                          <div className="w-full h-full flex items-center justify-center font-bold text-sm" style={{ background: 'var(--md-sys-color-secondary-container)', color: 'var(--md-sys-color-on-secondary-container)' }}>
+                                            {u.name.charAt(0)}
+                                          </div>
+                                        )}
                                       </button>
                                     ) : (
-                                      <div className="w-8 text-[9px] text-zinc-600 opacity-0 group-hover:opacity-100 text-center leading-[22px]">{row.time}</div>
+                                      <span className="text-[0.68em] mt-[0.15em] text-right opacity-0 hover:opacity-100 transition-opacity" style={{ width: '7ch', color: 'var(--md-sys-color-outline)', fontVariantNumeric: 'tabular-nums' }}>
+                                        {row.time}
+                                      </span>
                                     )}
                                   </div>
-                                  <div className="min-w-0 flex-1">
-                                    {showHeader && (
-                                      <div className="flex items-baseline gap-2 mb-0.5 min-w-0">
-                                        <button type="button" onClick={() => setProfileCardUser(u)} className="text-sm font-semibold text-zinc-100 hover:underline truncate">
-                                          <NickLabel user={u} fallbackColor={isMe ? '#00eeff' : '#f4f4f5'} className="truncate" />
+                                  <div className="flex-1 flex flex-col min-w-0 overflow-hidden pe-[var(--gap-lg)]">
+                                    {!isTail && (
+                                      <div className="flex items-baseline gap-[var(--gap-md)] mb-[2px]">
+                                        <button type="button" onClick={() => setProfileCardUser(u)} className="font-semibold hover:underline bg-transparent border-none p-0">
+                                          <NickLabel user={u} fallbackColor={isMe ? 'var(--md-sys-color-primary)' : 'var(--md-sys-color-on-surface)'} className="text-[15px] font-semibold" />
                                         </button>
-                                        <span className="text-[10px] text-zinc-600 tabular-nums shrink-0">{row.time}</span>
+                                        <span className="text-[0.7em] tabular-nums" style={{ color: 'var(--md-sys-color-outline)' }}>{row.time}</span>
                                       </div>
                                     )}
-                                    <div className="text-[14px] leading-relaxed text-zinc-300 whitespace-pre-wrap break-words">{row.content}</div>
+                                    <div className="msg-content text-sm whitespace-pre-wrap break-words" style={{ fontSize: 'var(--message-size)', color: 'var(--md-sys-color-on-surface)' }}>{row.content}</div>
                                   </div>
                                 </div>
                               );
@@ -4669,61 +4575,45 @@ export default function App() {
                           )}
                         </div>
                       </div>
-                      <div className="shrink-0 absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-[#0a0a0c] via-[#0a0a0c] to-transparent z-20">
-                        <div className="w-full flex gap-2 items-end bg-[#111]/95 border border-white/[0.08] rounded-2xl p-2 backdrop-blur-xl shadow-[0_20px_50px_rgba(0,0,0,0.6)]">
-                          <textarea
-                            value={dmInputValue}
-                            onChange={(e) => setDmInputValue(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter' && !e.shiftKey) {
-                                e.preventDefault();
-                                if (!dmInputValue.trim()) return;
-                                const trimmed = dmInputValue.trim();
-                                if (API_BASE_URL && devcordToken && dmActiveConversationId) void sendDmApi(trimmed);
-                                else sendDmLocal(trimmed);
-                              }
-                            }}
-                            placeholder={`Wiadomość do ${dmPeer.name}…`}
-                            rows={1}
-                            className="flex-1 bg-transparent text-zinc-100 placeholder-zinc-600 px-3 py-3 outline-none resize-none text-[15px] max-h-32 custom-scrollbar"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (!dmInputValue.trim()) return;
-                              const trimmed = dmInputValue.trim();
-                              if (API_BASE_URL && devcordToken && dmActiveConversationId) void sendDmApi(trimmed);
-                              else sendDmLocal(trimmed);
-                            }}
-                            className="h-11 w-11 shrink-0 rounded-xl bg-[#00eeff] text-black flex items-center justify-center shadow-[0_0_20px_rgba(0,238,255,0.35)] disabled:opacity-40"
-                            disabled={!dmInputValue.trim()}
-                          >
-                            <ArrowUpRight size={20} />
-                          </button>
-                        </div>
-                      </div>
+                      <MessageInput
+                        inputValue={dmInputValue}
+                        onChange={setDmInputValue}
+                        onSend={() => {
+                          if (!dmInputValue.trim()) return;
+                          const trimmed = dmInputValue.trim();
+                          if (API_BASE_URL && devcordToken && dmActiveConversationId) void sendDmApi(trimmed);
+                          else sendDmLocal(trimmed);
+                        }}
+                        placeholder={`Wiadomość do ${dmPeer.name}…`}
+                        pickerTheme={localTheme === 'light' ? 'light' : 'dark'}
+                      />
                     </>
                   );
                 })()}
               </div>
             ) : (
-              <div className="flex-1 flex flex-col p-6 md:p-10 bg-[#0a0a0c] overflow-y-auto custom-scrollbar relative animate-in fade-in duration-300">
-                <div className="absolute inset-0 bg-gradient-to-b from-[#00eeff]/[0.08] to-transparent pointer-events-none opacity-40" />
-                <div className="max-w-3xl mx-auto w-full pt-6 md:pt-10 relative z-10 space-y-8">
+              <div className="flex-1 flex flex-col p-8 overflow-y-auto custom-scrollbar animate-fade-in" style={{ background: 'var(--md-sys-color-surface-container-low)' }}>
+                <div className="max-w-2xl mx-auto w-full pt-8 space-y-6">
                   <div className="flex items-start gap-4">
-                    <div className="w-14 h-14 rounded-2xl bg-[#00eeff]/10 border border-[#00eeff]/20 flex items-center justify-center shadow-[0_0_20px_rgba(0,238,255,0.15)] shrink-0">
-                      <Terminal size={26} className="text-[#00eeff]" />
+                    <div
+                      className="w-12 h-12 rounded-md3-lg flex items-center justify-center flex-shrink-0"
+                      style={{ background: 'var(--md-sys-color-primary-container)', color: 'var(--md-sys-color-on-primary-container)' }}
+                    >
+                      <Terminal size={24} />
                     </div>
                     <div>
-                      <h1 className="text-2xl md:text-3xl font-bold text-white tracking-tight">Terminal osobisty</h1>
-                      <p className="text-zinc-400 text-sm mt-1 leading-relaxed">
-                        Skrót do DM i szybkiego podglądu — wybierz rozmówę na liście po lewej albo przejdź do serwera z górnego menu.
+                      <h1 className="text-2xl font-semibold" style={{ color: 'var(--md-sys-color-on-surface)' }}>Terminal osobisty</h1>
+                      <p className="text-sm mt-1 leading-relaxed" style={{ color: 'var(--md-sys-color-on-surface-variant)' }}>
+                        Wybierz rozmówcę z listy po lewej lub przejdź do serwera.
                       </p>
                     </div>
                   </div>
-                  <div className="rounded-3xl border border-white/[0.08] bg-[#0f0f12] p-6 md:p-8 shadow-[0_0_40px_rgba(0,0,0,0.45)] ring-1 ring-[#00eeff]/10 space-y-4">
-                    <h2 className="text-sm font-bold text-[#00eeff] uppercase tracking-[0.2em]">Jak zacząć</h2>
-                    <ol className="list-decimal list-inside space-y-3 text-sm text-zinc-400 leading-relaxed">
+                  <div
+                    className="rounded-md3-lg p-6 space-y-3"
+                    style={{ background: 'var(--md-sys-color-surface-container)', border: '1px solid var(--md-sys-color-outline-variant)' }}
+                  >
+                    <h2 className="text-xs font-bold uppercase tracking-[0.15em]" style={{ color: 'var(--md-sys-color-primary)' }}>Jak zacząć</h2>
+                    <ol className="list-decimal list-inside space-y-2 text-sm leading-relaxed" style={{ color: 'var(--md-sys-color-on-surface-variant)' }}>
                       <li>Otwórz przestrzeń roboczą serwera (ikonka nad listą kanałów).</li>
                       <li>Wróć tutaj — w sekcji „Wiadomości bezpośrednie” zobaczysz członków zespołu.</li>
                       <li>
@@ -4736,9 +4626,10 @@ export default function App() {
                       <button
                         type="button"
                         onClick={() => setActiveServer(servers[0].id)}
-                        className="mt-4 px-5 py-2.5 rounded-xl bg-[#00eeff]/15 border border-[#00eeff]/30 text-[#00eeff] text-sm font-bold hover:bg-[#00eeff]/25 transition-colors"
+                        className="mt-3 px-4 py-2 rounded-md3-md text-sm font-semibold transition-colors"
+                        style={{ background: 'var(--md-sys-color-primary-container)', color: 'var(--md-sys-color-on-primary-container)' }}
                       >
-                        Przejdź do ostatniego serwera
+                        Przejdź do serwera
                       </button>
                     )}
                   </div>
@@ -4747,76 +4638,90 @@ export default function App() {
             )
           ) : API_BASE_URL && servers.length === 0 ? (
             <div className="flex-1 flex flex-col items-center justify-center p-10 text-center">
-              <div className="w-20 h-20 rounded-3xl bg-[#00eeff]/10 border border-[#00eeff]/25 flex items-center justify-center mb-8">
-                <Server size={40} className="text-[#00eeff]" />
+              <div
+                className="w-16 h-16 rounded-md3-lg flex items-center justify-center mb-6"
+                style={{ background: 'var(--md-sys-color-primary-container)', color: 'var(--md-sys-color-on-primary-container)' }}
+              >
+                <Server size={32} />
               </div>
-              <h1 className="text-2xl font-bold text-white mb-2 tracking-tight">System pusty</h1>
-              <p className="text-zinc-500 text-sm max-w-md mb-8 leading-relaxed">
-                Przejdź do <b>Terminala Osobistego</b>, aby sprawdzić DM, lub dołącz do nowej przestrzeni roboczej korzystając z przycisków w menu.
+              <h1 className="text-xl font-semibold mb-2" style={{ color: 'var(--md-sys-color-on-surface)' }}>Brak serwerów</h1>
+              <p className="text-sm max-w-md mb-6 leading-relaxed" style={{ color: 'var(--md-sys-color-on-surface-variant)' }}>
+                Utwórz przestrzeń roboczą lub dołącz do istniejącej.
               </p>
               <div className="flex flex-wrap gap-3 justify-center">
                 <button
                   type="button"
-                  onClick={() => {
-                    setActiveServer('');
-                    setActiveChannel('');
-                    writePersonalHomePath();
-                  }}
-                  className="px-6 py-3 rounded-xl bg-[#00eeff] text-black font-bold text-sm shadow-[0_0_20px_rgba(0,238,255,0.35)] hover:scale-[1.02] transition-transform flex items-center gap-2"
+                  onClick={() => { setActiveServer(''); setActiveChannel(''); writePersonalHomePath(); }}
+                  className="px-5 py-2.5 rounded-md3-xl text-sm font-semibold flex items-center gap-2 transition-colors"
+                  style={{ background: 'var(--md-sys-color-primary-container)', color: 'var(--md-sys-color-on-primary-container)' }}
                 >
-                  <Terminal size={16} /> Przejdź do Terminala
+                  <Terminal size={16} /> Terminal osobisty
                 </button>
                 <button
                   type="button"
                   onClick={() => setCreateServerModal('create')}
-                  className="px-6 py-3 rounded-xl border border-white/[0.12] text-zinc-200 font-semibold text-sm hover:bg-white/[0.05] transition-colors flex items-center gap-2"
+                  className="px-5 py-2.5 rounded-md3-xl text-sm font-semibold flex items-center gap-2 transition-colors"
+                  style={{ border: '1px solid var(--md-sys-color-outline-variant)', color: 'var(--md-sys-color-on-surface-variant)' }}
                 >
-                  <Plus size={16} /> Nowy Serwer
+                  <Plus size={16} /> Nowy serwer
                 </button>
               </div>
             </div>
           ) : API_BASE_URL && servers.length > 0 && !currentChannelData ? (
-            <div className="flex-1 flex flex-col items-center justify-center p-8 text-center text-zinc-500 text-sm">
-              <div className="w-16 h-16 rounded-3xl bg-white/[0.02] border border-white/[0.05] flex items-center justify-center mb-6">
-                <Zap size={24} className="text-zinc-400" />
+            <div className="flex-1 flex flex-col items-center justify-center p-8 text-center text-sm" style={{ color: 'var(--md-sys-color-on-surface-variant)' }}>
+              <div
+                className="w-14 h-14 rounded-md3-lg flex items-center justify-center mb-4"
+                style={{ background: 'var(--md-sys-color-surface-container)', color: 'var(--md-sys-color-on-surface-variant)' }}
+              >
+                <Zap size={24} />
               </div>
-              Brak zdefiniowanego kanału tekstawego w tej przestrzeni roboczej.
+              Wybierz kanał z listy po lewej.
             </div>
           ) : (
           <>
-          <header className="h-16 flex items-center justify-between px-6 border-b border-white/[0.04] bg-[#0a0a0c]/80 backdrop-blur-md shrink-0 z-10 transition-all">
-            <div className="flex items-center gap-3 text-sm font-medium">
-              {currentChannelData && <currentChannelData.icon size={20} style={{ color: currentChannelData.color }} />}
-              <span className="tracking-tight font-bold text-lg" style={{ color: currentChannelData?.color, textShadow: `0 0 15px ${currentChannelData?.color}40` }}>{currentChannelData?.name}</span>
-              <div className="w-[1px] h-4 bg-white/[0.1] mx-2 hidden md:block"></div>
-              <span className="text-xs text-zinc-500 hidden md:block font-normal truncate max-w-[min(28rem,40vw)]">
-                {isMainViewVoice
-                  ? 'Aktywna komunikacja głosowa.'
-                  : (() => {
-                      const ids = Object.keys(typingUsers).filter((u) => u !== myUserId);
-                      if (ids.length === 0) return 'System operacyjny Devcord_.';
-                      const names = ids.map(
-                        (id) => workspaceMembers.find((m) => m.id === id)?.name ?? getUser(id).name,
-                      );
-                      if (names.length === 1) return `${names[0]} pisze…`;
-                      if (names.length === 2) return `${names[0]} i ${names[1]} piszą…`;
-                      return `${names[0]}, ${names[1]} i ${names.length - 2} innych pisze…`;
-                    })()}
-              </span>
-            </div>
-            
-            <div className="flex items-center gap-2 text-zinc-400">
-              {!isMainViewVoice && !isZenMode && (
-                <div className="flex items-center gap-1 border-r border-white/[0.1] pr-2 mr-2">
-                  <button className="p-2 hover:text-[#00eeff] hover:bg-[#00eeff]/10 rounded-lg transition-colors"><Phone size={18} /></button>
-                  <button className="p-2 hover:text-[#00eeff] hover:bg-[#00eeff]/10 rounded-lg transition-colors"><Video size={18} /></button>
-                </div>
+          <header
+            className="h-12 flex items-center justify-between px-4 shrink-0 z-10"
+            style={{ borderBottom: '1px solid var(--md-sys-color-outline-variant)', background: 'var(--md-sys-color-surface-container-low)' }}
+          >
+            <div className="flex items-center gap-[var(--gap-md)] min-w-0 flex-1 overflow-hidden">
+              {currentChannelData && (
+                <currentChannelData.icon size={18} className="flex-shrink-0" style={{ color: 'var(--md-sys-color-on-surface-variant)' }} />
               )}
-              <button onClick={() => setIsZenMode(!isZenMode)} className={`p-2 rounded-lg transition-all duration-300 ${isZenMode ? 'bg-[#00eeff] text-black shadow-[0_0_15px_rgba(0,238,255,0.4)]' : 'hover:text-white hover:bg-white/[0.05]'}`} title="Tryb Skupienia">
+              <span className="font-semibold text-[15px] truncate" style={{ color: 'var(--md-sys-color-on-surface)' }}>
+                {currentChannelData?.name}
+              </span>
+              {!isMainViewVoice && (
+                <span className="text-[11px] truncate hidden md:block max-w-[28rem]" style={{ color: 'var(--md-sys-color-outline)' }}>
+                  {(() => {
+                    const ids = Object.keys(typingUsers).filter((u) => u !== myUserId);
+                    if (ids.length === 0) return '';
+                    const names = ids.map((id) => workspaceMembers.find((m) => m.id === id)?.name ?? getUser(id).name);
+                    if (names.length === 1) return `${names[0]} pisze…`;
+                    if (names.length === 2) return `${names[0]} i ${names[1]} piszą…`;
+                    return `${names[0]}, ${names[1]} i ${names.length - 2} innych pisze…`;
+                  })()}
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-0.5 flex-shrink-0" style={{ color: 'var(--md-sys-color-on-surface-variant)' }}>
+              <button
+                onClick={() => setIsZenMode(!isZenMode)}
+                className="p-2 rounded-md3-sm transition-colors"
+                style={isZenMode ? { background: 'var(--md-sys-color-primary-container)', color: 'var(--md-sys-color-on-primary-container)' } : undefined}
+                onMouseEnter={e => { if (!isZenMode) e.currentTarget.style.background = 'var(--md-sys-color-surface-container)'; }}
+                onMouseLeave={e => { if (!isZenMode) e.currentTarget.style.background = 'transparent'; }}
+                title="Tryb skupienia"
+              >
                 {isZenMode ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
               </button>
               {!isZenMode && (
-                <button onClick={() => { setActiveThread(null); setRightPanelTab(rightPanelTab === 'members' ? null : 'members'); }} className={`p-2 rounded-lg transition-colors ${(rightPanelTab && !activeThread) ? 'bg-white/[0.1] text-white' : 'hover:text-white hover:bg-white/[0.05]'}`}>
+                <button
+                  onClick={() => { setActiveThread(null); setRightPanelTab(rightPanelTab === 'members' ? null : 'members'); }}
+                  className="p-2 rounded-md3-sm transition-colors"
+                  style={(rightPanelTab && !activeThread) ? { background: 'var(--md-sys-color-surface-container)', color: 'var(--md-sys-color-on-surface)' } : undefined}
+                  onMouseEnter={e => { if (!(rightPanelTab && !activeThread)) e.currentTarget.style.background = 'var(--md-sys-color-surface-container)'; }}
+                  onMouseLeave={e => { if (!(rightPanelTab && !activeThread)) e.currentTarget.style.background = 'transparent'; }}
+                >
                   <Users size={18} />
                 </button>
               )}
@@ -4824,8 +4729,7 @@ export default function App() {
           </header>
 
           {isMainViewVoice ? (
-            <div className="flex-1 flex flex-col bg-[#050505] relative overflow-hidden">
-              <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,rgba(0,238,255,0.03)_0%,transparent_70%)] pointer-events-none"></div>
+            <div className="flex-1 flex flex-col relative overflow-hidden" style={{ background: 'var(--md-sys-color-surface-dim)' }}>
               <div className="flex-1 p-6 sm:p-10 flex flex-col overflow-auto custom-scrollbar relative z-10">
                 {activeVoiceChannel === currentChannelData?.id ? (
                   <div className="w-full max-w-7xl mx-auto flex flex-col pb-24">
@@ -4854,54 +4758,46 @@ export default function App() {
                       const others = allScreens.filter(s => s.id !== maximized.id);
 
                       return (
-                        <div className="w-full flex flex-col gap-6">
+                        <div className="w-full flex flex-col gap-4">
                           {/* Maximized Screen */}
-                          <div className="w-full aspect-video rounded-3xl border border-white/[0.12] bg-[#0a0a0c] p-2 shadow-[0_0_60px_rgba(0,0,0,0.5)] relative group transition-all duration-700 overflow-hidden">
+                          <div className="w-full aspect-video rounded-md3-lg overflow-hidden relative group" style={{ background: '#000' }}>
                             {maximized.isLocal ? (
                               maximized.kind === 'camera' ? (
                                 <>
-                                  <div className="w-full h-full rounded-2xl overflow-hidden relative">
-                                    <VideoPlayer stream={maximized.stream} isLocal={true} className="w-full h-full object-contain bg-[#030303]" />
-                                    <div className="absolute top-4 left-4 z-20 px-3 py-1.5 bg-black/60 backdrop-blur-md rounded-lg text-[10px] uppercase tracking-widest font-black text-white border border-emerald-400/30 flex items-center gap-2">
-                                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_#34d399]"></span>
+                                  <div className="w-full h-full overflow-hidden relative">
+                                    <VideoPlayer stream={maximized.stream} isLocal={true} className="w-full h-full object-contain bg-black" />
+                                    <div className="absolute top-3 left-3 z-20 px-2 py-1 bg-black/60 rounded-md3-xs text-[10px] text-white flex items-center gap-1.5">
+                                      <span className="w-2 h-2 rounded-full bg-online animate-pulse"></span>
                                       Kamera
                                     </div>
                                   </div>
                                 </>
                               ) : (
                                 <>
-                                  <div className="absolute top-0 left-0 w-12 h-12 border-t-2 border-l-2 border-[#00eeff]/80 rounded-tl-3xl z-10 transition-all duration-500 group-hover:w-16 group-hover:h-16 shadow-[-5px_-5px_15px_rgba(0,238,255,0.2)]"></div>
-                                  <div className="absolute top-0 right-0 w-12 h-12 border-t-2 border-r-2 border-[#00eeff]/80 rounded-tr-3xl z-10 transition-all duration-500 group-hover:w-16 group-hover:h-16 shadow-[5px_-5px_15px_rgba(0,238,255,0.2)]"></div>
-                                  <div className="absolute bottom-0 left-0 w-12 h-12 border-b-2 border-l-2 border-[#00eeff]/80 rounded-bl-3xl z-10 transition-all duration-500 group-hover:w-16 group-hover:h-16 shadow-[-5px_5px_15px_rgba(0,238,255,0.2)]"></div>
-                                  <div className="absolute bottom-0 right-0 w-12 h-12 border-b-2 border-r-2 border-[#00eeff]/80 rounded-br-3xl z-10 transition-all duration-500 group-hover:w-16 group-hover:h-16 shadow-[5px_5px_15px_rgba(0,238,255,0.2)]"></div>
-                                  <div className="w-full h-full rounded-2xl overflow-hidden relative">
-                                    <VideoPlayer stream={maximized.stream} isLocal={true} className="w-full h-full object-contain bg-[#030303]" />
-                                    <div className="absolute top-4 left-4 z-20 px-3 py-1.5 bg-black/60 backdrop-blur-md rounded-lg text-[10px] uppercase tracking-widest font-black text-white border border-[#00eeff]/30 flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-[#00eeff] animate-pulse shadow-[0_0_8px_#00eeff]"></span>Twój ekran</div>
-                                    
-                                    <div className="absolute top-4 right-4 z-30 flex items-center gap-2 bg-black/60 backdrop-blur-md px-3 py-1.5 rounded-lg border border-white/[0.1]">
-                                      <span className="text-[10px] text-zinc-400 font-bold uppercase tracking-widest hidden sm:block mr-2">Jakość Streamu</span>
-                                      <div className="flex items-center gap-1.5 border-r border-white/[0.1] pr-2">
-                                        <Monitor size={12} className="text-[#00eeff]" />
-                                        <select value={screenRes} onChange={e => {
-                                          const r = parseInt(e.target.value);
-                                          setScreenRes(r);
-                                          if (r === 1440 && screenFps > 60) setScreenFps(60);
-                                        }} className="bg-transparent text-white font-semibold text-xs outline-none cursor-pointer">
-                                          <option value={480} className="bg-[#111]">480p</option>
-                                          <option value={720} className="bg-[#111]">720p</option>
-                                          <option value={1080} className="bg-[#111]">1080p</option>
-                                          <option value={1440} className="bg-[#111]">1440p (Max 60fps)</option>
-                                        </select>
-                                      </div>
-                                      <div className="flex items-center gap-1.5 pl-1">
-                                        <Zap size={12} className="text-emerald-400" />
-                                        <select value={screenFps} onChange={e => setScreenFps(parseInt(e.target.value))} className="bg-transparent text-white font-semibold text-xs outline-none cursor-pointer">
-                                          <option value={30} className="bg-[#111]">30 FPS</option>
-                                          <option value={60} className="bg-[#111]">60 FPS</option>
-                                          {screenRes < 1440 && <option value={120} className="bg-[#111]">120 FPS</option>}
-                                          {screenRes < 1440 && <option value={240} className="bg-[#111]">240 FPS</option>}
-                                        </select>
-                                      </div>
+                                  <div className="w-full h-full overflow-hidden relative">
+                                    <VideoPlayer stream={maximized.stream} isLocal={true} className="w-full h-full object-contain bg-black" />
+                                    <div className="absolute top-3 left-3 z-20 px-2 py-1 bg-black/60 rounded-md3-xs text-[10px] text-white flex items-center gap-1.5" style={{ border: '1px solid var(--md-sys-color-outline-variant)' }}>
+                                      <span className="w-2 h-2 rounded-full animate-pulse" style={{ background: 'var(--md-sys-color-primary)' }}></span>
+                                      Twój ekran
+                                    </div>
+                                    <div className="absolute top-3 right-3 z-30 flex items-center gap-1.5 bg-black/70 px-2 py-1 rounded-md3-xs text-[11px]" style={{ border: '1px solid var(--md-sys-color-outline-variant)', color: 'var(--md-sys-color-on-surface-variant)' }}>
+                                      <Monitor size={11} style={{ color: 'var(--md-sys-color-primary)' }} />
+                                      <select value={screenRes} onChange={e => {
+                                        const r = parseInt(e.target.value);
+                                        setScreenRes(r);
+                                        if (r === 1440 && screenFps > 60) setScreenFps(60);
+                                      }} className="bg-transparent text-white text-xs outline-none cursor-pointer">
+                                        <option value={480} className="bg-[#111]">480p</option>
+                                        <option value={720} className="bg-[#111]">720p</option>
+                                        <option value={1080} className="bg-[#111]">1080p</option>
+                                        <option value={1440} className="bg-[#111]">1440p</option>
+                                      </select>
+                                      <select value={screenFps} onChange={e => setScreenFps(parseInt(e.target.value))} className="bg-transparent text-white text-xs outline-none cursor-pointer ml-1">
+                                        <option value={30} className="bg-[#111]">30fps</option>
+                                        <option value={60} className="bg-[#111]">60fps</option>
+                                        {screenRes < 1440 && <option value={120} className="bg-[#111]">120fps</option>}
+                                        {screenRes < 1440 && <option value={240} className="bg-[#111]">240fps</option>}
+                                      </select>
                                     </div>
                                   </div>
                                 </>
@@ -4909,7 +4805,7 @@ export default function App() {
                             ) : (
                               <div
                                 ref={remoteScreenHostRef}
-                                className="w-full h-full rounded-2xl overflow-hidden relative bg-[#121214] min-h-[200px] flex items-center justify-center group/fs"
+                                className="w-full h-full overflow-hidden relative bg-black min-h-[200px] flex items-center justify-center group/fs"
                               >
                                 {remoteScreenWatching ? (
                                   <>
@@ -4933,34 +4829,37 @@ export default function App() {
                                         ? document.exitFullscreen()
                                         : n.requestFullscreen?.());
                                     }}
-                                    className="absolute top-4 right-4 z-40 p-2.5 rounded-xl bg-black/70 border border-white/[0.12] text-white opacity-90 hover:opacity-100 hover:border-[#00eeff]/40 transition-all shadow-lg"
+                                    className="absolute top-3 right-3 z-40 p-2 rounded-md3-sm bg-black/70 text-white opacity-90 hover:opacity-100 transition-all"
+                                    style={{ border: '1px solid var(--md-sys-color-outline-variant)' }}
                                   >
                                     <Maximize2 size={18} />
                                   </button>
                                   </>
                                 ) : (
-                                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-6 p-8">
-                                    <button onClick={() => setRemoteScreenWatching(true)} className="px-8 py-3.5 rounded-2xl bg-white/[0.08] hover:bg-white/[0.12] border border-white/[0.1] text-white text-sm font-bold tracking-wide transition-colors">Obejrzyj stream</button>
+                                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 p-8">
+                                    <button
+                                      onClick={() => setRemoteScreenWatching(true)}
+                                      className="px-6 py-2.5 rounded-md3-lg text-sm font-semibold transition-colors"
+                                      style={{ background: 'var(--md-sys-color-primary-container)', color: 'var(--md-sys-color-on-primary-container)' }}
+                                    >
+                                      Obejrzyj stream
+                                    </button>
                                   </div>
                                 )}
-                                <div className="absolute bottom-4 left-4 flex items-center gap-2 px-3 py-1.5 rounded-xl bg-black/75 border border-white/[0.08] text-white text-xs font-semibold pointer-events-none max-w-[min(92%,20rem)] min-w-0">
-                                  <Monitor size={14} className="text-[#00eeff] shrink-0" />
+                                <div className="absolute bottom-3 left-3 flex items-center gap-2 px-2 py-1 rounded-md3-xs bg-black/75 text-white text-xs font-semibold pointer-events-none max-w-[min(92%,20rem)] min-w-0">
+                                  <Monitor size={12} style={{ color: 'var(--md-sys-color-primary)', flexShrink: 0 }} />
                                   {maximized.isLocal ? (
                                     <span className="truncate">{maximized.kind === 'camera' ? 'Kamera' : 'Twój ekran'}</span>
                                   ) : (
                                     <>
-                                      <UserAvatarBubble user={getUser(maximized.id)} className="w-7 h-7 rounded-lg" />
-                                      <NickLabel
-                                        user={getUser(maximized.id)}
-                                        fallbackColor="#fafafa"
-                                        className="truncate text-xs font-semibold min-w-0"
-                                      />
+                                      <UserAvatarBubble user={getUser(maximized.id)} className="w-5 h-5 rounded-full" />
+                                      <NickLabel user={getUser(maximized.id)} fallbackColor="#fff" className="truncate text-xs font-semibold min-w-0" />
                                     </>
                                   )}
                                 </div>
                                 {remoteScreenWatching && (
-                                  <div className="absolute top-4 left-4 px-3 py-1.5 bg-black/60 backdrop-blur-md rounded-lg text-[10px] uppercase tracking-widest font-black text-white border border-white/[0.12] flex items-center gap-2 pointer-events-none">
-                                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_#34d399]"></span>Oglądasz
+                                  <div className="absolute top-3 left-3 px-2 py-1 bg-black/60 rounded-md3-xs text-[10px] text-white flex items-center gap-1.5 pointer-events-none">
+                                    <span className="w-2 h-2 rounded-full bg-online animate-pulse"></span>Oglądasz
                                   </div>
                                 )}
                               </div>
@@ -4969,30 +4868,29 @@ export default function App() {
 
                           {/* Thumbnail Screens */}
                           {others.length > 0 && (
-                            <div className="flex flex-wrap gap-4 justify-center">
+                            <div className="flex flex-wrap gap-3 justify-center">
                               {others.map(s => (
-                                <div key={s.id} onClick={() => setMaximizedScreenId(s.id)} className="w-64 aspect-video rounded-2xl border border-white/[0.1] bg-[#0a0a0c] overflow-hidden cursor-pointer hover:border-[#00eeff]/50 hover:shadow-[0_0_20px_rgba(0,238,255,0.15)] transition-all relative group">
+                                <div
+                                  key={s.id}
+                                  onClick={() => setMaximizedScreenId(s.id)}
+                                  className="w-56 aspect-video rounded-md3-md overflow-hidden cursor-pointer transition-all relative group"
+                                  style={{ border: '1px solid var(--md-sys-color-outline-variant)', background: '#000' }}
+                                  onMouseEnter={e => (e.currentTarget.style.borderColor = 'var(--md-sys-color-primary)')}
+                                  onMouseLeave={e => (e.currentTarget.style.borderColor = 'var(--md-sys-color-outline-variant)')}
+                                >
                                   <VideoPlayer
                                     key={s.isLocal ? `loc-${s.id}` : remoteLiveVideoKey(s.id, s.stream)}
                                     stream={s.stream}
                                     isLocal={s.isLocal}
-                                    className="w-full h-full object-cover opacity-60 group-hover:opacity-100 transition-opacity"
+                                    className="w-full h-full object-cover opacity-70 group-hover:opacity-100 transition-opacity"
                                   />
-                                  <div className="absolute bottom-2 left-2 flex items-center gap-1.5 px-2 py-1 rounded-lg bg-black/80 text-white text-[10px] font-semibold border border-white/[0.05] min-w-0 max-w-[95%]">
-                                    {s.kind === 'camera' ? <Video size={10} className="text-emerald-400 shrink-0" /> : <Monitor size={10} className="text-[#00eeff] shrink-0" />}
+                                  <div className="absolute bottom-2 left-2 flex items-center gap-1.5 px-2 py-1 rounded-md3-xs bg-black/80 text-white text-[10px] font-semibold min-w-0 max-w-[95%]">
+                                    {s.kind === 'camera' ? <Video size={10} className="shrink-0" style={{ color: 'var(--color-status-online)' }} /> : <Monitor size={10} className="shrink-0" style={{ color: 'var(--md-sys-color-primary)' }} />}
                                     <span className="truncate flex items-center gap-1 min-w-0">
-                                      {s.kind === 'camera' && s.isLocal ? (
-                                        'Kamera'
-                                      ) : s.isLocal ? (
-                                        'Twój ekran'
-                                      ) : (
+                                      {s.kind === 'camera' && s.isLocal ? 'Kamera' : s.isLocal ? 'Twój ekran' : (
                                         <>
-                                          <UserAvatarBubble user={getUser(s.id)} className="w-4 h-4 rounded-md" />
-                                          <NickLabel
-                                            user={getUser(s.id)}
-                                            fallbackColor="#fafafa"
-                                            className="truncate font-semibold text-[10px] min-w-0"
-                                          />
+                                          <UserAvatarBubble user={getUser(s.id)} className="w-4 h-4 rounded-full" />
+                                          <NickLabel user={getUser(s.id)} fallbackColor="#fff" className="truncate font-semibold text-[10px] min-w-0" />
                                         </>
                                       )}
                                     </span>
@@ -5005,12 +4903,12 @@ export default function App() {
                       );
                     })()}
                     </div>
-                    <div className="flex items-center gap-3 mb-8 px-2">
-                      <div className="h-px flex-1 bg-gradient-to-r from-transparent via-white/[0.1] to-transparent"></div>
-                      <span className="text-[10px] uppercase tracking-[0.3em] font-bold text-zinc-500">Węzły Komunikacyjne ({voiceParticipants.length})</span>
-                      <div className="h-px flex-1 bg-gradient-to-r from-transparent via-white/[0.1] to-transparent"></div>
+                    <div className="flex items-center gap-3 mb-4 px-2">
+                      <div className="h-px flex-1" style={{ background: 'var(--md-sys-color-outline-variant)' }}></div>
+                      <span className="text-[11px] uppercase tracking-[0.15em] font-semibold" style={{ color: 'var(--md-sys-color-on-surface-variant)' }}>Uczestnicy ({voiceParticipants.length})</span>
+                      <div className="h-px flex-1" style={{ background: 'var(--md-sys-color-outline-variant)' }}></div>
                     </div>
-                    <div className="flex flex-wrap justify-center gap-6">
+                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 w-full max-w-5xl mx-auto px-2">
                       {voiceParticipants.map((uid) => {
                         const u = getUser(uid);
                         const isSelf = uid === myUserId;
@@ -5053,118 +4951,168 @@ export default function App() {
                     </div>
                   </div>
                 ) : (
-                  <div className="flex flex-col items-center justify-center text-center p-8 max-w-md bg-black/40 backdrop-blur-md rounded-3xl border border-white/[0.05] m-auto shadow-2xl">
-                    <div className="w-20 h-20 rounded-full bg-[#00eeff]/5 border border-[#00eeff]/20 flex items-center justify-center mb-6 shadow-[0_0_30px_rgba(0,238,255,0.1)]">{currentChannelData && <currentChannelData.icon size={40} style={{ color: currentChannelData.color }} className="opacity-80" />}</div>
-                    <h2 className="text-2xl font-bold text-white mb-2">Prywatny węzeł głosowy</h2>
-                    <p className="text-zinc-500 mb-8">Rozpocznij transmisję głosową lub wideo. Ruch danych w tym węźle jest w pełni szyfrowany.</p>
-                    <button onClick={() => currentChannelData && handleChannelClick(currentChannelData)} className="px-8 py-3.5 rounded-full bg-[#00eeff] text-black font-bold text-sm shadow-[0_0_20px_rgba(0,238,255,0.4)] hover:shadow-[0_0_30px_rgba(0,238,255,0.6)] hover:scale-105 transition-all duration-300">Nawiąż połączenie z węzłem</button>
+                  <div
+                    className="flex flex-col items-center justify-center text-center p-8 max-w-sm m-auto rounded-md3-lg"
+                    style={{ background: 'var(--md-sys-color-surface-container)' }}
+                  >
+                    <div
+                      className="w-14 h-14 rounded-md3-lg flex items-center justify-center mb-4"
+                      style={{ background: 'var(--md-sys-color-primary-container)', color: 'var(--md-sys-color-on-primary-container)' }}
+                    >
+                      {currentChannelData && <currentChannelData.icon size={28} />}
+                    </div>
+                    <h2 className="text-lg font-semibold mb-2" style={{ color: 'var(--md-sys-color-on-surface)' }}>Kanał głosowy</h2>
+                    <p className="text-sm mb-6" style={{ color: 'var(--md-sys-color-on-surface-variant)' }}>Dołącz do kanału, aby rozmawiać z innymi uczestnikami.</p>
+                    <button
+                      onClick={() => currentChannelData && handleChannelClick(currentChannelData)}
+                      className="px-6 py-2.5 rounded-md3-xl text-sm font-semibold transition-colors"
+                      style={{ background: 'var(--md-sys-color-primary-container)', color: 'var(--md-sys-color-on-primary-container)' }}
+                    >
+                      Dołącz
+                    </button>
                   </div>
                 )}
               </div>
               {activeVoiceChannel === currentChannelData?.id && (
                 <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-30 flex flex-col items-center gap-3">
                   {voiceMixPanelOpen && voicePhase === 'connected' && (
-                    <div
-                      className="max-h-[min(50vh,320px)] w-[min(92vw,380px)] overflow-y-auto custom-scrollbar rounded-2xl border border-white/[0.1] bg-[#0c0c0e]/95 backdrop-blur-2xl shadow-[0_20px_60px_rgba(0,0,0,0.85)] p-3 text-left"
-                      onMouseDown={(e) => e.stopPropagation()}
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <div className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2 px-1">Miks uczestników (tylko u Ciebie)</div>
-                      {voiceParticipants.filter((id) => id !== myUserId).length === 0 ? (
-                        <p className="text-xs text-zinc-500 px-1 py-2">Brak innych uczestników na kanale.</p>
-                      ) : (
-                        <ul className="flex flex-col gap-2">
-                          {voiceParticipants
-                            .filter((id) => id !== myUserId)
-                            .map((uid) => {
-                              const u = getUser(uid);
-                              const vol = userVolumes[uid] ?? 1;
-                              const outMuted = !!userOutputMuted[uid];
-                              return (
-                                <li key={uid} className="flex flex-col gap-1.5 rounded-xl bg-white/[0.03] border border-white/[0.06] px-3 py-2">
-                                  <div className="flex items-center justify-between gap-2 min-w-0">
-                                    <div className="flex items-center gap-2 min-w-0 flex-1">
-                                      <UserAvatarBubble user={u} className="w-8 h-8 rounded-full" />
-                                      <NickLabel user={u} fallbackColor="#e4e4e7" className="text-sm font-semibold truncate min-w-0" />
-                                    </div>
-                                    <button
-                                      type="button"
-                                      title={outMuted ? 'Włącz odsłuch' : 'Wycisz odsłuch'}
-                                      onClick={() => {
-                                        const next = !outMuted;
-                                        setUserOutputMutedMap((prev) => ({ ...prev, [uid]: next }));
-                                        setPeerOutputMute(uid, next);
-                                      }}
-                                      className={`shrink-0 w-9 h-9 rounded-full flex items-center justify-center border transition-colors ${outMuted ? 'bg-red-500/20 text-red-400 border-red-500/35' : 'bg-white/[0.06] text-zinc-300 border-white/[0.08] hover:bg-white/[0.1]'}`}
-                                    >
-                                      {outMuted ? <VolumeX size={18} /> : <Volume2 size={18} />}
-                                    </button>
-                                  </div>
-                                  <div className="flex flex-col gap-1">
-                                    <div className="flex items-center gap-2">
-                                      <span className="text-[9px] text-zinc-400 tabular-nums min-w-[9rem] text-right shrink-0 leading-tight">
-                                        {voiceVolumeUiLabel(vol)}
-                                      </span>
-                                      <input
-                                        type="range"
-                                        min={VOICE_PEER_GAIN_MIN}
-                                        max={VOICE_PEER_GAIN_MAX}
-                                        step={0.05}
-                                        value={vol}
-                                        onChange={(e) => {
-                                          const v = parseFloat(e.target.value);
-                                          setUserVolumes((prev) => ({ ...prev, [uid]: v }));
-                                          setUserVolume(uid, v);
-                                        }}
-                                        className="flex-1 min-w-0 h-1.5 rounded-full appearance-none bg-white/[0.1] accent-[#00eeff]"
-                                      />
-                                    </div>
-                                    <span className="text-[9px] text-zinc-600">
-                                      100% = ×1, 200% = ×2 (odsłuch u Ciebie, max {Math.round(VOICE_PEER_GAIN_MAX * 100)}%).
-                                    </span>
-                                  </div>
-                                </li>
-                              );
-                            })}
-                        </ul>
-                      )}
+                  <div
+                    className="max-h-[min(50vh,320px)] w-[min(92vw,360px)] overflow-y-auto custom-scrollbar rounded-md3-lg p-3 text-left animate-modal-in"
+                    style={{ background: 'var(--md-sys-color-surface-container-highest)', border: '1px solid var(--md-sys-color-outline-variant)' }}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div className="text-[11px] font-semibold uppercase tracking-widest mb-2 px-1" style={{ color: 'var(--md-sys-color-outline)' }}>
+                      Miks (tylko u Ciebie)
                     </div>
+                    {voiceParticipants.filter((id) => id !== myUserId).length === 0 ? (
+                      <p className="text-xs px-1 py-2" style={{ color: 'var(--md-sys-color-on-surface-variant)' }}>Brak innych uczestników.</p>
+                    ) : (
+                      <ul className="flex flex-col gap-2">
+                        {voiceParticipants.filter((id) => id !== myUserId).map((uid) => {
+                          const u = getUser(uid);
+                          const vol = userVolumes[uid] ?? 1;
+                          const outMuted = !!userOutputMuted[uid];
+                          return (
+                            <li key={uid} className="flex flex-col gap-1.5 rounded-md3-sm px-3 py-2" style={{ background: 'var(--md-sys-color-surface-container-high)' }}>
+                              <div className="flex items-center justify-between gap-2 min-w-0">
+                                <div className="flex items-center gap-2 min-w-0 flex-1">
+                                  <UserAvatarBubble user={u} className="w-7 h-7 rounded-full" />
+                                  <NickLabel user={u} fallbackColor="var(--md-sys-color-on-surface)" className="text-sm font-semibold truncate min-w-0" />
+                                </div>
+                                <button
+                                  type="button"
+                                  title={outMuted ? 'Włącz odsłuch' : 'Wycisz odsłuch'}
+                                  onClick={() => {
+                                    const next = !outMuted;
+                                    setUserOutputMutedMap((prev) => ({ ...prev, [uid]: next }));
+                                    setPeerOutputMute(uid, next);
+                                  }}
+                                  className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-colors"
+                                  style={{
+                                    background: outMuted ? 'var(--md-sys-color-error-container)' : 'var(--md-sys-color-surface-container)',
+                                    color: outMuted ? 'var(--md-sys-color-on-error-container)' : 'var(--md-sys-color-on-surface-variant)',
+                                  }}
+                                >
+                                  {outMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+                                </button>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-[10px] tabular-nums shrink-0 text-right w-20" style={{ color: 'var(--md-sys-color-outline)' }}>
+                                  {voiceVolumeUiLabel(vol)}
+                                </span>
+                                <input
+                                  type="range"
+                                  min={VOICE_PEER_GAIN_MIN}
+                                  max={VOICE_PEER_GAIN_MAX}
+                                  step={0.05}
+                                  value={vol}
+                                  onChange={(e) => {
+                                    const v = parseFloat(e.target.value);
+                                    setUserVolumes((prev) => ({ ...prev, [uid]: v }));
+                                    setUserVolume(uid, v);
+                                  }}
+                                  className="flex-1 min-w-0 h-1.5 rounded-full appearance-none"
+                                  style={{ accentColor: 'var(--md-sys-color-primary)' }}
+                                />
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </div>
                   )}
-                  <div className="bg-[#0a0a0c]/80 backdrop-blur-2xl border border-white/[0.1] rounded-full flex items-center p-2 shadow-[0_20px_60px_rgba(0,0,0,0.8)] gap-2">
+                  {/* Voice action bar */}
+                  <div
+                    className="flex items-center p-[var(--gap-md)] rounded-md3-xl shadow-md3 gap-[var(--gap-md)] max-w-[98vw] flex-wrap justify-center"
+                    style={{ background: 'var(--md-sys-color-surface-container-high)', border: '1px solid var(--md-sys-color-outline-variant)' }}
+                  >
+                    {/* Mute */}
                     <button
                       type="button"
                       onClick={() => toggleVoiceMic()}
-                      className={`w-14 h-14 rounded-full flex items-center justify-center transition-all duration-300 border ${localMuted || localDeafened ? 'bg-red-500/20 text-red-400 border-red-500/40 shadow-[0_0_15px_rgba(239,68,68,0.2)]' : 'bg-white/[0.05] text-zinc-200 border-white/[0.05] hover:bg-white/[0.1]'}`}
-                      title={localDeafened ? 'Wyłącz tryb głuchy i włącz mikrofon' : localMuted ? 'Włącz mikrofon' : 'Wycisz mikrofon'}
+                      className="w-12 h-12 rounded-full flex items-center justify-center transition-colors"
+                      style={{
+                        background: localMuted || localDeafened ? 'var(--md-sys-color-error-container)' : 'var(--md-sys-color-primary-container)',
+                        color: localMuted || localDeafened ? 'var(--md-sys-color-on-error-container)' : 'var(--md-sys-color-on-primary-container)',
+                      }}
+                      title={localDeafened ? 'Wyjdź z trybu głuchego' : localMuted ? 'Włącz mikrofon' : 'Wycisz mikrofon'}
                     >
-                      {localMuted || localDeafened ? <MicOff size={22} /> : <Mic size={22} />}
+                      {localMuted || localDeafened ? <MicOff size={20} /> : <Mic size={20} />}
                     </button>
+                    {/* Deafen */}
                     <button
                       type="button"
                       onClick={() => toggleVoiceHeadphones()}
                       disabled={voicePhase !== 'connected'}
-                      className={`w-12 h-12 rounded-full flex items-center justify-center transition-all border shrink-0 ${
-                        localDeafened ? 'bg-red-500/15 text-red-400 border-red-500/35' : 'bg-white/[0.05] text-zinc-200 border-white/[0.08] hover:bg-white/[0.1]'
-                      } disabled:opacity-40 disabled:cursor-not-allowed`}
-                      title={localDeafened ? 'Włącz odsłuch innych i mikrofon' : 'Wycisz mikrofon i przestań słyszeć innych'}
+                      className="w-10 h-10 rounded-full flex items-center justify-center transition-colors disabled:opacity-40"
+                      style={{
+                        background: localDeafened ? 'var(--md-sys-color-error-container)' : 'var(--md-sys-color-surface-container)',
+                        color: localDeafened ? 'var(--md-sys-color-on-error-container)' : 'var(--md-sys-color-on-surface-variant)',
+                      }}
+                      title={localDeafened ? 'Włącz odsłuch' : 'Wycisz odsłuch'}
                     >
-                      <Headphones size={20} className={localDeafened ? 'opacity-50' : ''} />
+                      <Headphones size={18} className={localDeafened ? 'opacity-50' : ''} />
                     </button>
+                    {/* Mix */}
                     <button
                       type="button"
                       onClick={() => setVoiceMixPanelOpen((o) => !o)}
                       disabled={voicePhase !== 'connected'}
-                      className={`w-12 h-12 rounded-full flex items-center justify-center transition-all border shrink-0 ${voiceMixPanelOpen ? 'bg-[#00eeff]/15 text-[#00eeff] border-[#00eeff]/35' : 'bg-white/[0.05] text-zinc-300 border-white/[0.08] hover:bg-white/[0.1]'} disabled:opacity-40 disabled:cursor-not-allowed`}
-                      title="Głośność i wyciszenie odsłuchu uczestników"
+                      className="w-10 h-10 rounded-full flex items-center justify-center transition-colors disabled:opacity-40"
+                      style={{
+                        background: voiceMixPanelOpen ? 'var(--md-sys-color-primary-container)' : 'var(--md-sys-color-surface-container)',
+                        color: voiceMixPanelOpen ? 'var(--md-sys-color-on-primary-container)' : 'var(--md-sys-color-on-surface-variant)',
+                      }}
+                      title="Miks głośności"
                     >
-                      <SlidersHorizontal size={20} />
+                      <SlidersHorizontal size={18} />
                     </button>
-                    <div className="w-px h-8 bg-white/[0.1] mx-1"></div>
-                    <button onClick={toggleScreenShare} className={`px-6 h-14 rounded-full flex items-center gap-3 font-bold uppercase tracking-wider text-[11px] transition-all duration-300 border ${screenStream ? 'bg-[#00eeff] text-black border-[#00eeff] shadow-[0_0_20px_rgba(0,238,255,0.4)]' : 'bg-white/[0.05] text-zinc-200 border-white/[0.05] hover:bg-white/[0.1]'}`}>
-                      <MonitorUp size={20} />{screenStream ? 'Zakończ transmisję' : 'Udostępnij ekran'}
+                    <div className="w-px h-7" style={{ background: 'var(--md-sys-color-outline-variant)' }} />
+                    {/* Screen share */}
+                    <button
+                      type="button"
+                      onClick={toggleScreenShare}
+                      className="px-4 h-10 rounded-full flex items-center gap-2 text-[12px] font-semibold transition-colors"
+                      style={{
+                        background: screenStream ? 'var(--md-sys-color-primary-container)' : 'var(--md-sys-color-surface-container)',
+                        color: screenStream ? 'var(--md-sys-color-on-primary-container)' : 'var(--md-sys-color-on-surface-variant)',
+                      }}
+                    >
+                      <MonitorUp size={18} />{screenStream ? 'Zakończ' : 'Udostępnij ekran'}
                     </button>
-                    <div className="w-px h-8 bg-white/[0.1] mx-1"></div>
-                    <button onClick={disconnectVoice} className="w-14 h-14 rounded-full bg-red-500 hover:bg-red-600 text-white flex items-center justify-center transition-all duration-300 shadow-[0_0_20px_rgba(239,68,68,0.4)] hover:shadow-[0_0_30px_rgba(239,68,68,0.6)]" title="Rozłącz"><PhoneOff size={22} /></button>
+                    <div className="w-px h-7" style={{ background: 'var(--md-sys-color-outline-variant)' }} />
+                    {/* Disconnect */}
+                    <button
+                      type="button"
+                      onClick={disconnectVoice}
+                      className="w-12 h-12 rounded-full flex items-center justify-center transition-colors"
+                      style={{ background: 'var(--md-sys-color-error-container)', color: 'var(--md-sys-color-on-error-container)' }}
+                      title="Rozłącz"
+                    >
+                      <PhoneOff size={20} />
+                    </button>
                   </div>
                 </div>
               )}
@@ -5172,163 +5120,79 @@ export default function App() {
           ) : (
             <>
               {/* WIDOK CZATU TEKSTOWEGO */}
-              <div 
+              <div
                 onContextMenu={(e) => handleContextMenu(e, 'chatArea', null)}
-                className="flex-1 overflow-y-auto px-4 pt-6 pb-44 custom-scrollbar flex flex-col relative transition-all duration-500"
+                className="flex-1 overflow-y-auto px-4 pt-4 pb-4 custom-scrollbar flex flex-col"
+                style={{ background: 'var(--md-sys-color-surface-container-low)' }}
               >
-                <div className="w-full max-w-none flex flex-col mt-auto transition-all duration-500">
-                  
-                  <div className="pb-6 border-b border-white/[0.05] mb-6 flex flex-col items-start mt-8">
-                    <div className="w-16 h-16 rounded-3xl border flex items-center justify-center mb-6 shadow-lg" style={{ backgroundColor: `${currentChannelData?.color}10`, borderColor: `${currentChannelData?.color}30`, boxShadow: `0 0 30px ${currentChannelData?.color}20` }}>
-                      {currentChannelData && <currentChannelData.icon size={32} style={{ color: currentChannelData.color }} />}
+                <div className="w-full max-w-none flex flex-col mt-auto">
+                  <div
+                    className="pb-4 mb-4 flex flex-col items-start mt-6"
+                    style={{ borderBottom: '1px solid var(--md-sys-color-outline-variant)' }}
+                  >
+                    <div
+                      className="w-12 h-12 rounded-md3-lg flex items-center justify-center mb-3"
+                      style={{ background: 'var(--md-sys-color-primary-container)', color: 'var(--md-sys-color-on-primary-container)' }}
+                    >
+                      {currentChannelData && <currentChannelData.icon size={24} />}
                     </div>
-                    <h1 className="text-3xl font-bold tracking-tighter mb-2" style={{ color: currentChannelData?.color, textShadow: `0 0 20px ${currentChannelData?.color}40` }}>Witaj na #{currentChannelData?.name || 'kanale'}!</h1>
-                    <p className="text-zinc-500 text-sm">
-                      {DEMO_MODE ? 'Prywatna instancja Devcord_. Tutaj pomysły płyną szybciej.' : 'To jest początek kanału — napisz pierwszą wiadomość poniżej.'}
+                    <h1 className="text-2xl font-semibold mb-1" style={{ color: 'var(--md-sys-color-on-surface)' }}>
+                      #{currentChannelData?.name || 'kanał'}
+                    </h1>
+                    <p className="text-sm" style={{ color: 'var(--md-sys-color-on-surface-variant)' }}>
+                      {DEMO_MODE ? 'Prywatna instancja Devcord.' : 'To jest początek kanału.'}
                     </p>
                   </div>
 
                   <div className="flex flex-col">
-                  {messages.map((msg, idx, arr) => {
-                    const showHeader = idx === 0 || arr[idx - 1].userId !== msg.userId;
-                    const user = getUser(msg.userId);
-                    const role = getRole(user.roleId);
-                    const isAI = msg.userId === 'devcord_ai';
-                    const groupTop =
-                      idx === 0 ? '' : showHeader ? 'mt-6' : 'mt-1.5';
-                    const rowPad = showHeader ? 'py-1.5' : 'py-0.5';
-                    const avatarSrc =
-                      !isAI && user.avatarUrl?.trim()
-                        ? resolveMediaUrl(API_BASE_URL || appPublicOrigin(), user.avatarUrl) ?? user.avatarUrl
-                        : '';
-                    
-                    return (
-                      <div 
-                        key={msg.id} 
-                        onContextMenu={(e) => handleContextMenu(e, 'message', msg)}
-                        className={`group flex gap-3 hover:bg-white/[0.02] -mx-3 px-3 ${rowPad} ${groupTop} rounded-lg transition-colors relative ${activeThread?.id === msg.id ? 'bg-white/[0.04] border border-white/[0.05]' : 'border border-transparent'}`}
-                      >
-                        <div className={`w-10 shrink-0 flex justify-center ${showHeader ? 'mt-1' : 'mt-0'}`}>
-                          {showHeader ? (
-                            <div 
-                              role={!isAI ? 'button' : undefined}
-                              tabIndex={!isAI ? 0 : undefined}
-                              onClick={(e) => {
-                                if (isAI) return;
-                                e.stopPropagation();
-                                setProfileCardUser(user);
-                              }}
-                              onKeyDown={(e) => {
-                                if (isAI) return;
-                                if (e.key === 'Enter' || e.key === ' ') {
-                                  e.preventDefault();
-                                  setProfileCardUser(user);
-                                }
-                              }}
-                              onContextMenu={(e) => { if(!isAI) handleContextMenu(e, 'user', user); }}
-                              className={`w-10 h-10 rounded-xl border flex items-center justify-center font-bold text-sm shadow-inner overflow-hidden transition-opacity ${!isAI ? 'cursor-pointer hover:opacity-80' : ''} ${isAI ? 'bg-[#00eeff]/20 border-[#00eeff]/50 text-[#00eeff]' : 'bg-black border-white/[0.08] text-zinc-300'}`}
-                            >
-                              {isAI ? (
-                                <Sparkles size={18}/>
-                              ) : avatarSrc ? (
-                                <img src={avatarSrc} alt="" className="w-full h-full object-cover" />
-                              ) : (
-                                user.name.charAt(0)
-                              )}
-                            </div>
-                          ) : (
-                            <div className="w-10 text-[9px] text-zinc-600 opacity-0 group-hover:opacity-100 text-center leading-[24px]">{msg.time}</div>
-                          )}
-                        </div>
-
-                        <div className="flex-1 flex flex-col min-w-0">
-                          {showHeader && (
-                            <div className="flex items-baseline gap-2 mb-1.5">
-                              <span
-                                onClick={(e) => {
-                                  if (isAI) return;
-                                  e.stopPropagation();
-                                  setProfileCardUser(user);
-                                }}
-                                onContextMenu={(e) => {
-                                  if (!isAI) handleContextMenu(e, 'user', user);
-                                }}
-                                className={`font-semibold text-[14px] tracking-wide ${!isAI ? 'cursor-pointer hover:underline' : ''}`}
-                              >
-                                {isAI ? (
-                                  <span
-                                    style={{
-                                      color: '#00eeff',
-                                      textShadow: '0 0 15px #00eeff60',
-                                    }}
-                                  >
-                                    {user.name}
-                                  </span>
-                                ) : (
-                                  <NickLabel user={user} fallbackColor={role.color} />
-                                )}
-                              </span>
-                              {!isAI && role.name !== 'Member' && role.id !== 'r4' && (
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setProfileCardUser(user);
-                                  }}
-                                  className="flex items-center gap-1.5 px-1.5 py-[2px] rounded text-[9px] font-bold uppercase tracking-wider border shadow-sm backdrop-blur-sm cursor-pointer hover:brightness-110 transition-[filter]"
-                                  style={{ backgroundColor: role.bg, borderColor: role.border, color: role.color, boxShadow: role.glow !== 'none' ? `0 0 8px ${role.bg}` : 'none' }}
-                                >
-                                  <role.icon size={10} strokeWidth={2.5} /><span>{role.name}</span>
-                                </button>
-                              )}
-                              <span className="text-[10px] text-zinc-600 font-medium ml-1">{msg.time}</span>
-                            </div>
-                          )}
-                          
-                          <div className={`text-[15px] leading-relaxed ${isAI ? 'text-[#00eeff] font-medium' : 'text-zinc-300'}`}>
-                            {renderMessageContent(msg.content)}
-                          </div>
-
-                          {msg.reactions && msg.reactions.length > 0 && (
-                            <div className="flex items-center gap-1.5 mt-3">
-                              {msg.reactions.map((r, i) => (
-                                <button key={i} className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs font-medium border transition-colors ${r.userReacted ? 'bg-[#00eeff]/10 border-[#00eeff]/30 text-[#00eeff] shadow-[0_0_10px_rgba(0,238,255,0.1)]' : 'bg-white/[0.02] border-white/[0.05] text-zinc-400 hover:bg-white/[0.05]'}`}>
-                                  <span>{r.emoji}</span><span>{r.count}</span>
-                                </button>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-
-                        {/* MESSAGE ACTIONS */}
-                        <div className="absolute right-4 top-2 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 bg-black/80 backdrop-blur-md border border-white/[0.1] rounded-lg p-1 shadow-xl">
-                          <button className="p-1.5 text-zinc-400 hover:text-amber-400 hover:bg-amber-400/10 rounded-md transition-all" title="Zareaguj"><Smile size={14} /></button>
-                          <button onClick={() => setCreateTaskModal({ isOpen: true, sourceMsg: msg })} className="p-1.5 text-zinc-400 hover:text-[#00eeff] hover:bg-[#00eeff]/20 rounded-md transition-all" title="Utwórz zadanie z wiadomości"><ListTodo size={14} /></button>
-                          <button onClick={() => openThread(msg)} className="p-1.5 text-zinc-400 hover:text-white hover:bg-white/[0.1] rounded-md transition-all" title="Otwórz wątek"><MessageSquareShare size={14} /></button>
-                          {msg.isMe && (
-                            <>
-                              <div className="w-[1px] h-3 bg-white/[0.1] mx-1"></div>
-                              <button className="p-1.5 text-zinc-400 hover:text-blue-400 hover:bg-blue-400/10 rounded-md transition-all" title="Edytuj"><Edit2 size={14} /></button>
-                              <button onClick={() => deleteMessage(msg.id as string)} className="p-1.5 text-zinc-400 hover:text-red-500 hover:bg-red-500/10 rounded-md transition-all" title="Usuń"><Trash2 size={14} /></button>
-                            </>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
+                    {messages.map((msg, idx, arr) => {
+                      const showHeader = idx === 0 || arr[idx - 1].userId !== msg.userId;
+                      const tail = !showHeader;
+                      const user = getUser(msg.userId);
+                      const role = getRole(user.roleId);
+                      const isAI = msg.userId === 'devcord_ai';
+                      const avatarSrc =
+                        !isAI && user.avatarUrl?.trim()
+                          ? resolveMediaUrl(API_BASE_URL || appPublicOrigin(), user.avatarUrl) ?? user.avatarUrl
+                          : '';
+                      return (
+                        <ChatMessage
+                          key={msg.id}
+                          msg={msg}
+                          tail={tail}
+                          user={user}
+                          role={role}
+                          isAI={isAI}
+                          avatarSrc={avatarSrc}
+                          activeThreadId={activeThread?.id ?? null}
+                          renderContent={renderMessageContent}
+                          onContextMenuMessage={(e) => handleContextMenu(e, 'message', msg)}
+                          onContextMenuUser={(e) => handleContextMenu(e, 'user', user)}
+                          onOpenProfile={() => setProfileCardUser(user)}
+                          onCreateTask={() => setCreateTaskModal({ isOpen: true, sourceMsg: msg })}
+                          onOpenThread={() => openThread(msg)}
+                          onDelete={() => deleteMessage(msg.id)}
+                        />
+                      );
+                    })}
                   </div>
                   
                   {/* AI LOADING INDICATOR */}
                   {isAILoading && (
-                    <div className="flex gap-4 -mx-4 px-4 py-3 items-center animate-in fade-in duration-300">
-                      <div className="w-10 h-10 shrink-0 rounded-xl bg-[#00eeff]/10 border border-[#00eeff]/30 flex items-center justify-center text-[#00eeff] shadow-[0_0_15px_rgba(0,238,255,0.2)]">
-                        <Sparkles size={18} className="animate-pulse" />
+                    <div className="flex gap-[var(--gap-md)] py-0.5 items-center animate-fade-in" style={{ marginTop: 'var(--message-group-spacing)' }}>
+                      <div className="flex-shrink-0 flex justify-end items-start py-0.5 px-[var(--gap-sm)]" style={{ width: 54 }}>
+                        <div
+                          className="w-9 h-9 rounded-md3-md flex items-center justify-center"
+                          style={{ background: 'var(--md-sys-color-primary-container)', color: 'var(--md-sys-color-on-primary-container)' }}
+                        >
+                          <Sparkles size={16} className="animate-pulse" />
+                        </div>
                       </div>
-                      <div className="flex items-center gap-1">
-                        <div className="w-1.5 h-1.5 bg-[#00eeff] rounded-full loader-dot"></div>
-                        <div className="w-1.5 h-1.5 bg-[#00eeff] rounded-full loader-dot"></div>
-                        <div className="w-1.5 h-1.5 bg-[#00eeff] rounded-full loader-dot"></div>
-                        <span className="ml-3 text-sm text-[#00eeff]/70 font-medium">Devcord AI analizuje...</span>
+                      <div className="flex items-center gap-1.5">
+                        <div className="w-2 h-2 rounded-full loader-dot" style={{ background: 'var(--md-sys-color-primary)' }}></div>
+                        <div className="w-2 h-2 rounded-full loader-dot" style={{ background: 'var(--md-sys-color-primary)' }}></div>
+                        <div className="w-2 h-2 rounded-full loader-dot" style={{ background: 'var(--md-sys-color-primary)' }}></div>
+                        <span className="ml-2 text-sm" style={{ color: 'var(--md-sys-color-on-surface-variant)' }}>Devcord AI analizuje…</span>
                       </div>
                     </div>
                   )}
@@ -5338,151 +5202,87 @@ export default function App() {
               </div>
 
               {/* INPUT CZATU */}
-              <div className="absolute bottom-6 left-0 right-0 px-4 flex justify-start pointer-events-none z-20">
-                <div className="w-full pointer-events-auto transition-all duration-500">
-                  <div className={`bg-[#111111]/95 backdrop-blur-3xl border ${isInputFocused || isAIPromptOpen ? 'border-white/[0.2] bg-[#151515] shadow-[0_20px_60px_-15px_rgba(0,238,255,0.1)]' : 'border-white/[0.1] shadow-[0_20px_60px_-15px_rgba(0,0,0,1)]'} rounded-3xl p-1.5 flex flex-col transition-all overflow-hidden`}>
-                    
-                    {isAIPromptOpen && (
-                      <div className="px-4 py-3 bg-[#00eeff]/5 border-b border-[#00eeff]/20 flex items-center gap-3 animate-in slide-in-from-top-2 fade-in duration-200">
-                        <Sparkles size={18} className="text-[#00eeff] animate-pulse" />
-                        <input autoFocus value={inputValue} onChange={(e) => setInputValue(e.target.value)} onKeyDown={handleKeyDown} placeholder="Poproś Devcord AI o pomoc, podsumowanie lub kod..." className="flex-1 bg-transparent text-sm font-medium text-[#00eeff] outline-none placeholder-[#00eeff]/50" />
-                        <button onClick={() => setIsAIPromptOpen(false)} className="text-[#00eeff]/50 hover:text-[#00eeff] transition-colors"><X size={16}/></button>
-                      </div>
-                    )}
-
-                    {!isAIPromptOpen && (
-                      <div className={`flex items-center gap-1 px-3 overflow-hidden transition-all duration-300 ${isInputFocused || inputValue.length > 0 ? 'h-8 opacity-100 pt-1 border-b border-white/[0.05] mb-1' : 'h-0 opacity-0'}`}>
-                        <button className="p-1 text-zinc-500 hover:text-white rounded transition-colors"><Bold size={14} /></button>
-                        <button className="p-1 text-zinc-500 hover:text-white rounded transition-colors"><Italic size={14} /></button>
-                        <div className="w-[1px] h-3 bg-white/[0.1] mx-1"></div>
-                        <button className="p-1 text-zinc-500 hover:text-[#00eeff] rounded transition-colors" title="Dodaj blok kodu"><CodeIcon size={14} /></button>
-                        <button className="p-1 text-zinc-500 hover:text-white rounded transition-colors"><Link size={14} /></button>
-                        <div className="ml-auto flex items-center">
-                          <button onClick={() => setIsAIPromptOpen(true)} className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-[#00eeff]/10 text-[#00eeff] hover:bg-[#00eeff]/20 text-[10px] font-bold uppercase tracking-widest transition-colors"><Sparkles size={10} /> DEVCORD AI</button>
-                        </div>
-                      </div>
-                    )}
-
-                    <div className={`flex items-end w-full ${isAIPromptOpen ? 'hidden' : ''}`}>
-                      <button onClick={handleAttachClick} className="h-10 w-10 shrink-0 m-1 rounded-2xl bg-white/[0.05] hover:bg-white/[0.1] flex items-center justify-center text-zinc-400 hover:text-[#00eeff] transition-colors"><Plus size={18} /></button>
-                      <textarea ref={textareaRef} value={inputValue} onChange={(e) => setInputValue(e.target.value)} onKeyDown={handleKeyDown} onFocus={() => setIsInputFocused(true)} onBlur={() => setIsInputFocused(false)} placeholder={isZenMode ? "Zanurz się w strumieniu..." : `Napisz wiadomość na ${currentChannelData?.name || 'tym kanale'}...`} className="flex-1 bg-transparent text-zinc-100 placeholder-zinc-600 px-3 py-3.5 outline-none resize-none text-[15px] tracking-tight leading-relaxed custom-scrollbar" rows={1} disabled={!currentChannelData} />
-                      <button onClick={handleSendMessage} className={`h-10 w-10 shrink-0 m-1 rounded-2xl flex items-center justify-center transition-all duration-300 ${inputValue.trim() ? 'bg-[#00eeff] text-black shadow-[0_0_20px_rgba(0,238,255,0.4)] scale-100' : 'bg-transparent text-zinc-600 scale-90'}`} disabled={!inputValue.trim()}>
-                        <ArrowUpRight size={18} className={inputValue.trim() ? "translate-x-[1px] -translate-y-[1px]" : ""} />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
+              <MessageInput
+                inputValue={inputValue}
+                onChange={setInputValue}
+                onSend={handleSendMessage}
+                onKeyDown={handleKeyDown}
+                placeholder={`Napisz na #${currentChannelData?.name || 'kanale'}…`}
+                disabled={!currentChannelData}
+                onAttach={handleAttachClick}
+                isAIPromptOpen={isAIPromptOpen}
+                onCloseAI={() => setIsAIPromptOpen(false)}
+                onOpenAI={() => setIsAIPromptOpen(true)}
+                textareaRef={textareaRef}
+                isZenMode={isZenMode}
+                pickerTheme={localTheme === 'light' ? 'light' : 'dark'}
+              />
             </>
           )}
 
           {/* PIP Głosowy, gdy jesteś na innym kanale */}
           {activeVoiceChannel && activeVoiceChannel !== activeChannel && (
-            <div className="absolute bottom-32 right-8 w-80 max-w-[calc(100vw-2rem)] max-h-[min(85vh,520px)] flex flex-col bg-[#111111]/95 backdrop-blur-3xl border border-[#00eeff]/20 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.8)] z-40 overflow-hidden animate-in slide-in-from-bottom-6 fade-in duration-300">
+            <div
+              className="absolute bottom-24 right-4 w-72 max-w-[calc(100vw-2rem)] max-h-[min(85vh,500px)] flex flex-col rounded-md3-lg shadow-md3 z-40 overflow-hidden animate-modal-in"
+              style={{ background: 'var(--md-sys-color-secondary-container)', border: '1px solid var(--md-sys-color-outline-variant)', color: 'var(--md-sys-color-on-secondary-container)' }}
+            >
               {(() => {
                 const voiceChan = channels.find((c) => c.id === activeVoiceChannel);
                 if (!voiceChan) return null;
-                const dotClass = voicePhase === 'connected' ? 'bg-[#00eeff] shadow-[0_0_8px_#00eeff]' : voicePhase === 'error' ? 'bg-red-500' : 'bg-amber-400 animate-pulse';
                 return (
                   <>
-                    <div className="px-4 py-3 border-b border-white/[0.05] flex items-center justify-between bg-white/[0.02] gap-2 cursor-pointer hover:bg-[#00eeff]/5 transition-colors shrink-0" onClick={() => setActiveChannel(voiceChan.id)}>
+                    <div
+                      className="px-3 py-2.5 flex items-center justify-between gap-2 cursor-pointer shrink-0 transition-colors"
+                      style={{ borderBottom: '1px solid var(--md-sys-color-outline-variant)' }}
+                      onClick={() => setActiveChannel(voiceChan.id)}
+                      onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
+                      onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                    >
                       <div className="flex items-center gap-2 min-w-0">
-                        <div className={`w-2 h-2 rounded-full shrink-0 ${dotClass}`} />
-                        <span className="text-xs font-semibold tracking-wide truncate" style={{ color: voiceChan.color }}>{voiceChan.name}</span>
+                        <div
+                          className="w-2 h-2 rounded-full shrink-0"
+                          style={{ background: voicePhase === 'connected' ? 'var(--color-status-online)' : voicePhase === 'error' ? 'var(--md-sys-color-error)' : 'var(--color-status-idle)' }}
+                        />
+                        <span className="text-xs font-semibold truncate">{voiceChan.name}</span>
                       </div>
-                      <span className="text-[10px] text-[#00eeff] font-bold uppercase tracking-widest shrink-0 hover:underline">Wróć na grid</span>
+                      <span className="text-[10px] font-semibold shrink-0 hover:underline" style={{ color: 'var(--md-sys-color-primary)' }}>Wróć</span>
                     </div>
-                    {voiceMixPanelOpen && voicePhase === 'connected' && (
-                      <div
-                        className="px-3 py-2 border-b border-white/[0.06] overflow-y-auto custom-scrollbar max-h-[220px] shrink-0"
-                        onMouseDown={(e) => e.stopPropagation()}
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <div className="text-[9px] font-bold uppercase tracking-widest text-zinc-500 mb-2 px-0.5">Miks uczestników</div>
-                        {voiceParticipants.filter((id) => id !== myUserId).length === 0 ? (
-                          <p className="text-[11px] text-zinc-500 py-1">Brak innych uczestników.</p>
-                        ) : (
-                          <ul className="flex flex-col gap-2">
-                            {voiceParticipants
-                              .filter((id) => id !== myUserId)
-                              .map((uid) => {
-                                const u = getUser(uid);
-                                const vol = userVolumes[uid] ?? 1;
-                                const outMuted = !!userOutputMuted[uid];
-                                return (
-                                  <li key={uid} className="flex flex-col gap-1 rounded-lg bg-white/[0.04] border border-white/[0.06] px-2 py-1.5">
-                                    <div className="flex items-center justify-between gap-1 min-w-0">
-                                      <div className="flex items-center gap-1.5 min-w-0 flex-1">
-                                        <UserAvatarBubble user={u} className="w-6 h-6 rounded-full" />
-                                        <NickLabel user={u} fallbackColor="#e4e4e7" className="text-xs font-semibold truncate min-w-0" />
-                                      </div>
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          const next = !outMuted;
-                                          setUserOutputMutedMap((prev) => ({ ...prev, [uid]: next }));
-                                          setPeerOutputMute(uid, next);
-                                        }}
-                                        className={`shrink-0 w-7 h-7 rounded-full flex items-center justify-center border ${outMuted ? 'bg-red-500/20 text-red-400 border-red-500/35' : 'bg-white/[0.06] text-zinc-300 border-white/[0.08]'}`}
-                                      >
-                                        {outMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}
-                                      </button>
-                                    </div>
-                                    <div className="flex flex-col gap-0.5">
-                                      <div className="flex items-center gap-1.5">
-                                        <span className="text-[8px] text-zinc-400 tabular-nums min-w-[8rem] text-right shrink-0 leading-tight">
-                                          {voiceVolumeUiLabel(vol)}
-                                        </span>
-                                        <input
-                                          type="range"
-                                          min={VOICE_PEER_GAIN_MIN}
-                                          max={VOICE_PEER_GAIN_MAX}
-                                          step={0.05}
-                                          value={vol}
-                                          onChange={(e) => {
-                                            const v = parseFloat(e.target.value);
-                                            setUserVolumes((prev) => ({ ...prev, [uid]: v }));
-                                            setUserVolume(uid, v);
-                                          }}
-                                          className="flex-1 min-w-0 h-1 rounded-full appearance-none bg-white/[0.1] accent-[#00eeff]"
-                                        />
-                                      </div>
-                                    </div>
-                                  </li>
-                                );
-                              })}
-                          </ul>
-                        )}
-                      </div>
-                    )}
-                    <div className="px-4 py-3 bg-black/40 flex items-center justify-center gap-2 flex-wrap shrink-0">
+                    {/* PiP action bar */}
+                    <div
+                      className="px-3 py-2.5 flex items-center justify-center gap-2 flex-wrap shrink-0"
+                      style={{ borderTop: '1px solid var(--md-sys-color-outline-variant)' }}
+                    >
                       <button
                         type="button"
                         onClick={() => toggleVoiceMic()}
-                        className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors border ${localMuted || localDeafened ? 'bg-red-500/15 text-red-400 border-red-500/35' : 'bg-white/[0.05] text-zinc-200 border-white/[0.08] hover:bg-white/[0.1]'}`}
-                        title={localDeafened ? 'Wyłącz tryb głuchy i włącz mikrofon' : localMuted ? 'Włącz mikrofon' : 'Wycisz mikrofon'}
+                        className="w-9 h-9 rounded-full flex items-center justify-center transition-colors"
+                        style={{
+                          background: localMuted || localDeafened ? 'var(--md-sys-color-error-container)' : 'var(--md-sys-color-primary-container)',
+                          color: localMuted || localDeafened ? 'var(--md-sys-color-on-error-container)' : 'var(--md-sys-color-on-primary-container)',
+                        }}
                       >
-                        {localMuted || localDeafened ? <MicOff size={16} /> : <Mic size={16} />}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setVoiceMixPanelOpen((o) => !o)}
-                        disabled={voicePhase !== 'connected'}
-                        className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors border shrink-0 ${voiceMixPanelOpen ? 'bg-[#00eeff]/15 text-[#00eeff] border-[#00eeff]/35' : 'bg-white/[0.05] text-zinc-300 border-white/[0.08] hover:bg-white/[0.1]'} disabled:opacity-40`}
-                        title="Miks uczestników"
-                      >
-                        <SlidersHorizontal size={16} />
+                        {localMuted || localDeafened ? <MicOff size={15} /> : <Mic size={15} />}
                       </button>
                       <button
                         type="button"
                         onClick={() => toggleVoiceHeadphones()}
                         disabled={voicePhase !== 'connected'}
-                        className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors border shrink-0 ${localDeafened ? 'bg-red-500/15 text-red-400 border-red-500/35' : 'bg-white/[0.05] text-zinc-200 border-white/[0.08] hover:bg-white/[0.1]'} disabled:opacity-40`}
-                        title={localDeafened ? 'Włącz odsłuch innych i mikrofon' : 'Wycisz mikrofon i przestań słyszeć innych'}
+                        className="w-9 h-9 rounded-full flex items-center justify-center transition-colors disabled:opacity-40"
+                        style={{
+                          background: localDeafened ? 'var(--md-sys-color-error-container)' : 'var(--md-sys-color-surface-container)',
+                          color: localDeafened ? 'var(--md-sys-color-on-error-container)' : 'var(--md-sys-color-on-surface-variant)',
+                        }}
                       >
-                        <Headphones size={16} className={localDeafened ? 'opacity-50' : ''} />
+                        <Headphones size={15} className={localDeafened ? 'opacity-50' : ''} />
                       </button>
-                      <button onClick={disconnectVoice} className="w-10 h-10 rounded-full bg-red-500/10 hover:bg-red-500/20 text-red-500 border border-red-500/30 flex items-center justify-center transition-colors shadow-[0_0_15px_rgba(239,68,68,0.2)]"><PhoneOff size={16} /></button>
+                      <button
+                        type="button"
+                        onClick={disconnectVoice}
+                        className="w-9 h-9 rounded-full flex items-center justify-center transition-colors"
+                        style={{ background: 'var(--md-sys-color-error-container)', color: 'var(--md-sys-color-on-error-container)' }}
+                      >
+                        <PhoneOff size={15} />
+                      </button>
                     </div>
                   </>
                 );
@@ -5491,48 +5291,71 @@ export default function App() {
           )}
           </>
           )}
-        </main>
+        </ChatColumn>
 
         {/* --- 4. INTELIGENTNY PRAWY PANEL (WĄTKI, ZADANIA, PLIKI) --- */}
         {!isZenMode &&
           (rightPanelTab || activeThread) &&
           !(API_BASE_URL && servers.length === 0) && (
-          <aside
-            className={`w-[320px] backdrop-blur-xl border-l flex flex-col shrink-0 z-20 transition-all duration-300 shadow-2xl devcord-rightbar ${
-              localTheme === 'light' ? 'bg-zinc-50/95 border-zinc-200' : 'bg-[#080808]/80 border-white/[0.04]'
-            }`}
-          >
+          <MemberColumn>
             
             {activeThread ? (
               // WIDOK WĄTKU
               <>
-                <div className="h-16 border-b border-white/[0.04] flex items-center justify-between px-5 bg-black/20">
-                  <div className="flex items-center gap-2"><MessageSquareShare size={16} className="text-[#00eeff]" /><span className="text-sm font-semibold tracking-wide text-white">Wątek Devcord</span></div>
-                  <button onClick={() => setActiveThread(null)} className="p-1.5 text-zinc-500 hover:text-white hover:bg-white/[0.1] rounded-lg transition-colors"><X size={16} /></button>
+                <div
+                  className="h-14 flex items-center justify-between px-4 shrink-0"
+                  style={{ borderBottom: '1px solid var(--md-sys-color-outline-variant)' }}
+                >
+                  <div className="flex items-center gap-2">
+                    <MessageSquareShare size={15} style={{ color: 'var(--md-sys-color-primary)' }} />
+                    <span className="text-sm font-semibold" style={{ color: 'var(--md-sys-color-on-surface)' }}>Wątek</span>
+                  </div>
+                  <button
+                    onClick={() => setActiveThread(null)}
+                    className="p-1.5 rounded-md3-sm transition-colors"
+                    style={{ color: 'var(--md-sys-color-on-surface-variant)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--md-sys-color-surface-container-high)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                  >
+                    <X size={15} />
+                  </button>
                 </div>
                 <div className="flex-1 overflow-y-auto custom-scrollbar flex flex-col relative">
-                  <div className="p-5 border-b border-white/[0.02] bg-white/[0.01]">
-                    <div className="flex items-center gap-2 mb-3 min-w-0">
-                      <UserAvatarBubble user={getUser(activeThread.userId)} className="w-6 h-6 rounded-md" />
+                  <div className="px-4 py-3" style={{ borderBottom: '1px solid var(--md-sys-color-surface-container-high)' }}>
+                    <div className="flex items-center gap-2 mb-2 min-w-0">
+                      <UserAvatarBubble user={getUser(activeThread.userId)} className="w-6 h-6 rounded-md3-sm" />
                       <NickLabel
                         user={getUser(activeThread.userId)}
-                        fallbackColor="#fafafa"
                         className="text-xs font-semibold truncate min-w-0"
+                        style={{ color: 'var(--md-sys-color-on-surface)' }}
                       />
-                      <span className="text-[10px] text-zinc-600 shrink-0">{activeThread.time}</span>
+                      <span className="text-[10px] shrink-0" style={{ color: 'var(--md-sys-color-on-surface-variant)' }}>{activeThread.time}</span>
                     </div>
-                    <div className="text-[13px] text-zinc-300 leading-relaxed">{renderMessageContent(activeThread.content)}</div>
+                    <div className="text-[13px] leading-relaxed" style={{ color: 'var(--md-sys-color-on-surface-variant)' }}>{renderMessageContent(activeThread.content)}</div>
                   </div>
                   <div className="flex flex-col items-center justify-center p-8 opacity-50">
-                     <MessageSquare size={32} className="text-zinc-600 mb-2"/>
-                     <span className="text-xs text-zinc-500">Brak odpowiedzi w wątku</span>
+                    <MessageSquare size={28} className="mb-2" style={{ color: 'var(--md-sys-color-on-surface-variant)' }} />
+                    <span className="text-xs" style={{ color: 'var(--md-sys-color-on-surface-variant)' }}>Brak odpowiedzi w wątku</span>
                   </div>
                 </div>
-                <div className="p-4 bg-black/40 border-t border-white/[0.04]">
-                  <div className="bg-[#111] border border-white/[0.1] rounded-2xl p-1 flex items-end transition-all focus-within:border-[#00eeff]/50">
-                    <textarea value={threadInputValue} onChange={(e) => setThreadInputValue(e.target.value)} placeholder="Odpowiedz w wątku..." className="flex-1 bg-transparent text-zinc-200 placeholder-zinc-600 px-3 py-2.5 outline-none resize-none text-[13px] tracking-tight custom-scrollbar" rows={1} />
-                    <button className={`h-8 w-8 shrink-0 m-1 rounded-xl flex items-center justify-center transition-all ${threadInputValue.trim() ? 'bg-[#00eeff] text-black shadow-[0_0_10px_rgba(0,238,255,0.3)]' : 'bg-transparent text-zinc-600'}`}>
-                      <Send size={14} className={threadInputValue.trim() ? "translate-x-[1px] -translate-y-[1px]" : ""} />
+                <div className="px-3 py-3 shrink-0" style={{ borderTop: '1px solid var(--md-sys-color-outline-variant)' }}>
+                  <div
+                    className="rounded-md3-lg p-1 flex items-end transition-all focus-within:ring-1 focus-within:ring-primary/50"
+                    style={{ background: 'var(--md-sys-color-surface-container-high)', border: '1px solid var(--md-sys-color-outline-variant)' }}
+                  >
+                    <textarea
+                      value={threadInputValue}
+                      onChange={(e) => setThreadInputValue(e.target.value)}
+                      placeholder="Odpowiedz w wątku…"
+                      className="flex-1 bg-transparent px-3 py-2 outline-none resize-none text-[13px] custom-scrollbar"
+                      style={{ color: 'var(--md-sys-color-on-surface)', caretColor: 'var(--md-sys-color-primary)' }}
+                      rows={1}
+                    />
+                    <button
+                      className="h-8 w-8 shrink-0 m-0.5 rounded-md3-md flex items-center justify-center transition-all"
+                      style={threadInputValue.trim() ? { background: 'var(--md-sys-color-primary)', color: 'var(--md-sys-color-on-primary)' } : { background: 'transparent', color: 'var(--md-sys-color-on-surface-variant)' }}
+                    >
+                      <Send size={13} className={threadInputValue.trim() ? 'translate-x-[1px] -translate-y-[1px]' : ''} />
                     </button>
                   </div>
                 </div>
@@ -5540,10 +5363,21 @@ export default function App() {
             ) : (
               // WIDOK ZAKŁADEK
               <>
-                <div className="h-16 border-b border-white/[0.04] flex items-end px-4 gap-4 bg-black/20">
-                  <button onClick={() => setRightPanelTab('members')} className={`pb-3 text-sm font-medium transition-colors relative ${rightPanelTab === 'members' ? 'text-[#00eeff]' : 'text-zinc-500 hover:text-zinc-300'}`}>{isDmView ? 'Profil' : 'Członkowie'}{rightPanelTab === 'members' && <div className="absolute bottom-0 left-0 right-0 h-[2px] bg-[#00eeff] rounded-t-full shadow-[0_0_10px_rgba(0,238,255,0.5)]"></div>}</button>
-                  {!isDmView && <button onClick={() => setRightPanelTab('files')} className={`pb-3 text-sm font-medium transition-colors relative ${rightPanelTab === 'files' ? 'text-[#00eeff]' : 'text-zinc-500 hover:text-zinc-300'}`}>Pliki{rightPanelTab === 'files' && <div className="absolute bottom-0 left-0 right-0 h-[2px] bg-[#00eeff] rounded-t-full shadow-[0_0_10px_rgba(0,238,255,0.5)]"></div>}</button>}
-                  {!isDmView && <button onClick={() => setRightPanelTab('tasks')} className={`pb-3 text-sm font-medium transition-colors relative ${rightPanelTab === 'tasks' ? 'text-[#00eeff]' : 'text-zinc-500 hover:text-zinc-300'}`}>Zadania{rightPanelTab === 'tasks' && <div className="absolute bottom-0 left-0 right-0 h-[2px] bg-[#00eeff] rounded-t-full shadow-[0_0_10px_rgba(0,238,255,0.5)]"></div>}</button>}
+                <div className="h-12 flex items-center px-3 gap-1 shrink-0" style={{ borderBottom: '1px solid var(--md-sys-color-outline-variant)' }}>
+                  {(['members', ...(!isDmView ? ['files', 'tasks'] : [])] as const).map(tab => (
+                    <button
+                      key={tab}
+                      onClick={() => setRightPanelTab(tab as any)}
+                      className="px-3 py-1.5 rounded-md3-sm text-sm font-medium transition-colors"
+                      style={rightPanelTab === tab
+                        ? { background: 'var(--md-sys-color-primary-container)', color: 'var(--md-sys-color-on-primary-container)' }
+                        : { color: 'var(--md-sys-color-on-surface-variant)' }}
+                      onMouseEnter={e => { if (rightPanelTab !== tab) e.currentTarget.style.background = 'var(--md-sys-color-surface-container-high)'; }}
+                      onMouseLeave={e => { if (rightPanelTab !== tab) e.currentTarget.style.background = 'transparent'; }}
+                    >
+                      {tab === 'members' ? (isDmView ? 'Profil' : 'Członkowie') : tab === 'files' ? 'Pliki' : 'Zadania'}
+                    </button>
+                  ))}
                 </div>
                 
                 <div className="flex-1 overflow-y-auto custom-scrollbar flex flex-col">
@@ -5551,28 +5385,34 @@ export default function App() {
                   {rightPanelTab === 'members' && (
                     <div className="p-4 space-y-6 flex-1 min-h-full" onContextMenu={(e) => handleContextMenu(e, 'membersArea', null)}>
                       {isDmView && dmPanelPeer ? (
-                        <div className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-4">
+                        <div className="rounded-md3-lg p-4" style={{ background: 'var(--md-sys-color-surface-container)', border: '1px solid var(--md-sys-color-outline-variant)' }}>
                           <div className="flex items-center gap-3">
                             {dmPanelPeer.avatarUrl?.trim() ? (
                               <img
                                 src={resolveMediaUrl(API_BASE_URL || appPublicOrigin(), dmPanelPeer.avatarUrl) ?? dmPanelPeer.avatarUrl}
                                 alt=""
-                                className="w-11 h-11 rounded-xl object-cover border border-white/[0.1]"
+                                className="w-12 h-12 rounded-md3-md object-cover"
                               />
                             ) : (
-                              <div className="w-11 h-11 rounded-xl bg-black border border-white/[0.08] flex items-center justify-center text-sm font-bold text-white">
+                              <div
+                                className="w-12 h-12 rounded-md3-md flex items-center justify-center text-sm font-bold"
+                                style={{ background: 'var(--md-sys-color-secondary-container)', color: 'var(--md-sys-color-on-secondary-container)' }}
+                              >
                                 {dmPanelPeer.name.charAt(0)}
                               </div>
                             )}
                             <div className="min-w-0 flex-1">
-                              <NickLabel user={dmPanelPeer} fallbackColor="#fafafa" className="text-base font-bold truncate" />
-                              <p className="text-[10px] uppercase tracking-wider text-zinc-500">ID rozmowy: {dmActiveConversationId}</p>
+                              <NickLabel user={dmPanelPeer} className="text-sm font-bold truncate" style={{ color: 'var(--md-sys-color-on-surface)' }} />
+                              <p className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--md-sys-color-on-surface-variant)' }}>DM #{dmActiveConversationId?.slice(0, 8)}</p>
                             </div>
                           </div>
                           <button
                             type="button"
                             onClick={() => setProfileCardUser(dmPanelPeer)}
-                            className="mt-4 w-full rounded-lg border border-white/[0.08] bg-black/40 py-2 text-sm font-semibold text-zinc-300 hover:text-white hover:bg-white/[0.06]"
+                            className="mt-3 w-full rounded-md3-sm py-1.5 text-sm font-semibold transition-colors"
+                            style={{ background: 'var(--md-sys-color-surface-container-high)', color: 'var(--md-sys-color-on-surface)', border: '1px solid var(--md-sys-color-outline-variant)' }}
+                            onMouseEnter={e => (e.currentTarget.style.background = 'var(--md-sys-color-primary-container)')}
+                            onMouseLeave={e => (e.currentTarget.style.background = 'var(--md-sys-color-surface-container-high)')}
                           >
                             Otwórz profil
                           </button>
@@ -5583,33 +5423,49 @@ export default function App() {
                         if (usersInRole.length === 0) return null;
                         return (
                           <div key={role.id}>
-                            <div className="mb-2 mt-6 first:mt-0 flex items-center justify-between px-2.5 py-1.5 rounded-lg border relative overflow-hidden backdrop-blur-md" style={{ backgroundColor: role.bg, borderColor: role.border }}>
-                              <div className="absolute left-0 top-0 bottom-0 w-[2px]" style={{ backgroundColor: role.color, boxShadow: role.glow }} />
-                              <div className="flex items-center gap-2"><role.icon size={12} style={{ color: role.color }} strokeWidth={2.5} /><span className="text-[9px] uppercase tracking-[0.2em] font-bold" style={{ color: role.color, textShadow: role.glow !== 'none' ? `0 0 10px ${role.color}80` : 'none' }}>{role.name}</span></div>
-                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-md bg-black/60 border flex items-center justify-center min-w-[20px]" style={{ color: role.color, borderColor: role.border }}>{usersInRole.length}</span>
+                            <div
+                              className="mb-1 mt-4 first:mt-0 flex items-center justify-between px-2 py-1"
+                              style={{ color: 'var(--md-sys-color-on-surface-variant)' }}
+                            >
+                              <div className="flex items-center gap-1.5">
+                                <role.icon size={11} strokeWidth={2.5} />
+                                <span className="text-[10px] uppercase tracking-[0.15em] font-semibold">{role.name}</span>
+                              </div>
+                              <span
+                                className="text-[10px] font-bold px-1.5 py-0.5 rounded-md3-sm"
+                                style={{ background: 'var(--md-sys-color-surface-container-high)', color: 'var(--md-sys-color-on-surface-variant)' }}
+                              >{usersInRole.length}</span>
                             </div>
-                            <div className="flex flex-col gap-0.5 mt-1.5">
+                            <div className="flex flex-col gap-0.5">
                               {usersInRole.map(user => (
                                 <div 
                                   key={user.id} 
                                   onClick={() => setProfileCardUser(user)}
                                   onContextMenu={(e) => handleContextMenu(e, 'user', user)}
-                                  className="user-row flex items-center gap-3 px-2 py-1.5 rounded-lg cursor-pointer transition-all duration-300 border border-transparent" 
-                                  style={{ '--hover-bg': role.bg, '--hover-border': role.border } as any}
+                                  className="menu-btn flex items-center gap-2.5 px-2 py-1.5 rounded-md3-sm cursor-pointer"
                                 >
-                                  <div className="relative">
+                                  <div className="relative shrink-0">
                                     {user.avatarUrl?.trim() ? (
                                       <img
                                         src={resolveMediaUrl(API_BASE_URL || appPublicOrigin(), user.avatarUrl) ?? user.avatarUrl}
                                         alt=""
-                                        className="w-8 h-8 rounded-xl object-cover border border-white/[0.08]"
+                                        className="w-8 h-8 rounded-md3-sm object-cover"
                                       />
                                     ) : (
-                                      <div className="w-8 h-8 rounded-xl bg-black border border-white/[0.08] flex items-center justify-center text-xs font-bold transition-all duration-300" style={{ color: role.color }}>{user.name.charAt(0)}</div>
+                                      <div
+                                        className="w-8 h-8 rounded-md3-sm flex items-center justify-center text-xs font-bold"
+                                        style={{ background: 'var(--md-sys-color-secondary-container)', color: 'var(--md-sys-color-on-secondary-container)' }}
+                                      >{user.name.charAt(0)}</div>
                                     )}
-                                    <div className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-[#0a0a0c] ${user.status === 'online' ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]' : user.status === 'idle' ? 'bg-amber-400' : user.status === 'dnd' ? 'bg-red-500' : 'bg-zinc-600'}`}></div>
+                                    <div
+                                      className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full"
+                                      style={{
+                                        background: user.status === 'online' ? 'var(--color-status-online)' : user.status === 'idle' ? 'var(--color-status-idle)' : user.status === 'dnd' ? 'var(--color-status-dnd)' : 'var(--color-status-offline)',
+                                        outline: '2px solid var(--md-sys-color-surface-container-low)',
+                                      }}
+                                    />
                                   </div>
-                                  <NickLabel user={user} fallbackColor={role.color} className="text-[13px] font-semibold truncate tracking-wide" />
+                                  <NickLabel user={user} className="text-[13px] font-medium truncate" style={{ color: 'var(--md-sys-color-on-surface)' }} />
                                 </div>
                               ))}
                             </div>
@@ -5621,10 +5477,15 @@ export default function App() {
 
                   {/* PLIKI */}
                   {rightPanelTab === 'files' && (
-                    <div className="space-y-3 p-4 flex-1 min-h-full" onContextMenu={(e) => handleContextMenu(e, 'filesArea', null)}>
-                      <div className="flex justify-between items-center px-1">
-                        <span className="text-xs font-semibold text-zinc-400 uppercase tracking-widest">Wszystkie pliki</span>
-                        <button className="text-[#00eeff] hover:bg-[#00eeff]/10 p-1.5 rounded-lg transition-colors"><Search size={14}/></button>
+                    <div className="space-y-2 p-3 flex-1 min-h-full" onContextMenu={(e) => handleContextMenu(e, 'filesArea', null)}>
+                      <div className="flex justify-between items-center px-1 py-1">
+                        <span className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: 'var(--md-sys-color-on-surface-variant)' }}>Pliki</span>
+                        <button
+                          className="p-1.5 rounded-md3-sm transition-colors"
+                          style={{ color: 'var(--md-sys-color-primary)' }}
+                          onMouseEnter={e => (e.currentTarget.style.background = 'var(--md-sys-color-primary-container)')}
+                          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                        ><Search size={13}/></button>
                       </div>
                       {files.map(file => {
                         const uploader = getUser(file.uploaderId);
@@ -5632,34 +5493,49 @@ export default function App() {
                           <div 
                             key={file.id} 
                             onContextMenu={(e) => handleContextMenu(e, 'file', file)}
-                            className="p-3 rounded-xl border border-white/[0.05] bg-white/[0.01] flex items-start gap-3 hover:bg-white/[0.05] hover:border-white/[0.1] cursor-pointer transition-all group"
+                            className="p-2.5 rounded-md3-sm flex items-start gap-2.5 cursor-pointer transition-all group"
+                            style={{ background: 'var(--md-sys-color-surface-container)', border: '1px solid var(--md-sys-color-outline-variant)' }}
+                            onMouseEnter={e => (e.currentTarget.style.background = 'var(--md-sys-color-surface-container-high)')}
+                            onMouseLeave={e => (e.currentTarget.style.background = 'var(--md-sys-color-surface-container)')}
                           >
-                            <div className="p-2.5 rounded-xl bg-white/[0.05] text-zinc-300 group-hover:text-[#00eeff] group-hover:bg-[#00eeff]/10 transition-colors">
+                            <div
+                              className="p-2 rounded-md3-sm shrink-0 transition-colors"
+                              style={{ background: 'var(--md-sys-color-primary-container)', color: 'var(--md-sys-color-on-primary-container)' }}
+                            >
                               {getFileIcon(file.type)}
                             </div>
                             <div className="flex flex-col flex-1 min-w-0">
-                              <span className="text-[13px] font-semibold text-zinc-200 truncate group-hover:text-white transition-colors">{file.name}</span>
-                              <div className="flex items-center gap-2 mt-1 text-[10px] text-zinc-500 min-w-0">
+                              <span className="text-[13px] font-medium truncate" style={{ color: 'var(--md-sys-color-on-surface)' }}>{file.name}</span>
+                              <div className="flex items-center gap-2 mt-0.5 text-[10px] min-w-0" style={{ color: 'var(--md-sys-color-on-surface-variant)' }}>
                                 <span>{file.size}</span>
-                                <span className="w-1 h-1 bg-zinc-700 rounded-full shrink-0" />
-                                <UserAvatarBubble user={uploader} className="w-4 h-4 rounded-md shrink-0" />
-                                <NickLabel user={uploader} fallbackColor="#a1a1aa" className="truncate min-w-0 text-[10px]" />
+                                <span className="w-1 h-1 rounded-full shrink-0" style={{ background: 'var(--md-sys-color-outline)' }} />
+                                <UserAvatarBubble user={uploader} className="w-4 h-4 rounded-md3-xs shrink-0" />
+                                <NickLabel user={uploader} className="truncate min-w-0 text-[10px]" style={{ color: 'var(--md-sys-color-on-surface-variant)' }} />
                               </div>
                             </div>
-                            <button className="opacity-0 group-hover:opacity-100 p-1.5 text-zinc-400 hover:text-[#00eeff] transition-all"><Download size={14}/></button>
+                            <button
+                              className="opacity-0 group-hover:opacity-100 p-1.5 transition-all rounded-md3-sm"
+                              style={{ color: 'var(--md-sys-color-primary)' }}
+                            ><Download size={13}/></button>
                           </div>
                         );
                       })}
-                      {files.length === 0 && <div className="text-center text-zinc-600 text-sm mt-10">Brak udostępnionych plików.</div>}
+                      {files.length === 0 && <div className="text-center text-sm mt-10 py-8" style={{ color: 'var(--md-sys-color-on-surface-variant)' }}>Brak udostępnionych plików.</div>}
                     </div>
                   )}
 
                   {/* ZADANIA */}
                   {!isDmView && rightPanelTab === 'tasks' && (
-                    <div className="space-y-3 p-4 flex-1 min-h-full" onContextMenu={(e) => handleContextMenu(e, 'tasksArea', null)}>
-                      <div className="flex justify-between items-center px-1">
-                        <span className="text-xs font-semibold text-zinc-400 uppercase tracking-widest">{isDmView ? 'Zadania rozmowy DM' : 'Otwarty Backlog'}</span>
-                        <button onClick={() => setCreateTaskModal({isOpen: true})} className="text-[#00eeff] hover:bg-[#00eeff]/10 p-1.5 rounded-lg transition-colors"><Plus size={14}/></button>
+                    <div className="space-y-2 p-3 flex-1 min-h-full" onContextMenu={(e) => handleContextMenu(e, 'tasksArea', null)}>
+                      <div className="flex justify-between items-center px-1 py-1">
+                        <span className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: 'var(--md-sys-color-on-surface-variant)' }}>Backlog</span>
+                        <button
+                          onClick={() => setCreateTaskModal({isOpen: true})}
+                          className="p-1.5 rounded-md3-sm transition-colors"
+                          style={{ color: 'var(--md-sys-color-primary)' }}
+                          onMouseEnter={e => (e.currentTarget.style.background = 'var(--md-sys-color-primary-container)')}
+                          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                        ><Plus size={13}/></button>
                       </div>
                       {isDmView ? dmPanelTasks.map(task => {
                         const assignee = getUser(task.assigneeId || myUserId);
@@ -5667,30 +5543,36 @@ export default function App() {
                           <div
                             key={task.id}
                             onClick={() => void toggleDmTask(task.id)}
-                            className={`p-3 rounded-xl border transition-all cursor-pointer group ${task.completed ? 'border-emerald-500/20 bg-emerald-500/5' : 'border-white/[0.05] bg-white/[0.01] hover:border-[#00eeff]/40 hover:bg-[#00eeff]/5'}`}
+                            className="p-2.5 rounded-md3-sm cursor-pointer group transition-colors"
+                            style={{
+                              background: task.completed ? 'var(--md-sys-color-surface-container)' : 'var(--md-sys-color-surface-container)',
+                              border: `1px solid ${task.completed ? 'var(--md-sys-color-primary-container)' : 'var(--md-sys-color-outline-variant)'}`,
+                              opacity: task.completed ? 0.7 : 1,
+                            }}
                           >
-                            <div className="flex items-start gap-3">
-                              <div className="mt-0.5 shrink-0 transition-colors">
-                                {task.completed ? <CheckSquare size={16} className="text-emerald-500"/> : <Square size={16} className="text-zinc-600 group-hover:text-[#00eeff]"/>}
+                            <div className="flex items-start gap-2.5">
+                              <div className="mt-0.5 shrink-0" style={{ color: task.completed ? 'var(--color-status-online)' : 'var(--md-sys-color-on-surface-variant)' }}>
+                                {task.completed ? <CheckSquare size={15}/> : <Square size={15}/>}
                               </div>
                               <div className="flex flex-col flex-1 min-w-0">
-                                <span className={`text-sm font-medium leading-tight mb-2 transition-colors ${task.completed ? 'text-emerald-500/70 line-through' : 'text-zinc-200 group-hover:text-white'}`}>{task.title}</span>
+                                <span className={`text-[13px] font-medium leading-tight mb-1.5 ${task.completed ? 'line-through' : ''}`} style={{ color: 'var(--md-sys-color-on-surface)' }}>{task.title}</span>
                                 <div className="flex items-center gap-2 text-[10px]">
-                                  {task.sourceMsgId && <span className="px-1.5 py-0.5 rounded bg-[#00eeff]/10 text-[#00eeff] font-semibold border border-[#00eeff]/20">Z czatu</span>}
-                                  <span className="flex items-center gap-1.5 text-zinc-500 bg-white/[0.05] px-1.5 py-0.5 rounded border border-white/[0.05] min-w-0 max-w-full">
-                                    <User size={10} className="shrink-0 opacity-70" />
-                                    <UserAvatarBubble user={assignee} className="w-4 h-4 rounded-md shrink-0" />
-                                    <NickLabel user={assignee} fallbackColor="#a1a1aa" className="truncate text-[10px] min-w-0" />
+                                  {task.sourceMsgId && (
+                                    <span className="px-1.5 py-0.5 rounded-md3-xs font-semibold" style={{ background: 'var(--md-sys-color-primary-container)', color: 'var(--md-sys-color-on-primary-container)' }}>Z czatu</span>
+                                  )}
+                                  <span className="flex items-center gap-1.5 px-1.5 py-0.5 rounded-md3-xs min-w-0 max-w-full" style={{ background: 'var(--md-sys-color-surface-container-high)', color: 'var(--md-sys-color-on-surface-variant)' }}>
+                                    <UserAvatarBubble user={assignee} className="w-4 h-4 rounded-full shrink-0" />
+                                    <NickLabel user={assignee} className="truncate text-[10px] min-w-0" style={{ color: 'var(--md-sys-color-on-surface-variant)' }} />
                                   </span>
                                   <button
                                     type="button"
-                                    className="ml-auto p-1 text-zinc-500 hover:text-red-400"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      void deleteDmTask(task.id);
-                                    }}
+                                    className="ml-auto p-1 rounded-md3-xs transition-colors"
+                                    style={{ color: 'var(--md-sys-color-on-surface-variant)' }}
+                                    onMouseEnter={e => (e.currentTarget.style.color = 'var(--md-sys-color-error)')}
+                                    onMouseLeave={e => (e.currentTarget.style.color = 'var(--md-sys-color-on-surface-variant)')}
+                                    onClick={(e) => { e.stopPropagation(); void deleteDmTask(task.id); }}
                                   >
-                                    <Trash2 size={12} />
+                                    <Trash2 size={11} />
                                   </button>
                                 </div>
                               </div>
@@ -5704,20 +5586,26 @@ export default function App() {
                             key={task.id} 
                             onClick={() => toggleTask(task.id)} 
                             onContextMenu={(e) => handleContextMenu(e, 'task', task)}
-                            className={`p-3 rounded-xl border transition-all cursor-pointer group ${task.completed ? 'border-emerald-500/20 bg-emerald-500/5' : 'border-white/[0.05] bg-white/[0.01] hover:border-[#00eeff]/40 hover:bg-[#00eeff]/5'}`}
+                            className="p-2.5 rounded-md3-sm cursor-pointer group transition-colors"
+                            style={{
+                              background: 'var(--md-sys-color-surface-container)',
+                              border: `1px solid ${task.completed ? 'var(--md-sys-color-primary-container)' : 'var(--md-sys-color-outline-variant)'}`,
+                              opacity: task.completed ? 0.7 : 1,
+                            }}
                           >
-                            <div className="flex items-start gap-3">
-                              <div className="mt-0.5 shrink-0 transition-colors">
-                                {task.completed ? <CheckSquare size={16} className="text-emerald-500"/> : <Square size={16} className="text-zinc-600 group-hover:text-[#00eeff]"/>}
+                            <div className="flex items-start gap-2.5">
+                              <div className="mt-0.5 shrink-0" style={{ color: task.completed ? 'var(--color-status-online)' : 'var(--md-sys-color-on-surface-variant)' }}>
+                                {task.completed ? <CheckSquare size={15}/> : <Square size={15}/>}
                               </div>
                               <div className="flex flex-col flex-1 min-w-0">
-                                <span className={`text-sm font-medium leading-tight mb-2 transition-colors ${task.completed ? 'text-emerald-500/70 line-through' : 'text-zinc-200 group-hover:text-white'}`}>{task.title}</span>
+                                <span className={`text-[13px] font-medium leading-tight mb-1.5 ${task.completed ? 'line-through' : ''}`} style={{ color: 'var(--md-sys-color-on-surface)' }}>{task.title}</span>
                                 <div className="flex items-center gap-2 text-[10px]">
-                                  {task.sourceMsgId && <span className="px-1.5 py-0.5 rounded bg-[#00eeff]/10 text-[#00eeff] font-semibold border border-[#00eeff]/20">Z czatu</span>}
-                                  <span className="flex items-center gap-1.5 text-zinc-500 bg-white/[0.05] px-1.5 py-0.5 rounded border border-white/[0.05] min-w-0 max-w-full">
-                                    <User size={10} className="shrink-0 opacity-70" />
-                                    <UserAvatarBubble user={assignee} className="w-4 h-4 rounded-md shrink-0" />
-                                    <NickLabel user={assignee} fallbackColor="#a1a1aa" className="truncate text-[10px] min-w-0" />
+                                  {task.sourceMsgId && (
+                                    <span className="px-1.5 py-0.5 rounded-md3-xs font-semibold" style={{ background: 'var(--md-sys-color-primary-container)', color: 'var(--md-sys-color-on-primary-container)' }}>Z czatu</span>
+                                  )}
+                                  <span className="flex items-center gap-1.5 px-1.5 py-0.5 rounded-md3-xs min-w-0 max-w-full" style={{ background: 'var(--md-sys-color-surface-container-high)', color: 'var(--md-sys-color-on-surface-variant)' }}>
+                                    <UserAvatarBubble user={assignee} className="w-4 h-4 rounded-full shrink-0" />
+                                    <NickLabel user={assignee} className="truncate text-[10px] min-w-0" style={{ color: 'var(--md-sys-color-on-surface-variant)' }} />
                                   </span>
                                 </div>
                               </div>
@@ -5725,13 +5613,13 @@ export default function App() {
                           </div>
                         );
                       })}
-                      {(isDmView ? dmPanelTasks.length === 0 : tasks.length === 0) && <div className="text-center text-zinc-600 text-sm mt-10">Brak aktywnych zadań. Jesteś czysty!</div>}
+                      {(isDmView ? dmPanelTasks.length === 0 : tasks.length === 0) && <div className="text-center text-sm mt-10 py-8" style={{ color: 'var(--md-sys-color-on-surface-variant)' }}>Brak aktywnych zadań.</div>}
                     </div>
                   )}
                 </div>
               </>
             )}
-          </aside>
+          </MemberColumn>
         )}
       </div>
 
@@ -5808,7 +5696,8 @@ export default function App() {
 
       {dmCallState && (
         <div
-          className="fixed inset-0 z-[470] flex items-center justify-center p-4 bg-black/85 backdrop-blur-lg"
+          className="fixed inset-0 z-[470] flex items-center justify-center p-4 animate-scrim-fade-in"
+          style={{ background: 'rgba(0,0,0,0.72)', backdropFilter: 'blur(8px)' }}
           role="presentation"
           onClick={() => {
             if (dmCallState.status === 'ringing' || dmCallState.status === 'connected') return;
@@ -5816,7 +5705,8 @@ export default function App() {
           }}
         >
           <div
-            className="w-full max-w-lg rounded-3xl border border-[#00eeff]/20 bg-[#0a0a0c] p-8 shadow-[0_0_60px_rgba(0,238,255,0.12)]"
+            className="w-full max-w-sm rounded-md3-xl p-6 shadow-md3 animate-modal-in"
+            style={{ background: 'var(--md-sys-color-surface-container)', border: '1px solid var(--md-sys-color-outline-variant)' }}
             onClick={(e) => e.stopPropagation()}
             role="dialog"
           >
@@ -5833,13 +5723,15 @@ export default function App() {
               const selfSpeaking = dmVoiceHud && !!speakingPeers[myUserId];
               return (
                 <>
-                  <div className="flex flex-col items-center text-center gap-2">
+                  <div className="flex flex-col items-center text-center gap-3">
                     <div
-                      className={`w-20 h-20 rounded-full bg-[#00eeff]/10 flex items-center justify-center text-2xl font-bold text-[#00eeff] relative ${
-                        peerSpeaking || selfSpeaking
-                          ? 'border-2 border-[#00eeff] shadow-[0_0_24px_rgba(0,238,255,0.35)] animate-pulse'
-                          : 'border border-[#00eeff]/30'
-                      }`}
+                      className="w-20 h-20 rounded-full flex items-center justify-center text-2xl font-bold relative"
+                      style={{
+                        background: 'var(--md-sys-color-primary-container)',
+                        color: 'var(--md-sys-color-on-primary-container)',
+                        outline: (peerSpeaking || selfSpeaking) ? '3px solid var(--md-sys-color-primary)' : '2px solid var(--md-sys-color-outline-variant)',
+                        outlineOffset: '2px',
+                      }}
                     >
                       {peer.avatarUrl?.trim() ? (
                         <img src={peer.avatarUrl} alt="" className="w-full h-full rounded-full object-cover" />
@@ -5847,8 +5739,8 @@ export default function App() {
                         peer.name.charAt(0)
                       )}
                     </div>
-                    <NickLabel user={peer} fallbackColor="#fff" className="text-lg font-bold" />
-                    <p className="text-sm text-zinc-500">
+                    <NickLabel user={peer} className="text-base font-semibold" style={{ color: 'var(--md-sys-color-on-surface)' }} />
+                    <p className="text-sm" style={{ color: 'var(--md-sys-color-on-surface-variant)' }}>
                       {dmCallState.status === 'ringing'
                         ? incoming
                           ? 'Połączenie przychodzące…'
@@ -5866,20 +5758,26 @@ export default function App() {
                             : 'Zakończono'}
                     </p>
                   </div>
-                  <div className="flex justify-center gap-3 mt-8">
+                  <div className="flex justify-center gap-3 mt-6">
                     {incoming && (
                       <>
                         <button
                           type="button"
                           onClick={() => void runDmCallAction('reject')}
-                          className="px-6 py-3 rounded-full bg-red-500/20 text-red-400 border border-red-500/40 text-sm font-bold hover:bg-red-500/30 transition-colors"
+                          className="px-5 py-2.5 rounded-md3-full text-sm font-semibold transition-colors"
+                          style={{ background: 'var(--md-sys-color-error-container)', color: 'var(--md-sys-color-on-error-container)' }}
+                          onMouseEnter={e => (e.currentTarget.style.opacity = '0.85')}
+                          onMouseLeave={e => (e.currentTarget.style.opacity = '1')}
                         >
                           Odrzuć
                         </button>
                         <button
                           type="button"
                           onClick={() => void runDmCallAction('accept')}
-                          className="px-6 py-3 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 text-sm font-bold hover:bg-emerald-500/30 transition-colors"
+                          className="px-5 py-2.5 rounded-md3-full text-sm font-semibold transition-colors"
+                          style={{ background: 'var(--color-status-online)', color: '#fff' }}
+                          onMouseEnter={e => (e.currentTarget.style.opacity = '0.85')}
+                          onMouseLeave={e => (e.currentTarget.style.opacity = '1')}
                         >
                           Odbierz
                         </button>
@@ -5889,7 +5787,10 @@ export default function App() {
                       <button
                         type="button"
                         onClick={() => void runDmCallAction('end')}
-                        className="px-6 py-3 rounded-full bg-red-500/20 text-red-400 border border-red-500/40 text-sm font-bold hover:bg-red-500/30 transition-colors"
+                        className="px-5 py-2.5 rounded-md3-full text-sm font-semibold transition-colors"
+                        style={{ background: 'var(--md-sys-color-error-container)', color: 'var(--md-sys-color-on-error-container)' }}
+                        onMouseEnter={e => (e.currentTarget.style.opacity = '0.85')}
+                        onMouseLeave={e => (e.currentTarget.style.opacity = '1')}
                       >
                         Rozłącz
                       </button>
@@ -5898,7 +5799,10 @@ export default function App() {
                       <button
                         type="button"
                         onClick={() => setDmCallState(null)}
-                        className="px-6 py-3 rounded-full bg-white/[0.06] text-zinc-200 border border-white/[0.1] text-sm font-bold hover:bg-white/[0.1] transition-colors"
+                        className="px-5 py-2.5 rounded-md3-full text-sm font-semibold transition-colors"
+                        style={{ background: 'var(--md-sys-color-surface-container-high)', color: 'var(--md-sys-color-on-surface)', border: '1px solid var(--md-sys-color-outline-variant)' }}
+                        onMouseEnter={e => (e.currentTarget.style.background = 'var(--md-sys-color-primary-container)')}
+                        onMouseLeave={e => (e.currentTarget.style.background = 'var(--md-sys-color-surface-container-high)')}
                       >
                         Zamknij
                       </button>
@@ -5913,12 +5817,14 @@ export default function App() {
 
       {pvCall && (
         <div
-          className="fixed inset-0 z-[470] flex items-center justify-center p-4 bg-black/85 backdrop-blur-lg"
+          className="fixed inset-0 z-[470] flex items-center justify-center p-4 animate-scrim-fade-in"
+          style={{ background: 'rgba(0,0,0,0.72)', backdropFilter: 'blur(8px)' }}
           role="presentation"
           onClick={() => setPvCall(null)}
         >
           <div
-            className="w-full max-w-lg rounded-3xl border border-[#00eeff]/20 bg-[#0a0a0c] p-8 shadow-[0_0_60px_rgba(0,238,255,0.12)]"
+            className="w-full max-w-sm rounded-md3-xl p-6 shadow-md3 animate-modal-in"
+            style={{ background: 'var(--md-sys-color-surface-container)', border: '1px solid var(--md-sys-color-outline-variant)' }}
             onClick={(e) => e.stopPropagation()}
             role="dialog"
           >
@@ -5926,41 +5832,45 @@ export default function App() {
               const peer = workspaceMembers.find((m) => m.id === pvCall.peerId) ?? getUser(pvCall.peerId);
               return (
                 <>
-                  <div className="flex flex-col items-center text-center gap-2">
-                    <div className="w-20 h-20 rounded-full bg-[#00eeff]/10 border border-[#00eeff]/30 flex items-center justify-center text-2xl font-bold text-[#00eeff] animate-pulse">
+                  <div className="flex flex-col items-center text-center gap-3">
+                    <div
+                      className="w-20 h-20 rounded-full flex items-center justify-center text-2xl font-bold"
+                      style={{ background: 'var(--md-sys-color-primary-container)', color: 'var(--md-sys-color-on-primary-container)', outline: '2px solid var(--md-sys-color-primary)', outlineOffset: '2px' }}
+                    >
                       {peer.avatarUrl?.trim() ? (
                         <img src={peer.avatarUrl} alt="" className="w-full h-full rounded-full object-cover" />
                       ) : (
                         peer.name.charAt(0)
                       )}
                     </div>
-                    <NickLabel user={peer} fallbackColor="#fff" className="text-lg font-bold" />
-                    <p className="text-sm text-zinc-500">
-                      {pvCall.status === 'ringing' ? 'Łączenie (PV)…' : 'Połączono (lokalny interfejs UI)'}
-                    </p>
-                    <p className="text-xs text-zinc-600 leading-relaxed max-w-sm mt-2">
-                      Pełny przekaz audio/wideo między użytkownikami wymaga sygnalizacji na serwerze. Tutaj masz spójny z Devcord_ ekran rozmowy; backend PV można dołożyć pod ten sam motyw.
+                    <NickLabel user={peer} className="text-base font-semibold" style={{ color: 'var(--md-sys-color-on-surface)' }} />
+                    <p className="text-sm" style={{ color: 'var(--md-sys-color-on-surface-variant)' }}>
+                      {pvCall.status === 'ringing' ? 'Łączenie…' : 'Połączono'}
                     </p>
                   </div>
-                  <div className="flex justify-center gap-3 mt-8">
+                  <div className="flex justify-center gap-3 mt-6">
                     <button
                       type="button"
                       onClick={() => setPvCall(null)}
-                      className="px-6 py-3 rounded-full bg-red-500/20 text-red-400 border border-red-500/40 text-sm font-bold hover:bg-red-500/30 transition-colors"
+                      className="px-5 py-2.5 rounded-md3-full text-sm font-semibold transition-colors"
+                      style={{ background: 'var(--md-sys-color-error-container)', color: 'var(--md-sys-color-on-error-container)' }}
+                      onMouseEnter={e => (e.currentTarget.style.opacity = '0.85')}
+                      onMouseLeave={e => (e.currentTarget.style.opacity = '1')}
                     >
                       Rozłącz
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => setPvCall((c) => (c ? { ...c, status: 'connected' } : c))}
-                      className={`px-6 py-3 rounded-full text-sm font-bold border transition-colors ${
-                        pvCall.status === 'connected'
-                          ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
-                          : 'bg-[#00eeff]/15 text-[#00eeff] border-[#00eeff]/35 hover:bg-[#00eeff]/25'
-                      }`}
-                    >
-                      {pvCall.status === 'connected' ? 'Aktywne' : 'Symuluj odebranie'}
-                    </button>
+                    {pvCall.status !== 'connected' && (
+                      <button
+                        type="button"
+                        onClick={() => setPvCall((c) => (c ? { ...c, status: 'connected' } : c))}
+                        className="px-5 py-2.5 rounded-md3-full text-sm font-semibold transition-colors"
+                        style={{ background: 'var(--md-sys-color-primary-container)', color: 'var(--md-sys-color-on-primary-container)' }}
+                        onMouseEnter={e => (e.currentTarget.style.opacity = '0.85')}
+                        onMouseLeave={e => (e.currentTarget.style.opacity = '1')}
+                      >
+                        Symuluj odebranie
+                      </button>
+                    )}
                   </div>
                 </>
               );

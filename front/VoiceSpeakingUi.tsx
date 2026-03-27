@@ -1,17 +1,27 @@
 import React, { memo } from 'react';
-import { Headphones, MicOff, Monitor } from 'lucide-react';
+import { Headphones, MicOff, Monitor, Video } from 'lucide-react';
 import { NickLabel, type NickAppearanceFields } from './nickAppearance';
 
-/** Izolacja VAD: zmiana `isSpeaking` dla jednego uczestnika nie musi re-renderować całej listy. */
+/** VAD indicator - isolated to avoid full-list re-renders */
 export const VoiceSpeakingDot = memo(function VoiceSpeakingDot({ active }: { active: boolean }) {
   if (!active) return null;
   return (
-    <span className="w-1.5 h-1.5 rounded-full bg-[#00eeff] shadow-[0_0_6px_#00eeff] animate-pulse shrink-0" aria-hidden />
+    <svg
+      width="8"
+      height="8"
+      viewBox="0 0 8 8"
+      aria-hidden
+      className="shrink-0"
+      style={{ color: 'var(--md-sys-color-primary)' }}
+    >
+      <circle cx="4" cy="4" r="4" fill="currentColor" />
+    </svg>
   );
 });
 
 type SidebarRowUser = NickAppearanceFields & { id?: string; avatarUrl?: string };
 
+/** Row in the channel's voice participant preview list */
 export const VoiceSidebarParticipantRow = memo(function VoiceSidebarParticipantRow({
   user,
   isMe,
@@ -27,29 +37,59 @@ export const VoiceSidebarParticipantRow = memo(function VoiceSidebarParticipantR
   isSpeaking: boolean;
   onContextMenu: (e: React.MouseEvent) => void;
 }) {
+  const speakingStyle: React.CSSProperties = isSpeaking && sidebarVoiceVad
+    ? { outline: '2px solid var(--md-sys-color-primary)', outlineOffset: 1, borderRadius: '50%' }
+    : {};
+
   return (
     <div
       onContextMenu={onContextMenu}
+      className="flex items-center gap-[var(--gap-md)] p-[var(--gap-sm)] rounded-md3-md cursor-pointer transition-colors"
+      style={{
+        color: isSpeaking && sidebarVoiceVad
+          ? 'var(--md-sys-color-on-surface)'
+          : 'var(--md-sys-color-on-surface-variant)',
+      }}
       title={sidebarVoiceVad ? (isSpeaking ? 'Mówi' : 'Cisza') : undefined}
-      className="flex items-center gap-2 text-xs text-zinc-400 py-1 px-2 rounded-md hover:bg-white/[0.05] cursor-pointer transition-colors border border-transparent hover:border-white/[0.05] min-w-0"
     >
-      <div className="relative shrink-0">
+      {/* Avatar with speaking ring */}
+      <div className="relative shrink-0" style={speakingStyle}>
         {user.avatarUrl?.trim() ? (
-          <img src={user.avatarUrl} alt="" className="w-5 h-5 rounded-md object-cover border border-white/[0.05]" />
+          <img
+            src={user.avatarUrl}
+            alt=""
+            className="w-6 h-6 rounded-full object-cover"
+          />
         ) : (
-          <div className="w-5 h-5 rounded-md bg-zinc-800 flex items-center justify-center text-[9px] font-bold text-white border border-white/[0.05]">
-            {(user.name ?? '?').charAt(0)}
+          <div
+            className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold"
+            style={{
+              background: 'var(--md-sys-color-secondary-container)',
+              color: 'var(--md-sys-color-on-secondary-container)',
+            }}
+          >
+            {(user.name ?? '?').charAt(0).toUpperCase()}
           </div>
         )}
-        <div
-          className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 border-2 rounded-full ${
-            isMe && voicePhaseConnected ? 'bg-[#00eeff] border-[#080808]' : 'bg-emerald-500 border-[#080808]'
-          }`}
-        />
+        {(isMe || voicePhaseConnected) && (
+          <div
+            className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2"
+            style={{
+              background: 'var(--color-status-online)',
+              borderColor: 'var(--md-sys-color-surface-container-low)',
+            }}
+          />
+        )}
       </div>
-      <span className={`truncate min-w-0 flex items-center gap-1.5 ${isMe ? 'text-[#00eeff] font-medium' : ''}`}>
-        {sidebarVoiceVad ? <VoiceSpeakingDot active={isSpeaking} /> : null}
-        <NickLabel user={user} fallbackColor={isMe ? '#00eeff' : '#a1a1aa'} className="truncate font-medium" />
+
+      {/* Name */}
+      <span className="flex items-center gap-[var(--gap-sm)] min-w-0 flex-1 overflow-hidden">
+        {sidebarVoiceVad && <VoiceSpeakingDot active={isSpeaking} />}
+        <NickLabel
+          user={user}
+          fallbackColor={isMe ? 'var(--md-sys-color-primary)' : 'var(--md-sys-color-on-surface-variant)'}
+          className="truncate text-xs font-medium"
+        />
       </span>
     </div>
   );
@@ -57,6 +97,7 @@ export const VoiceSidebarParticipantRow = memo(function VoiceSidebarParticipantR
 
 type StageUser = NickAppearanceFields & { avatarUrl?: string };
 
+/** Full-size participant tile in the voice call grid (Stoat VoiceCallCard / UserTile style) */
 export const VoiceStageParticipantTile = memo(function VoiceStageParticipantTile({
   user,
   isSelf,
@@ -85,76 +126,123 @@ export const VoiceStageParticipantTile = memo(function VoiceStageParticipantTile
   return (
     <div
       onContextMenu={onContextMenu}
-      className={`group flex items-center gap-4 p-2.5 pr-6 rounded-full bg-gradient-to-r from-black/90 to-[#0a0a0c] border backdrop-blur-xl transition-all duration-500 shadow-xl cursor-pointer ${
-        isSpeaking ? 'border-[#00eeff]/50 shadow-[0_0_30px_rgba(0,238,255,0.15)] scale-105' : 'border-white/[0.05] hover:border-white/[0.15]'
-      } ${voiceHasScreenActivity ? 'w-64' : 'w-72 sm:w-80'}`}
+      className="group relative flex flex-col rounded-md3-lg overflow-hidden cursor-pointer"
+      style={{
+        background: 'rgba(0,0,0,0.15)',
+        aspectRatio: '16/9',
+        outline: isSpeaking ? '3px solid var(--md-sys-color-primary)' : '1px solid transparent',
+        outlineOffset: 0,
+        transition: 'outline 0.1s ease',
+        minWidth: 180,
+      }}
     >
-      <div className="relative shrink-0">
-        <div
-          className={`absolute inset-0 rounded-full blur-md transition-all duration-500 ${
-            isSpeaking ? 'bg-[#00eeff] opacity-50 animate-pulse' : 'opacity-0'
-          }`}
-        />
-        <div
-          className={`w-14 h-14 relative z-10 rounded-full flex items-center justify-center text-xl font-black transition-colors duration-500 overflow-hidden shrink-0 ${
-            isSpeaking ? 'bg-[#000] border-2 border-[#00eeff] text-[#00eeff]' : 'bg-[#151515] border border-white/[0.1] text-zinc-400'
-          }`}
-        >
-          {user.avatarUrl?.trim() ? (
-            <img src={user.avatarUrl} alt="" className="w-full h-full object-cover" />
-          ) : (
-            (user.name ?? '?').charAt(0)
-          )}
-        </div>
-        <div
-          className={`absolute bottom-0 right-0 w-4 h-4 rounded-full border-2 border-[#050505] flex items-center justify-center z-20 ${
-            muted || deafened ? 'bg-red-500' : 'bg-emerald-500'
-          }`}
-        >
-          {deafened ? <Headphones size={8} className="text-black" /> : muted ? <MicOff size={8} className="text-black" /> : null}
-        </div>
-        {isScreenSharing && (
+      {/* Main content — avatar centered */}
+      <div className="flex-1 flex items-center justify-center">
+        {user.avatarUrl?.trim() ? (
+          <img
+            src={user.avatarUrl}
+            alt={user.name ?? ''}
+            className="w-12 h-12 rounded-full object-cover"
+          />
+        ) : (
           <div
-            className="absolute -top-0.5 -left-0.5 z-30 w-5 h-5 rounded-md bg-[#00eeff]/20 border border-[#00eeff]/50 flex items-center justify-center"
-            title="Udostępnia ekran"
+            className="w-12 h-12 rounded-full flex items-center justify-center text-xl font-bold"
+            style={{
+              background: 'var(--md-sys-color-secondary-container)',
+              color: 'var(--md-sys-color-on-secondary-container)',
+            }}
           >
-            <Monitor size={10} className="text-[#00eeff]" />
+            {(user.name ?? '?').charAt(0).toUpperCase()}
           </div>
         )}
       </div>
-      <div className="flex flex-col flex-1 min-w-0 justify-center">
-        <span className={`text-[15px] font-bold truncate block transition-colors duration-300 ${isSpeaking ? 'drop-shadow-[0_0_8px_rgba(0,238,255,0.4)]' : ''}`}>
-          <NickLabel user={user} fallbackColor={isSpeaking ? '#00eeff' : '#e4e4e7'} className="font-bold truncate" />
-        </span>
-        <span className="text-[10px] text-zinc-500 uppercase tracking-widest font-semibold flex items-center gap-1 mt-0.5">
-          {isScreenSharing ? (
-            <>
-              <Monitor size={10} className="text-[#00eeff]" /> Ekran ·{' '}
-            </>
-          ) : null}
-          {statusLine}
-        </span>
-      </div>
-      {isSelf ? (
-        <button
-          type="button"
-          title={deafened ? 'Włącz odsłuch innych i mikrofon' : 'Wycisz mikrofon i przestań słyszeć innych u siebie'}
-          onClick={onToggleDeafen}
-          disabled={voicePhase !== 'connected'}
-          className={`w-10 h-10 shrink-0 rounded-full flex items-center justify-center transition-colors border ${
-            deafened ? 'bg-red-500/15 text-red-400 border-red-500/35' : 'bg-white/[0.05] text-zinc-200 border-white/[0.08] hover:bg-white/[0.1]'
-          } disabled:opacity-40 disabled:cursor-not-allowed`}
-        >
-          <Headphones size={18} className={deafened ? 'opacity-50' : ''} />
-        </button>
-      ) : null}
-      {isSpeaking ? (
-        <div className="flex items-center gap-1 h-4 opacity-80 shrink-0">
-          <div className="w-1 bg-[#00eeff] rounded-full animate-pulse h-2" style={{ animationDuration: '0.5s' }} />
-          <div className="w-1 bg-[#00eeff] rounded-full animate-pulse h-4" style={{ animationDuration: '0.8s' }} />
-          <div className="w-1 bg-[#00eeff] rounded-full animate-pulse h-3" style={{ animationDuration: '0.6s' }} />
+
+      {/* Bottom overlay bar */}
+      <div
+        className="absolute bottom-0 left-0 right-0 flex items-center justify-between px-[var(--gap-md)] py-[var(--gap-sm)]"
+        style={{
+          background: 'linear-gradient(to top, rgba(0,0,0,0.6) 0%, transparent 100%)',
+          paddingBottom: 8,
+          paddingTop: 20,
+        }}
+      >
+        {/* Name + speaking indicator */}
+        <div className="flex items-center gap-[var(--gap-sm)] min-w-0 flex-1 overflow-hidden">
+          {isSpeaking && (
+            <svg width="12" height="12" viewBox="0 0 8 8" style={{ color: 'var(--md-sys-color-primary)', flexShrink: 0 }}>
+              <circle cx="4" cy="4" r="4" fill="currentColor" />
+            </svg>
+          )}
+          <NickLabel
+            user={user}
+            fallbackColor="#fff"
+            className="text-xs font-medium truncate text-white"
+          />
         </div>
-      ) : null}
+
+        {/* Icons */}
+        <div className="flex items-center gap-[var(--gap-xs)] shrink-0">
+          {isScreenSharing && <Monitor size={12} style={{ color: 'var(--md-sys-color-primary)' }} />}
+          {muted && <MicOff size={12} style={{ color: 'var(--md-sys-color-error)' }} />}
+          {deafened && <Headphones size={12} style={{ color: 'var(--md-sys-color-error)' }} />}
+        </div>
+
+        {/* Deafen toggle (self only, hover) */}
+        {isSelf && (
+          <button
+            type="button"
+            onClick={onToggleDeafen}
+            disabled={voicePhase !== 'connected'}
+            title={deafened ? 'Włącz odsłuch' : 'Wycisz odsłuch'}
+            className="ml-[var(--gap-sm)] w-7 h-7 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity disabled:opacity-40"
+            style={{
+              background: deafened
+                ? 'var(--md-sys-color-error-container)'
+                : 'var(--md-sys-color-surface-container)',
+              color: deafened
+                ? 'var(--md-sys-color-on-error-container)'
+                : 'var(--md-sys-color-on-surface-variant)',
+            }}
+          >
+            <Headphones size={14} />
+          </button>
+        )}
+      </div>
+
+      {/* Screen share badge */}
+      {isScreenSharing && (
+        <div
+          className="absolute top-[var(--gap-sm)] right-[var(--gap-sm)] rounded-md3-xs px-1.5 py-0.5 flex items-center gap-1 text-[10px] font-medium"
+          style={{
+            background: 'var(--md-sys-color-primary-container)',
+            color: 'var(--md-sys-color-on-primary-container)',
+          }}
+        >
+          <Monitor size={10} />
+          Ekran
+        </div>
+      )}
+    </div>
+  );
+});
+
+/** Compact voice card for "in channel" bottom-of-sidebar display */
+export const VoiceCallCardStatus = memo(function VoiceCallCardStatus({
+  phase,
+}: {
+  phase: string;
+}) {
+  const isConnected = phase === 'connected';
+  return (
+    <div
+      className="flex items-center gap-[var(--gap-sm)] text-xs font-medium"
+      style={{ color: isConnected ? 'var(--md-sys-color-primary)' : 'var(--md-sys-color-outline)' }}
+    >
+      <div
+        className="w-2 h-2 rounded-full"
+        style={{ background: isConnected ? 'var(--md-sys-color-primary)' : 'var(--md-sys-color-outline)' }}
+      />
+      {isConnected ? 'Połączono' : phase === 'connecting_signaling' ? 'Łączenie...' : phase === 'negotiating' ? 'Negocjacja...' : 'Rozłączono'}
     </div>
   );
 });

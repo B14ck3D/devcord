@@ -10,11 +10,14 @@
     "preview:https": "VITE_PREVIEW_HTTPS=1 vite preview"
   },
   "dependencies": {
+    "@emoji-mart/data": "^1.2.1",
+    "@emoji-mart/react": "^1.1.1",
     "@shiguredo/noise-suppression": "^2025.1.0",
     "livekit-client": "^2.18.0",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "zustand": "^4.5.7"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",
