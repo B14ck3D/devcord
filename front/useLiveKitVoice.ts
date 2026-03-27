@@ -2,18 +2,27 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ConnectionState, Room, RoomEvent, Track } from 'livekit-client';
 import type { RemoteTrack } from 'livekit-client';
 import type { VoicePhase } from './voicePhase';
-import { prepareMicTrackWithRnnoise, type PreparedMicTrack } from './audio/rnnoisePipeline';
+import { prepareMicTrackWithRnnoise, type PreparedMicTrack } from './src/audio/rnnoisePipeline';
 import {
   createVoiceActivityAudioContext,
   speakingRecordsEqual,
   startTrackRmsVad,
 } from './voiceActivity';
 
-const API_BASE = ((import.meta.env.VITE_API_URL as string | undefined) ?? '').replace(/\/$/, '');
+const API_BASE = (
+  (import.meta.env.VITE_API_URL as string | undefined) ??
+  'https://devcord.ndevelopment.org/api'
+).replace(/\/$/, '');
 /** Liniowy mnożnik odsłuchu (PPM / kontekst): musi być zgodny ze `min`/`max` suwaków w App. */
 export const VOICE_PEER_GAIN_MIN = 0.25;
 export const VOICE_PEER_GAIN_MAX = 4;
 const VOICE_LOG = '[devcord-voice]';
+
+export type ScreenPublishStats = {
+  captureFps: number | null;
+  sendBitrateKbps: number | null;
+  packetsLost: number | null;
+};
 
 function logVoice(level: 'debug' | 'warn' | 'info', ...args: unknown[]) {
   if (typeof console === 'undefined') return;
@@ -54,6 +63,7 @@ export function useLiveKitVoice(opts: {
   screenStream?: MediaStream | null;
   cameraStream?: MediaStream | null;
   screenBitrate?: number;
+  screenPreferredCodec?: 'av1' | 'h264';
   rnnoiseEnabled?: boolean;
 }) {
   const {
@@ -65,6 +75,8 @@ export function useLiveKitVoice(opts: {
     micDeviceId,
     screenStream = null,
     cameraStream = null,
+    screenBitrate = 4_000_000,
+    screenPreferredCodec = 'h264',
     rnnoiseEnabled = true,
   } = opts;
 
@@ -76,12 +88,19 @@ export function useLiveKitVoice(opts: {
   const [speakingPeers, setSpeakingPeers] = useState<Record<string, boolean>>({});
   const [remoteScreenByUser, setRemoteScreenByUser] = useState<Record<string, MediaStream>>({});
   const [remoteVoiceState, setRemoteVoiceState] = useState<Record<string, { muted: boolean; deafened: boolean }>>({});
+  const [screenPublishStats, setScreenPublishStats] = useState<ScreenPublishStats>({
+    captureFps: null,
+    sendBitrateKbps: null,
+    packetsLost: null,
+  });
 
   const roomRef = useRef<Room | null>(null);
   const remoteVolRef = useRef(new Map<string, number>());
   const remoteOutMuteRef = useRef(new Map<string, boolean>());
   const publishedScreenRef = useRef<Set<string>>(new Set());
+  const publishedScreenAudioRef = useRef<Set<string>>(new Set());
   const publishedCamRef = useRef<Set<string>>(new Set());
+  const screenBytesRef = useRef<Record<string, { bytes: number; ts: number }>>({});
   const localMicRef = useRef<PreparedMicTrack | null>(null);
   const audioGestureCleanupRef = useRef<(() => void) | null>(null);
   const userIdNorm = String(userId);
@@ -211,11 +230,14 @@ export function useLiveKitVoice(opts: {
       localMicRef.current = null;
     }
     publishedScreenRef.current.clear();
+    publishedScreenAudioRef.current.clear();
     publishedCamRef.current.clear();
+    screenBytesRef.current = {};
     setParticipants([]);
     setSpeakingPeers({});
     setRemoteScreenByUser({});
     setRemoteVoiceState({});
+    setScreenPublishStats({ captureFps: null, sendBitrateKbps: null, packetsLost: null });
     setVoiceDiagnostics((d) => ({
       ...d,
       connectionState: 'disconnected',
@@ -273,7 +295,8 @@ export function useLiveKitVoice(opts: {
         if (cancelled) return;
 
         setPhase('negotiating');
-        const room = new Room({ adaptiveStream: true, dynacast: true, webAudioMix: true });
+        // Screen-share path targets high-fidelity desktop streaming, so disable adaptive degradations.
+        const room = new Room({ adaptiveStream: false, dynacast: false, webAudioMix: true });
         roomRef.current = room;
 
         const unlockRemoteAudio = async () => {
@@ -497,6 +520,7 @@ export function useLiveKitVoice(opts: {
 
     const run = async () => {
       const wantS = new Set((screenStream?.getVideoTracks() ?? []).map((t) => t.id));
+      const wantSA = new Set((screenStream?.getAudioTracks() ?? []).map((t) => t.id));
       const wantC = new Set((cameraStream?.getVideoTracks() ?? []).map((t) => t.id));
 
       for (const sid of [...publishedScreenRef.current]) {
@@ -508,6 +532,17 @@ export function useLiveKitVoice(opts: {
             }
           }
           publishedScreenRef.current.delete(sid);
+        }
+      }
+      for (const sid of [...publishedScreenAudioRef.current]) {
+        if (!wantSA.has(sid)) {
+          for (const pub of room.localParticipant.trackPublications.values()) {
+            const tr = pub.track;
+            if (tr?.kind === Track.Kind.Audio && pub.source === Track.Source.ScreenShareAudio && tr.mediaStreamTrack.id === sid) {
+              await room.localParticipant.unpublishTrack(tr);
+            }
+          }
+          publishedScreenAudioRef.current.delete(sid);
         }
       }
       for (const cid of [...publishedCamRef.current]) {
@@ -525,8 +560,22 @@ export function useLiveKitVoice(opts: {
       if (screenStream) {
         for (const t of screenStream.getVideoTracks()) {
           if (!publishedScreenRef.current.has(t.id)) {
-            await room.localParticipant.publishTrack(t, { source: Track.Source.ScreenShare });
+            await room.localParticipant.publishTrack(
+              t,
+              {
+                source: Track.Source.ScreenShare,
+                simulcast: false,
+                videoCodec: screenPreferredCodec,
+                videoEncoding: { maxBitrate: screenBitrate, maxFramerate: 240 },
+              } as never,
+            );
             publishedScreenRef.current.add(t.id);
+          }
+        }
+        for (const t of screenStream.getAudioTracks()) {
+          if (!publishedScreenAudioRef.current.has(t.id)) {
+            await room.localParticipant.publishTrack(t, { source: Track.Source.ScreenShareAudio });
+            publishedScreenAudioRef.current.add(t.id);
           }
         }
       }
@@ -541,7 +590,70 @@ export function useLiveKitVoice(opts: {
     };
 
     void run();
-  }, [screenStream, cameraStream, phase]);
+  }, [screenStream, cameraStream, phase, screenBitrate, screenPreferredCodec]);
+
+  useEffect(() => {
+    const room = roomRef.current;
+    if (!room || phase !== 'connected') return;
+    let alive = true;
+    const poll = async () => {
+      const pubs = [...room.localParticipant.trackPublications.values()].filter(
+        (p) => p.source === Track.Source.ScreenShare && p.kind === Track.Kind.Video,
+      );
+      if (pubs.length === 0) {
+        if (alive) setScreenPublishStats({ captureFps: null, sendBitrateKbps: null, packetsLost: null });
+        return;
+      }
+      const pub = pubs[0];
+      const t = pub.track;
+      const captureFps = t?.mediaStreamTrack?.getSettings?.().frameRate ?? null;
+      let sendBitrateKbps: number | null = null;
+      let packetsLost: number | null = null;
+
+      const statsFn = (t as unknown as { getRTCStatsReport?: () => Promise<RTCStatsReport> }).getRTCStatsReport;
+      if (typeof statsFn === 'function') {
+        try {
+          const report = await statsFn.call(t);
+          report.forEach((s: RTCStats) => {
+            const sAny = s as RTCStats & {
+              kind?: string;
+              bytesSent?: number;
+              packetsLost?: number;
+            };
+            if (sAny.type === 'outbound-rtp' && sAny.kind === 'video' && typeof sAny.bytesSent === 'number') {
+              const key = sAny.id || pub.trackSid || 'screen';
+              const prev = screenBytesRef.current[key];
+              if (prev) {
+                const dt = (sAny.timestamp - prev.ts) / 1000;
+                if (dt > 0) {
+                  const bytesDiff = sAny.bytesSent - prev.bytes;
+                  sendBitrateKbps = Math.max(0, Math.round((bytesDiff * 8) / dt / 1000));
+                }
+              }
+              screenBytesRef.current[key] = { bytes: sAny.bytesSent, ts: sAny.timestamp };
+            }
+            if (
+              sAny.type === 'remote-inbound-rtp' &&
+              sAny.kind === 'video' &&
+              typeof sAny.packetsLost === 'number'
+            ) {
+              packetsLost = sAny.packetsLost;
+            }
+          });
+        } catch {
+          /* ignore */
+        }
+      }
+
+      if (alive) setScreenPublishStats({ captureFps, sendBitrateKbps, packetsLost });
+    };
+    void poll();
+    const id = window.setInterval(() => void poll(), 2000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [phase, screenStream]);
 
   const setUserVolume = useCallback(
     (peerId: string, linearGain: number) => {
@@ -579,5 +691,6 @@ export function useLiveKitVoice(opts: {
     setUserVolume,
     setUserOutputMuted,
     voiceDiagnostics,
+    screenPublishStats,
   };
 }

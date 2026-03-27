@@ -1,12 +1,18 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import basicSsl from '@vitejs/plugin-basic-ssl';
+import path from 'node:path';
 
 const devHttps = process.env.VITE_DEV_HTTPS === '1';
 const previewHttps = process.env.VITE_PREVIEW_HTTPS === '1';
 
 export default defineConfig({
   plugins: [react(), ...(devHttps || previewHttps ? [basicSsl()] : [])],
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, 'src'),
+    },
+  },
   server: {
     host: true,
     port: 5173,

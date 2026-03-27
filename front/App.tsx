@@ -1,18 +1,21 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback, useReducer } from 'react';
-import { useChatStore } from './store/chatStore';
-import type { ChatRow } from './store/chatStore';
-import { ChatMessage } from './messaging/ChatMessage';
-import { MessageInput } from './messaging/MessageInput';
-import { ServerRail } from './layout/ServerRail';
-import { ChannelSidebar } from './layout/ChannelSidebar';
-import { ChatColumn } from './layout/ChatColumn';
-import { MemberColumn } from './layout/MemberColumn';
+import { useChatStore } from './src/store/chatStore';
+import type { ChatRow } from './src/store/chatStore';
+import { ChatMessage } from './src/messaging/ChatMessage';
+import { MessageInput } from './src/messaging/MessageInput';
+import { ServerRail } from './src/layout/ServerRail';
+import { ChannelSidebar } from './src/layout/ChannelSidebar';
+import { ChatColumn } from './src/layout/ChatColumn';
+import { MemberColumn } from './src/layout/MemberColumn';
 import { useLiveKitVoice, VOICE_PEER_GAIN_MAX, VOICE_PEER_GAIN_MIN } from './useLiveKitVoice';
 import { VoiceSidebarParticipantRow, VoiceStageParticipantTile } from './VoiceSpeakingUi';
 import type { VoicePhase } from './voicePhase';
 import { loadDevcordLocalSettings, saveDevcordLocalSettings } from './devcordLocalSettings';
+import { useSettingsStore } from './src/store/settingsStore';
 import { resizeImageFileToDataUrl } from './resizeAvatarImage';
 import { SettingsGlowDropdown } from './SettingsGlowDropdown';
+import { SettingsOverlay } from './src/components/settings/SettingsOverlay';
+import { UserPopout } from './src/components/popout/UserPopout';
 import { useChatSocket, type ChatUserUpdatedPayload, type DmMessageRow, type DmTaskEvent, type DmCallStateEvent } from './useChatSocket';
 import { NickLabel } from './nickAppearance';
 import { buildNickGlowJson, NICK_FONT_STACKS } from './nickGlowPresets';
@@ -38,8 +41,12 @@ import {
 // ============================================================================
 
 // VITE_API_URL=http://localhost:3000/api — pusty = tryb mock (lokalne placeholdery).
-const API_BASE_URL = ((import.meta.env.VITE_API_URL as string | undefined) ?? '').replace(/\/$/, '');
+const API_BASE_URL = (
+  (import.meta.env.VITE_API_URL as string | undefined) ??
+  'https://devcord.ndevelopment.org/api'
+).replace(/\/$/, '');
 const DEMO_MODE = !API_BASE_URL;
+const APP_BASE_PATH = '/app';
 
 function appPublicOrigin(): string {
   const fromEnv = (import.meta.env.VITE_PUBLIC_ORIGIN as string | undefined)?.trim().replace(/\/$/, '');
@@ -58,7 +65,7 @@ function appPublicOrigin(): string {
 function readChannelsPath(): { sid: string; cid: string } | null {
   if (typeof window === 'undefined') return null;
   const path = (window.location.pathname || '/').replace(/\/$/, '') || '/';
-  const m = path.match(/^\/channels\/([^/]+)\/([^/]+)$/i);
+  const m = path.match(/^(?:\/app)?\/channels\/([^/]+)\/([^/]+)$/i);
   if (!m?.[1] || !m?.[2]) return null;
   try {
     return { sid: decodeURIComponent(m[1]), cid: decodeURIComponent(m[2]) };
@@ -69,7 +76,7 @@ function readChannelsPath(): { sid: string; cid: string } | null {
 
 function writeChannelsPath(sid: string, cid: string) {
   if (typeof window === 'undefined' || !sid || !cid) return;
-  const want = `/channels/${sid}/${cid}`;
+  const want = `${APP_BASE_PATH}/channels/${sid}/${cid}`;
   const cur = (window.location.pathname || '').replace(/\/$/, '') || '/';
   if (cur === want) return;
   window.history.replaceState({ devcord: 1 }, '', want);
@@ -79,15 +86,15 @@ function writeChannelsPath(sid: string, cid: string) {
 function writePersonalHomePath() {
   if (typeof window === 'undefined') return;
   const cur = (window.location.pathname || '').replace(/\/$/, '') || '/';
-  if (cur === '/' || cur === '') return;
-  if (!/^\/channels\//i.test(cur)) return;
-  window.history.replaceState({ devcord: 1 }, '', '/');
+  if (cur === APP_BASE_PATH || cur === `${APP_BASE_PATH}/`) return;
+  if (!/^(?:\/app)?\/channels\//i.test(cur)) return;
+  window.history.replaceState({ devcord: 1 }, '', APP_BASE_PATH);
 }
 
 function readPersonalDmPath(): { cid: string } | null {
   if (typeof window === 'undefined') return null;
   const path = (window.location.pathname || '/').replace(/\/$/, '') || '/';
-  const m = path.match(/^\/channels\/@me\/([^/]+)$/i);
+  const m = path.match(/^(?:\/app)?\/channels\/@me\/([^/]+)$/i);
   if (!m?.[1]) return null;
   try {
     return { cid: decodeURIComponent(m[1]) };
@@ -98,7 +105,7 @@ function readPersonalDmPath(): { cid: string } | null {
 
 function writePersonalDmPath(cid: string) {
   if (typeof window === 'undefined' || !cid) return;
-  const want = `/channels/@me/${encodeURIComponent(cid)}`;
+  const want = `${APP_BASE_PATH}/channels/@me/${encodeURIComponent(cid)}`;
   const cur = (window.location.pathname || '').replace(/\/$/, '') || '/';
   if (cur === want) return;
   window.history.replaceState({ devcord: 1 }, '', want);
@@ -391,6 +398,11 @@ function useVoiceRoomMock({ enabled, roomId, userId }: { enabled: boolean, roomI
       connectionState: 'disconnected',
       participantCount: 0,
     },
+    screenPublishStats: {
+      captureFps: null as number | null,
+      sendBitrateKbps: null as number | null,
+      packetsLost: null as number | null,
+    },
   };
 }
 
@@ -581,8 +593,10 @@ export default function App() {
   const [isDragging, setIsDragging] = useState(false);
   const [isCmdPaletteOpen, setIsCmdPaletteOpen] = useState(false);
   const [cmdSearchQuery, setCmdSearchQuery] = useState('');
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<'profile' | 'account' | 'appearance' | 'audio'>('profile');
+  const isSettingsOpen = useSettingsStore((s) => s.isSettingsOpen);
+  const setIsSettingsOpen = useSettingsStore((s) => s.setSettingsOpen);
+  const settingsTab = useSettingsStore((s) => s.settingsTab);
+  const setSettingsTab = useSettingsStore((s) => s.setSettingsTab);
   const [localUserName, setLocalUserName] = useState(() => (DEMO_MODE ? 'Admin' : 'Użytkownik'));
   const [localUserAvatar, setLocalUserAvatar] = useState('');
   const [localUserColor, setLocalUserColor] = useState('#00eeff');
@@ -590,9 +604,8 @@ export default function App() {
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [settingsSuccess, setSettingsSuccess] = useState('');
   const [settingsError, setSettingsError] = useState('');
-  const [localTheme, setLocalTheme] = useState<'dark' | 'light'>(() =>
-    devcordSeed.appearance.theme === 'light' ? 'light' : 'dark',
-  );
+  const localTheme = useSettingsStore((s) => s.localTheme);
+  const setLocalTheme = useSettingsStore((s) => s.setLocalTheme);
   const [sessionEmail, setSessionEmail] = useState('');
   const [accountPwdOpen, setAccountPwdOpen] = useState(false);
   const [pwdOld, setPwdOld] = useState('');
@@ -641,14 +654,22 @@ export default function App() {
   const [remoteScreenVolume, setRemoteScreenVolume] = useState(1);
   const [remoteScreenVideoMuted, setRemoteScreenVideoMuted] = useState(false);
   const [screenStreamContext, setScreenStreamContext] = useState<{ x: number; y: number } | null>(null);
-  const [micDeviceId, setMicDeviceId] = useState(devcordSeed.audio.micDeviceId);
+  const [screenCaptureProfile, setScreenCaptureProfile] = useState<240 | 120 | 60 | null>(null);
+  const [screenCaptureFps, setScreenCaptureFps] = useState<number | null>(null);
+  const screenFallbackStrikeRef = useRef(0);
+  const micDeviceId = useSettingsStore((s) => s.micDeviceId);
+  const setMicDeviceId = useSettingsStore((s) => s.setMicDeviceId);
   const micSoftwareGate = false;
   const micGateThresholdDb = devcordSeed.audio.micGateThresholdDb;
-  const [rnnoiseEnabled, setRnnoiseEnabled] = useState(() => devcordSeed.audio.rnnoiseEnabled);
-  const [screenFps, setScreenFps] = useState(devcordSeed.screen.fps);
-  const [screenRes, setScreenRes] = useState(devcordSeed.screen.res);
+  const rnnoiseEnabled = useSettingsStore((s) => s.rnnoiseEnabled);
+  const setRnnoiseEnabled = useSettingsStore((s) => s.setRnnoiseEnabled);
+  const screenFps = useSettingsStore((s) => s.screenFps);
+  const setScreenFps = useSettingsStore((s) => s.setScreenFps);
+  const screenRes = useSettingsStore((s) => s.screenRes);
+  const setScreenRes = useSettingsStore((s) => s.setScreenRes);
   const [userVolumes, setUserVolumes] = useState<Record<string, number>>(() => ({ ...devcordSeed.userVoiceGain }));
   const [userOutputMuted, setUserOutputMutedMap] = useState<Record<string, boolean>>(() => ({ ...devcordSeed.userOutputMuted }));
+  const [micLevel, setMicLevel] = useState(0);
 
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
   const [voiceMixPanelOpen, setVoiceMixPanelOpen] = useState(false);
@@ -675,6 +696,7 @@ export default function App() {
   const [friendOutgoing, setFriendOutgoing] = useState<{ id: string; to: UserInfo }[]>([]);
   const [acceptedFriends, setAcceptedFriends] = useState<UserInfo[]>([]);
   const [profileCardNote, setProfileCardNote] = useState('');
+  const [userPopout, setUserPopout] = useState<{ user: UserInfo; x: number; y: number } | null>(null);
   const [pvCall, setPvCall] = useState<{ peerId: string; status: 'ringing' | 'connected' } | null>(null);
   const [dmCallState, setDmCallState] = useState<{
     callId: string;
@@ -748,8 +770,18 @@ export default function App() {
 
   useEffect(() => {
     if (!screenStream) return;
-    screenStream.getVideoTracks().forEach(track => {
-      track.applyConstraints({ frameRate: { max: screenFps }, height: { max: screenRes } }).catch(console.error);
+    screenStream.getVideoTracks().forEach((track) => {
+      track
+        .applyConstraints({
+          frameRate: { max: screenFps },
+          width: { max: 1920 },
+          height: { max: screenRes },
+        })
+        .catch(() => {
+          /* ignore */
+        });
+      const f = track.getSettings().frameRate;
+      if (typeof f === 'number' && Number.isFinite(f)) setScreenCaptureFps(Math.round(f));
     });
   }, [screenStream, screenFps, screenRes]);
 
@@ -790,6 +822,15 @@ export default function App() {
   // Referencje
   const guestIdRef = useRef(guestSessionId());
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const dmMessagesEndRef = useRef<HTMLDivElement | null>(null);
+  const channelScrollRef = useRef<HTMLDivElement | null>(null);
+  const dmScrollRef = useRef<HTMLDivElement | null>(null);
+  const channelStickToBottomRef = useRef(true);
+  const dmStickToBottomRef = useRef(true);
+  const prevChannelKeyRef = useRef('');
+  const prevChannelLenRef = useRef(0);
+  const prevDmConversationRef = useRef<string | null>(null);
+  const prevDmLenRef = useRef(0);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const settingsAvatarFileRef = useRef<HTMLInputElement | null>(null);
   const initialNavSyncedRef = useRef(false);
@@ -1191,6 +1232,21 @@ export default function App() {
 
   const myUserId = API_BASE_URL ? meUserId : guestIdRef.current;
   const messages = useChatStore((s) => s.messagesByChannel[activeChannel] ?? []);
+  const activeDmRows = useMemo<(DmRow | ChatRow)[]>(() => {
+    if (activeServer !== '') return [];
+    const tKey = dmPeerId && myUserId ? dmThreadKey(myUserId, dmPeerId) : '';
+    if (API_BASE_URL && dmActiveConversationId) return dmMessagesByConversation[dmActiveConversationId] ?? [];
+    if (!tKey) return [];
+    return dmMessagesByThread[tKey] ?? [];
+  }, [
+    activeServer,
+    dmPeerId,
+    myUserId,
+    API_BASE_URL,
+    dmActiveConversationId,
+    dmMessagesByConversation,
+    dmMessagesByThread,
+  ]);
 
   const voiceDmActive = useMemo(
     () => !!(dmCallState?.status === 'connected' && dmCallState.conversationId),
@@ -1229,6 +1285,12 @@ export default function App() {
           if (tmpIdx >= 0) list[tmpIdx] = entry;
           else list.push(entry);
         }
+        list.sort((a, b) => {
+          const na = Number(a.id);
+          const nb = Number(b.id);
+          if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+          return a.id.localeCompare(b.id, 'en', { numeric: true });
+        });
         return { ...prev, [conv]: list };
       });
       setDmApiConversations((inbox) =>
@@ -1734,6 +1796,7 @@ export default function App() {
     screenStream,
     cameraStream,
     screenBitrate: screenRes === 1440 ? 8000000 : screenRes === 1080 ? 4000000 : screenRes === 720 ? 1500000 : 800000,
+    screenPreferredCodec: screenFps >= 120 ? 'av1' : 'h264',
     rnnoiseEnabled,
   });
   const voiceMock = useVoiceRoomMock({
@@ -1755,6 +1818,7 @@ export default function App() {
     remoteVoiceState,
     setUserVolume,
     setUserOutputMuted: setPeerOutputMute,
+    screenPublishStats,
   } = API_BASE_URL ? voiceLive : voiceMock;
 
   const [voicePingRttMs, setVoicePingRttMs] = useState<number | null>(null);
@@ -1820,6 +1884,101 @@ export default function App() {
       setLocalMuted((m) => !m);
     }
   }, [localDeafened, setLocalDeafened, setLocalMuted]);
+
+  useEffect(() => {
+    if (!window.devcordDesktop?.onShortcutAction) return;
+    return window.devcordDesktop.onShortcutAction(({ action }) => {
+      if (action === 'toggle-deafen') {
+        toggleVoiceHeadphones();
+        return;
+      }
+      if (action === 'toggle-mute') toggleVoiceMic();
+    });
+  }, [toggleVoiceHeadphones, toggleVoiceMic]);
+
+  useEffect(() => {
+    if (!screenStream) {
+      setScreenCaptureFps(null);
+      screenFallbackStrikeRef.current = 0;
+      return;
+    }
+    const video = document.createElement('video');
+    video.muted = true;
+    video.playsInline = true;
+    video.srcObject = screenStream;
+    void video.play().catch(() => {
+      /* ignore */
+    });
+    let frames = 0;
+    let lastTs = performance.now();
+    let raf = 0;
+    const tick = () => {
+      frames += 1;
+      const now = performance.now();
+      if (now - lastTs >= 1000) {
+        setScreenCaptureFps(Math.round((frames * 1000) / (now - lastTs)));
+        frames = 0;
+        lastTs = now;
+      }
+      const anyVideo = video as HTMLVideoElement & { requestVideoFrameCallback?: (cb: () => void) => number };
+      if (typeof anyVideo.requestVideoFrameCallback === 'function') {
+        anyVideo.requestVideoFrameCallback(tick);
+      } else {
+        raf = window.requestAnimationFrame(tick);
+      }
+    };
+    tick();
+    return () => {
+      if (raf) window.cancelAnimationFrame(raf);
+      video.pause();
+      video.srcObject = null;
+    };
+  }, [screenStream]);
+
+  useEffect(() => {
+    if (!screenStream || !screenCaptureProfile) return;
+    const measuredFps = screenCaptureFps ?? screenPublishStats.captureFps;
+    const bitrate = screenPublishStats.sendBitrateKbps;
+
+    const fpsFloor = screenCaptureProfile === 240 ? 170 : screenCaptureProfile === 120 ? 85 : 45;
+    const bitrateFloor = screenCaptureProfile === 240 ? 12000 : screenCaptureProfile === 120 ? 7000 : 3500;
+    const fpsBad = typeof measuredFps === 'number' && measuredFps > 0 && measuredFps < fpsFloor;
+    const bitrateBad = typeof bitrate === 'number' && bitrate > 0 && bitrate < bitrateFloor;
+
+    if (!fpsBad && !bitrateBad) {
+      screenFallbackStrikeRef.current = 0;
+      return;
+    }
+
+    screenFallbackStrikeRef.current += 1;
+    if (screenFallbackStrikeRef.current < 3) return;
+
+    const nextProfile: 120 | 60 | null =
+      screenCaptureProfile === 240 ? 120 : screenCaptureProfile === 120 ? 60 : null;
+    if (!nextProfile) return;
+
+    screenFallbackStrikeRef.current = 0;
+    setScreenCaptureProfile(nextProfile);
+    setScreenFps(nextProfile);
+    screenStream.getVideoTracks().forEach((track) => {
+      track
+        .applyConstraints({
+          frameRate: { min: 60, max: nextProfile },
+          width: { min: 1920, max: 1920 },
+          height: { min: 1080, max: 1080 },
+        })
+        .catch(() => {
+          /* ignore */
+        });
+    });
+  }, [
+    screenStream,
+    screenCaptureProfile,
+    screenCaptureFps,
+    screenPublishStats.captureFps,
+    screenPublishStats.sendBitrateKbps,
+    setScreenFps,
+  ]);
 
   const [screenLayoutTick, bumpScreenLayout] = useReducer((n: number) => n + 1, 0);
   useEffect(() => {
@@ -1901,6 +2060,11 @@ export default function App() {
     } catch { /* ignore */ }
   };
 
+  const isNearBottom = (el: HTMLDivElement) => {
+    const remaining = el.scrollHeight - el.scrollTop - el.clientHeight;
+    return remaining < 72;
+  };
+
   useEffect(() => { void refreshAudioDevices(); }, [isSettingsOpen, settingsTab]);
 
   useEffect(() => {
@@ -1924,12 +2088,93 @@ export default function App() {
     const closeMenu = () => {
       setContextMenu(null);
       setScreenStreamContext(null);
+      setUserPopout(null);
     };
     window.addEventListener('click', closeMenu);
     return () => window.removeEventListener('click', closeMenu);
   }, []);
 
-  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, activeChannel, isAILoading]);
+  useEffect(() => {
+    const key = `${activeServer}:${activeChannel}`;
+    const changedChannel = prevChannelKeyRef.current !== key;
+    const nextLen = messages.length + (isAILoading ? 1 : 0);
+    const grew = nextLen > prevChannelLenRef.current;
+    if (activeServer !== '' && (changedChannel || (grew && channelStickToBottomRef.current))) {
+      messagesEndRef.current?.scrollIntoView({ behavior: changedChannel ? 'auto' : 'smooth' });
+    }
+    prevChannelKeyRef.current = key;
+    prevChannelLenRef.current = nextLen;
+  }, [messages.length, activeChannel, activeServer, isAILoading]);
+
+  useEffect(() => {
+    if (activeServer !== '' || !dmPeerId) return;
+    const changedConversation = prevDmConversationRef.current !== dmActiveConversationId;
+    const grew = activeDmRows.length > prevDmLenRef.current;
+    if (changedConversation || (grew && dmStickToBottomRef.current)) {
+      dmMessagesEndRef.current?.scrollIntoView({ behavior: changedConversation ? 'auto' : 'smooth' });
+    }
+    prevDmConversationRef.current = dmActiveConversationId;
+    prevDmLenRef.current = activeDmRows.length;
+  }, [activeServer, dmPeerId, dmActiveConversationId, activeDmRows.length]);
+
+  useEffect(() => {
+    if (!isSettingsOpen || settingsTab !== 'audio') return;
+    let raf = 0;
+    let mounted = true;
+    let stream: MediaStream | null = null;
+    let ctx: AudioContext | null = null;
+    let analyser: AnalyserNode | null = null;
+    let source: MediaStreamAudioSourceNode | null = null;
+    const data = new Uint8Array(1024);
+
+    const loop = () => {
+      if (!mounted || !analyser) return;
+      analyser.getByteTimeDomainData(data);
+      let sum = 0;
+      for (let i = 0; i < data.length; i += 1) {
+        const v = (data[i] - 128) / 128;
+        sum += v * v;
+      }
+      const rms = Math.sqrt(sum / data.length);
+      setMicLevel(Math.min(1, rms * 4));
+      raf = window.requestAnimationFrame(loop);
+    };
+
+    (async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: micDeviceId && micDeviceId !== 'default' ? { deviceId: { exact: micDeviceId } } : true,
+          video: false,
+        });
+        if (!mounted) return;
+        ctx = new AudioContext();
+        analyser = ctx.createAnalyser();
+        analyser.fftSize = 1024;
+        source = ctx.createMediaStreamSource(stream);
+        source.connect(analyser);
+        loop();
+      } catch {
+        setMicLevel(0);
+      }
+    })();
+
+    return () => {
+      mounted = false;
+      if (raf) window.cancelAnimationFrame(raf);
+      setMicLevel(0);
+      try {
+        source?.disconnect();
+      } catch {
+        /* ignore */
+      }
+      try {
+        void ctx?.close();
+      } catch {
+        /* ignore */
+      }
+      stream?.getTracks().forEach((t) => t.stop());
+    };
+  }, [isSettingsOpen, settingsTab, micDeviceId]);
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -1945,6 +2190,12 @@ export default function App() {
   const handleContextMenu = (e: React.MouseEvent, type: ContextMenuType, data: any) => {
     e.preventDefault(); e.stopPropagation();
     setContextMenu({ x: e.clientX, y: e.clientY, type, data });
+  };
+
+  const openUserPopout = (e: React.MouseEvent, user: UserInfo) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setUserPopout({ user, x: e.clientX, y: e.clientY });
   };
 
   // --- SERWERY ---
@@ -2041,8 +2292,8 @@ export default function App() {
     setActiveServer(res.id);
     const path = window.location.pathname || '';
     if (path.match(/^\/(?:join|invite)\//i)) {
-      if (firstCh) window.history.replaceState({ devcord: 1 }, '', `/channels/${res.id}/${firstCh}`);
-      else window.history.replaceState({ devcord: 1 }, '', '/');
+      if (firstCh) window.history.replaceState({ devcord: 1 }, '', `${APP_BASE_PATH}/channels/${res.id}/${firstCh}`);
+      else window.history.replaceState({ devcord: 1 }, '', APP_BASE_PATH);
     } else if (firstCh) {
       writeChannelsPath(res.id, firstCh);
     }
@@ -2421,28 +2672,88 @@ export default function App() {
     return () => window.removeEventListener('devcord:force-logout', onForce as EventListener);
   }, [forceLogout]);
   const toggleScreenShare = async () => {
-    if (screenStream) { screenStream.getTracks().forEach(track => track.stop()); setScreenStream(null); } 
-    else {
-      try {
-        let stream: MediaStream;
+    if (screenStream) {
+      screenStream.getTracks().forEach((track) => track.stop());
+      setScreenStream(null);
+      setScreenCaptureProfile(null);
+      return;
+    }
+
+    const openWithElectron = async (): Promise<MediaStream> => {
+      const listSources = window.devcordDesktop?.listScreenSources;
+      if (!listSources) throw new Error('desktop-capturer unavailable');
+      const sources = await listSources();
+      if (!Array.isArray(sources) || sources.length === 0) throw new Error('no capture sources');
+      const source =
+        sources.find((s) => String(s.id).startsWith('screen:')) ??
+        sources[0];
+      const profiles: Array<240 | 120 | 60> = [240, 120, 60];
+      for (const profile of profiles) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: {
+              mandatory: {
+                chromeMediaSource: 'desktop',
+                chromeMediaSourceId: source.id,
+                minFrameRate: 60,
+                maxFrameRate: profile,
+                minWidth: 1920,
+                minHeight: 1080,
+              },
+            } as MediaTrackConstraints,
+          } as MediaStreamConstraints);
+          setScreenCaptureProfile(profile);
+          return stream;
+        } catch {
+          /* try next profile */
+        }
+      }
+      throw new Error('no compatible desktop profile');
+    };
+
+    try {
+      let stream: MediaStream;
+      if (window.devcordDesktop?.isElectron) {
+        stream = await openWithElectron();
+      } else {
         try {
           stream = await navigator.mediaDevices.getDisplayMedia({
-            video: { cursor: 'always' } as MediaTrackConstraints,
+            video: {
+              cursor: 'always',
+              width: { min: 1920, ideal: 1920 },
+              height: { min: 1080, ideal: 1080 },
+              frameRate: { min: 60, max: 240 },
+            } as MediaTrackConstraints,
             audio: true,
           });
+          setScreenCaptureProfile(240);
         } catch {
           stream = await navigator.mediaDevices.getDisplayMedia({
-            video: { cursor: 'always' } as MediaTrackConstraints,
+            video: {
+              cursor: 'always',
+              width: { min: 1920, ideal: 1920 },
+              height: { min: 1080, ideal: 1080 },
+              frameRate: { min: 60, max: 120 },
+            } as MediaTrackConstraints,
             audio: false,
           });
+          setScreenCaptureProfile(120);
         }
-        stream.getVideoTracks()[0].onended = () => setScreenStream(null);
-        setScreenStream(stream);
-      } catch {
-        const mockStream = createMockScreenStream();
-        mockStream.getVideoTracks()[0].onended = () => setScreenStream(null);
-        setScreenStream(mockStream);
       }
+      stream.getVideoTracks()[0].onended = () => {
+        setScreenStream(null);
+        setScreenCaptureProfile(null);
+      };
+      setScreenStream(stream);
+    } catch {
+      const mockStream = createMockScreenStream();
+      mockStream.getVideoTracks()[0].onended = () => {
+        setScreenStream(null);
+        setScreenCaptureProfile(null);
+      };
+      setScreenCaptureProfile(60);
+      setScreenStream(mockStream);
     }
   };
 
@@ -2694,7 +3005,7 @@ export default function App() {
       {/* --- MENU KONTEKSTOWE --- */}
       {contextMenu && (
         <div
-          className="fixed z-[300] w-64 bg-[#0c0c0e]/95 backdrop-blur-3xl border border-white/[0.1] rounded-xl shadow-[0_20px_60px_rgba(0,0,0,0.9)] overflow-hidden flex flex-col p-1.5 animate-in fade-in zoom-in-95 duration-100"
+          className="fixed z-[300] w-64 bg-[#0c0c0e]/95 backdrop-blur-3xl border border-white/[0.1] rounded-xl shadow-[0_20px_60px_rgba(0,0,0,0.9)] overflow-hidden flex flex-col p-1.5 animate-modal-in"
           style={{
             top: Math.min(contextMenu.y, window.innerHeight - 350),
             left: Math.min(contextMenu.x, window.innerWidth - 256)
@@ -2792,7 +3103,14 @@ export default function App() {
               {contextMenu.data.isMe && (
                 <>
                   <div className="h-px bg-white/[0.05] my-1"></div>
-                  <button className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-white/[0.05] rounded-lg transition-colors w-full text-left"><Edit2 size={14}/> Edytuj</button>
+                  <button
+                    onClick={() => {
+                      setEditingId(contextMenu.data.id);
+                      setEditValue(contextMenu.data.content ?? '');
+                      setContextMenu(null);
+                    }}
+                    className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-white/[0.05] rounded-lg transition-colors w-full text-left"
+                  ><Edit2 size={14}/> Edytuj</button>
                   <button onClick={() => deleteMessage(contextMenu.data.id)} className="flex items-center gap-2 px-3 py-2 text-sm text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded-lg transition-colors w-full text-left"><Trash2 size={14}/> Usuń</button>
                 </>
               )}
@@ -2801,8 +3119,22 @@ export default function App() {
           {contextMenu.type === 'channel' && (
             <>
               <div className="px-3 py-2 text-xs font-bold text-zinc-500 uppercase tracking-widest border-b border-white/[0.05] mb-1 truncate">{contextMenu.data.name}</div>
-              <button className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-white/[0.05] rounded-lg transition-colors w-full text-left"><Edit2 size={14}/> Edytuj kanał</button>
-              <button className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-white/[0.05] rounded-lg transition-colors w-full text-left"><BellOff size={14}/> Wycisz</button>
+              <button
+                onClick={() => {
+                  setNewChannelName(contextMenu.data.name ?? '');
+                  setCreateChannelModal({ categoryId: contextMenu.data.categoryId });
+                  setContextMenu(null);
+                }}
+                className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-white/[0.05] rounded-lg transition-colors w-full text-left"
+              ><Edit2 size={14}/> Edytuj kanał</button>
+              <button
+                onClick={() => {
+                  setContextMenu(null);
+                  setSettingsSuccess(`Kanał ${contextMenu.data.name} został wyciszony lokalnie.`);
+                  window.setTimeout(() => setSettingsSuccess(''), 1800);
+                }}
+                className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-white hover:bg-white/[0.05] rounded-lg transition-colors w-full text-left"
+              ><BellOff size={14}/> Wycisz</button>
               <div className="h-px bg-white/[0.05] my-1"></div>
               <button onClick={() => deleteChannel(contextMenu.data.id)} className="flex items-center gap-2 px-3 py-2 text-sm text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded-lg transition-colors w-full text-left"><Trash2 size={14}/> Usuń kanał</button>
             </>
@@ -2969,7 +3301,7 @@ export default function App() {
                 onClick={() => {
                   setDeepJoinToken(null);
                   setJoinModalErr('');
-                  if (window.location.pathname.match(/^\/(?:join|invite)\//i)) window.history.replaceState({ devcord: 1 }, '', '/');
+                  if (window.location.pathname.match(/^\/(?:join|invite)\//i)) window.history.replaceState({ devcord: 1 }, '', APP_BASE_PATH);
                 }}
                 className="text-zinc-500 hover:text-white"
               >
@@ -2989,7 +3321,7 @@ export default function App() {
                 onClick={() => {
                   setDeepJoinToken(null);
                   setJoinModalErr('');
-                  if (window.location.pathname.match(/^\/(?:join|invite)\//i)) window.history.replaceState({ devcord: 1 }, '', '/');
+                  if (window.location.pathname.match(/^\/(?:join|invite)\//i)) window.history.replaceState({ devcord: 1 }, '', APP_BASE_PATH);
                 }}
                 className="px-5 py-2.5 rounded-xl text-sm font-medium text-zinc-400 hover:bg-white/[0.05] transition-colors"
               >
@@ -3144,77 +3476,14 @@ export default function App() {
         </div>
       )}
 
-      {isSettingsOpen && (
-        <div
-          className="fixed inset-0 z-[400] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200"
-          onClick={() => setIsSettingsOpen(false)}
-          role="presentation"
-        >
-          <div
-            className="w-full max-w-2xl bg-[#0c0c0e] border border-white/[0.1] rounded-3xl shadow-[0_0_80px_rgba(0,0,0,1),0_0_40px_rgba(0,238,255,0.08)] ring-1 ring-[#00eeff]/15 flex overflow-hidden max-h-[85vh]"
-            onClick={(e) => e.stopPropagation()}
-            role="dialog"
-            aria-labelledby="settings-title"
-          >
-            {/* Sidebar Ustawień */}
-            <div className="w-1/3 min-w-[180px] bg-[#050505] p-4 border-r border-white/[0.06] flex flex-col gap-1 overflow-y-auto">
-              <h2 id="settings-title" className="text-xl font-bold text-white mb-4 px-2 tracking-tight">
-                Ustawienia
-              </h2>
-              <div className="text-[10px] uppercase font-bold text-zinc-500 tracking-widest px-2 mb-2 mt-2">Personalizacja</div>
-              <button
-                type="button"
-                onClick={() => setSettingsTab('profile')}
-                className={`flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm font-semibold transition-colors ${
-                  settingsTab === 'profile' ? 'bg-[#00eeff]/15 text-[#00eeff]' : 'text-zinc-400 hover:text-zinc-200 hover:bg-white/[0.05]'
-                }`}
-              >
-                Mój Profil
-              </button>
-              <button
-                type="button"
-                onClick={() => setSettingsTab('appearance')}
-                className={`flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm font-semibold transition-colors ${
-                  settingsTab === 'appearance' ? 'bg-[#00eeff]/15 text-[#00eeff]' : 'text-zinc-400 hover:text-zinc-200 hover:bg-white/[0.05]'
-                }`}
-              >
-                Wygląd i Motywy
-              </button>
-              <div className="text-[10px] uppercase font-bold text-zinc-500 tracking-widest px-2 mb-2 mt-4">Prywatność</div>
-              <button
-                type="button"
-                onClick={() => setSettingsTab('account')}
-                className={`flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm font-semibold transition-colors ${
-                  settingsTab === 'account' ? 'bg-[#00eeff]/15 text-[#00eeff]' : 'text-zinc-400 hover:text-zinc-200 hover:bg-white/[0.05]'
-                }`}
-              >
-                Konto i Hasła
-              </button>
-              <div className="text-[10px] uppercase font-bold text-zinc-500 tracking-widest px-2 mb-2 mt-4">Sprzęt</div>
-              <button
-                type="button"
-                onClick={() => setSettingsTab('audio')}
-                className={`flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm font-semibold transition-colors ${
-                  settingsTab === 'audio' ? 'bg-[#00eeff]/15 text-[#00eeff]' : 'text-zinc-400 hover:text-zinc-200 hover:bg-white/[0.05]'
-                }`}
-              >
-                Dźwięk i Wideo
-              </button>
-            </div>
-
-            {/* Content Ustawień */}
-            <div className="flex-1 p-8 flex flex-col overflow-y-auto custom-scrollbar relative">
-              <button
-                type="button"
-                onClick={() => setIsSettingsOpen(false)}
-                className="absolute top-4 right-4 text-zinc-500 hover:text-white p-1 rounded-lg hover:bg-white/[0.06] transition-colors"
-              >
-                <X size={22} />
-              </button>
-              
-              {settingsSuccess && <div className="mb-6 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-sm">{settingsSuccess}</div>}
-              {settingsError && <div className="mb-6 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-500 text-sm">{settingsError}</div>}
-
+      <SettingsOverlay
+        open={isSettingsOpen}
+        activeTab={settingsTab}
+        onTabChange={setSettingsTab}
+        onClose={() => setIsSettingsOpen(false)}
+        success={settingsSuccess}
+        error={settingsError}
+      >
               {settingsTab === 'profile' && (
                 <div className="space-y-8 animate-in fade-in duration-300">
                   <div>
@@ -3418,7 +3687,7 @@ export default function App() {
                 </div>
               )}
 
-              {settingsTab === 'account' && (
+              {settingsTab === 'privacy' && (
                 <div className="space-y-8 animate-in fade-in duration-300">
                   <div>
                     <h3 className="text-xl font-bold text-white mb-1">Moje Konto</h3>
@@ -3545,8 +3814,8 @@ export default function App() {
               {settingsTab === 'audio' && (
                 <div className="space-y-6 animate-in fade-in duration-300">
                   <div>
-                    <h3 className="text-xl font-bold text-white mb-1">Dźwięk i Wideo</h3>
-                    <p className="text-sm text-zinc-400">Dostosuj swoje wejścia i wyjścia.</p>
+                    <h3 className="text-xl font-bold text-white mb-1">Audio</h3>
+                    <p className="text-sm text-zinc-400">Mikrofon, redukcja szumów i poziom wejścia.</p>
                   </div>
                   <div>
                     <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">
@@ -3567,12 +3836,12 @@ export default function App() {
                   </div>
                   <div className="bg-[#151515] border border-white/[0.08] rounded-2xl p-5">
                     <div className="flex items-center justify-between gap-3">
-                      <span className="text-sm font-bold text-white tracking-wide">VoidFilter (redukcja szumów AI)</span>
+                      <span className="text-sm font-bold text-white tracking-wide">NullNoise AI (RNNoise)</span>
                       <button
                         type="button"
                         role="switch"
                         aria-checked={rnnoiseEnabled}
-                        onClick={() => setRnnoiseEnabled((v) => !v)}
+                        onClick={() => setRnnoiseEnabled(!rnnoiseEnabled)}
                         className={`relative w-12 h-6 rounded-full transition-colors ${rnnoiseEnabled ? 'bg-[#00eeff]/50' : 'bg-white/[0.1]'}`}
                       >
                         <span className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white transition-transform ${rnnoiseEnabled ? 'translate-x-6' : ''}`} />
@@ -3580,6 +3849,27 @@ export default function App() {
                     </div>
                     <p className="mt-3 text-xs text-zinc-500 leading-relaxed">
                       VoidFilter ładuje się leniwie dopiero przy wejściu na kanał głosowy / połączenie DM. Bramka ciszy została wyłączona.
+                    </p>
+                  </div>
+                  <div className="bg-[#151515] border border-white/[0.08] rounded-2xl p-5">
+                    <div className="flex items-center justify-between gap-3 mb-2">
+                      <span className="text-sm font-bold text-white tracking-wide">Poziom mikrofonu</span>
+                      <span className="text-xs text-zinc-400 tabular-nums">{Math.round(micLevel * 100)}%</span>
+                    </div>
+                    <div className="h-2 rounded-full bg-white/[0.08] overflow-hidden">
+                      <div
+                        className="h-full transition-[width] duration-75"
+                        style={{
+                          width: `${Math.round(micLevel * 100)}%`,
+                          background:
+                            micLevel > 0.82
+                              ? 'var(--md-sys-color-error)'
+                              : 'var(--md-sys-color-primary)',
+                        }}
+                      />
+                    </div>
+                    <p className="mt-2 text-xs text-zinc-500">
+                      Wskaźnik działa lokalnie i nie wysyła próbek audio na serwer.
                     </p>
                   </div>
                   <button
@@ -3590,14 +3880,76 @@ export default function App() {
                     Wyszukaj ponownie urządzenia
                   </button>
                   <p className="text-sm text-zinc-500 leading-relaxed">
-                    Mikrofon, VoidFilter oraz ustawienia ekranu (FPS / rozdzielczość) zapisują się automatycznie w tej przeglądarce i są używane przy rozmowach głosowych oraz udostępnianiu pulpitu.
+                    Mikrofon i NullNoise zapisują się automatycznie w tej przeglądarce.
                   </p>
                 </div>
               )}
-            </div>
-          </div>
-        </div>
-      )}
+              {settingsTab === 'video' && (
+                <div className="space-y-6 animate-in fade-in duration-300">
+                  <div>
+                    <h3 className="text-xl font-bold text-white mb-1">Wideo</h3>
+                    <p className="text-sm text-zinc-400">Jakość udostępniania ekranu i strumienia.</p>
+                  </div>
+                  <div className="rounded-2xl border border-white/[0.08] bg-[#151515] p-5 space-y-4">
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">Rozdzielczość streamu</label>
+                      <select
+                        value={screenRes}
+                        onChange={(e) => {
+                          const r = parseInt(e.target.value, 10);
+                          setScreenRes(r);
+                          if (r === 1440 && screenFps > 60) setScreenFps(60);
+                        }}
+                        className="w-full bg-[#111] border border-white/[0.1] rounded-xl px-4 py-3 text-sm text-white outline-none focus:border-[#00eeff]/40"
+                      >
+                        <option value={720}>720p</option>
+                        <option value={1080}>1080p</option>
+                        <option value={1440}>1440p</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">FPS streamu</label>
+                      <select
+                        value={screenFps}
+                        onChange={(e) => setScreenFps(parseInt(e.target.value, 10))}
+                        className="w-full bg-[#111] border border-white/[0.1] rounded-xl px-4 py-3 text-sm text-white outline-none focus:border-[#00eeff]/40"
+                      >
+                        <option value={30}>30 FPS</option>
+                        <option value={60}>60 FPS</option>
+                        {screenRes < 1440 ? <option value={120}>120 FPS</option> : null}
+                        {screenRes < 1440 ? <option value={240}>240 FPS</option> : null}
+                      </select>
+                    </div>
+                    <div className="rounded-xl border border-white/[0.08] bg-black/25 p-3 text-xs text-zinc-400 space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span>Profil capture</span>
+                        <span className="font-semibold text-zinc-200">
+                          {screenCaptureProfile ? `${screenCaptureProfile} FPS` : 'auto'}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span>Real capture FPS</span>
+                        <span className="font-semibold text-zinc-200">
+                          {screenCaptureFps != null ? `${screenCaptureFps}` : '—'}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span>Send bitrate (kbps)</span>
+                        <span className="font-semibold text-zinc-200">
+                          {screenPublishStats.sendBitrateKbps != null ? `${screenPublishStats.sendBitrateKbps}` : '—'}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span>Packets lost</span>
+                        <span className="font-semibold text-zinc-200">
+                          {screenPublishStats.packetsLost != null ? `${screenPublishStats.packetsLost}` : '—'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+      </SettingsOverlay>
 
       {screenStreamContext && remoteScreenWatching && primaryRemoteStream && (
         <div
@@ -4399,10 +4751,7 @@ export default function App() {
                 {(() => {
                   const dmPeer = workspaceMembers.find((m) => m.id === dmPeerId) ?? getUser(dmPeerId);
                   const tKey = dmThreadKey(myUserId, dmPeerId);
-                  const dms: (DmRow | ChatRow)[] =
-                    API_BASE_URL && dmActiveConversationId
-                      ? dmMessagesByConversation[dmActiveConversationId] ?? []
-                      : dmMessagesByThread[tKey] ?? [];
+                  const dms: (DmRow | ChatRow)[] = activeDmRows;
                   const sendDmLocal = (trimmed: string) => {
                     const row: DmRow = {
                       id: `dm_${Date.now()}`,
@@ -4513,8 +4862,14 @@ export default function App() {
                           </button>
                         </div>
                       </header>
-                      <div className="flex-1 overflow-y-auto custom-scrollbar px-4 py-3 relative z-10">
-                        <div className="w-full max-w-none flex flex-col pb-4">
+                      <div
+                        ref={dmScrollRef}
+                        onScroll={(e) => {
+                          dmStickToBottomRef.current = isNearBottom(e.currentTarget);
+                        }}
+                        className="flex-1 overflow-y-auto custom-scrollbar px-4 py-3 relative z-10 flex flex-col"
+                      >
+                        <div className="w-full max-w-none flex flex-col pb-4 mt-auto">
                           {dms.length === 0 ? (
                             <div
                               className="rounded-md3-md p-8 text-center text-sm"
@@ -4538,10 +4893,12 @@ export default function App() {
                                   key={row.id}
                                   className="msg-row relative flex py-0.5 rounded-md3-md hover:bg-surf-ch transition-colors"
                                   style={{ marginTop: isTail ? 0 : 'var(--message-group-spacing)' }}
+                                  onContextMenu={(e) => handleContextMenu(e, 'message', { ...row, isMe })}
                                 >
                                   <div className="flex-shrink-0 flex justify-end items-start py-0.5 px-[var(--gap-sm)]" style={{ width: 54 }}>
                                     {!isTail ? (
-                                      <button type="button" onClick={() => setProfileCardUser(u)}
+                                      <button type="button" onClick={(e) => openUserPopout(e, u)}
+                                        onContextMenu={(e) => handleContextMenu(e, 'user', u)}
                                         className="w-9 h-9 rounded-md3-md overflow-hidden hover:ring-2 hover:ring-primary/40 transition-all"
                                       >
                                         {avatarSrc ? (
@@ -4561,7 +4918,7 @@ export default function App() {
                                   <div className="flex-1 flex flex-col min-w-0 overflow-hidden pe-[var(--gap-lg)]">
                                     {!isTail && (
                                       <div className="flex items-baseline gap-[var(--gap-md)] mb-[2px]">
-                                        <button type="button" onClick={() => setProfileCardUser(u)} className="font-semibold hover:underline bg-transparent border-none p-0">
+                                        <button type="button" onClick={(e) => openUserPopout(e, u)} onContextMenu={(e) => handleContextMenu(e, 'user', u)} className="font-semibold hover:underline bg-transparent border-none p-0">
                                           <NickLabel user={u} fallbackColor={isMe ? 'var(--md-sys-color-primary)' : 'var(--md-sys-color-on-surface)'} className="text-[15px] font-semibold" />
                                         </button>
                                         <span className="text-[0.7em] tabular-nums" style={{ color: 'var(--md-sys-color-outline)' }}>{row.time}</span>
@@ -4573,6 +4930,7 @@ export default function App() {
                               );
                             })
                           )}
+                          <div ref={dmMessagesEndRef} className="h-4" />
                         </div>
                       </div>
                       <MessageInput
@@ -5121,6 +5479,10 @@ export default function App() {
             <>
               {/* WIDOK CZATU TEKSTOWEGO */}
               <div
+                ref={channelScrollRef}
+                onScroll={(e) => {
+                  channelStickToBottomRef.current = isNearBottom(e.currentTarget);
+                }}
                 onContextMenu={(e) => handleContextMenu(e, 'chatArea', null)}
                 className="flex-1 overflow-y-auto px-4 pt-4 pb-4 custom-scrollbar flex flex-col"
                 style={{ background: 'var(--md-sys-color-surface-container-low)' }}
@@ -5440,7 +5802,7 @@ export default function App() {
                               {usersInRole.map(user => (
                                 <div 
                                   key={user.id} 
-                                  onClick={() => setProfileCardUser(user)}
+                                  onClick={(e) => openUserPopout(e, user)}
                                   onContextMenu={(e) => handleContextMenu(e, 'user', user)}
                                   className="menu-btn flex items-center gap-2.5 px-2 py-1.5 rounded-md3-sm cursor-pointer"
                                 >
@@ -5622,6 +5984,23 @@ export default function App() {
           </MemberColumn>
         )}
       </div>
+
+      {userPopout ? (
+        <UserPopout
+          user={userPopout.user}
+          x={userPopout.x}
+          y={userPopout.y}
+          onClose={() => setUserPopout(null)}
+          onOpenProfile={() => {
+            setProfileCardUser(userPopout.user);
+            setUserPopout(null);
+          }}
+          onOpenDm={() => {
+            void openDmForPeer(userPopout.user.id);
+            setUserPopout(null);
+          }}
+        />
+      ) : null}
 
       {profileCardUser &&
         (() => {

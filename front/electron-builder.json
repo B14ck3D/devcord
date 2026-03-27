@@ -1,0 +1,39 @@
+{
+  "appId": "org.devcord.desktop",
+  "productName": "Devcord",
+  "directories": {
+    "output": "release"
+  },
+  "files": [
+    "dist/**/*",
+    "dist-electron/**/*",
+    "package.json"
+  ],
+  "extraMetadata": {
+    "main": "dist-electron/main.js"
+  },
+  "win": {
+    "icon": "build/icons/icon.ico",
+    "target": [
+      {
+        "target": "7z",
+        "arch": [
+          "x64"
+        ]
+      }
+    ],
+    "artifactName": "Devcord-App-${version}.${ext}"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "installerIcon": "build/icons/icon.ico",
+    "uninstallerIcon": "build/icons/icon.ico"
+  },
+  "publish": [
+    {
+      "provider": "generic",
+      "url": "https://devcord.ndevelopment.org/api/updates"
+    }
+  ]
+}
