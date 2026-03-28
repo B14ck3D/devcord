@@ -307,3 +307,64 @@ a { text-decoration: none; color: inherit; }
 }
 .msg-content strong { font-weight: 700; }
 .msg-content em { font-style: italic; }
+
+/* Sparkle landing theme tokens (scoped). */
+.sparkle-theme {
+  --background: 232 58% 10%;
+  --foreground: 0 0% 100%;
+  --card: 232 50% 14%;
+  --card-foreground: 0 0% 100%;
+  --popover: 232 50% 14%;
+  --popover-foreground: 0 0% 100%;
+  --primary: 235 86% 59%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 232 40% 18%;
+  --secondary-foreground: 0 0% 100%;
+  --muted: 232 30% 22%;
+  --muted-foreground: 230 20% 65%;
+  --accent: 235 86% 59%;
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 84.2% 60.2%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 232 30% 20%;
+  --input: 232 30% 20%;
+  --ring: 235 86% 59%;
+  --radius: 0.5rem;
+  --hero-bg: 235 87% 55%;
+  --hero-bg-dark: 232 58% 8%;
+  --surface-glass: 232 40% 16%;
+  --glow-primary: 235 86% 59%;
+  --md-sys-color-primary: hsl(var(--primary));
+  --md-sys-color-background: hsl(var(--background));
+  --md-sys-color-on-background: hsl(var(--foreground));
+}
+
+.sparkle-theme {
+  background-color: hsl(var(--background));
+  color: hsl(var(--foreground));
+}
+
+@layer utilities {
+  .sparkle-theme .text-gradient-hero {
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(135deg, hsl(0 0% 100%) 0%, hsl(230 80% 85%) 100%);
+  }
+  .sparkle-theme .bg-hero-gradient {
+    background: linear-gradient(180deg, hsl(var(--hero-bg)) 0%, hsl(var(--hero-bg-dark)) 100%);
+  }
+  .sparkle-theme .bg-glass {
+    background: hsl(var(--surface-glass) / 0.6);
+    backdrop-filter: blur(16px);
+  }
+  .sparkle-theme .glow-primary {
+    box-shadow: 0 0 60px 10px hsl(var(--glow-primary) / 0.3);
+  }
+  .sparkle-theme .mockup-shadow {
+    box-shadow: 0 25px 80px -12px hsl(0 0% 0% / 0.5), 0 0 40px hsl(var(--glow-primary) / 0.15);
+  }
+}
+
+@keyframes twinkle {
+  0%, 100% { opacity: 0.2; }
+  50% { opacity: 0.8; }
+}

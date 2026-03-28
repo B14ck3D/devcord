@@ -95,7 +95,7 @@ func LoadConfig() *Config {
 		),
 		DesktopAppArchiveName: firstNonEmpty(
 			unquoteEnv(os.Getenv("DEVCORD_DESKTOP_APP_ARCHIVE")),
-			"Devcord-App-latest.7z",
+			"Devcord-App-latest.zip",
 		),
 		DesktopAppArchiveSHA512: unquoteEnv(os.Getenv("DEVCORD_DESKTOP_APP_ARCHIVE_SHA512")),
 		DesktopAppArchiveSize: firstNonEmpty(

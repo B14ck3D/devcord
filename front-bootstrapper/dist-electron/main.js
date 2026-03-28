@@ -1,5 +1,5 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron';
-import { spawn } from 'node:child_process';
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { execSync, spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
@@ -9,42 +9,214 @@ import { fileURLToPath } from 'node:url';
 import { path7za } from '7zip-bin';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const isDev = !!process.env.ELECTRON_DEV_SERVER_URL;
 const devServerUrl = process.env.ELECTRON_DEV_SERVER_URL ?? 'http://127.0.0.1:5180';
 const updatesApiUrl = process.env.DEVCORD_UPDATES_API_URL?.trim() || 'https://devcord.ndevelopment.org/api/updates/latest';
-const installerName = 'Devcord_Installer';
+const shouldOpenDevTools = process.env.DEVCORD_BOOTSTRAPPER_DEVTOOLS === '1' || !app.isPackaged;
+const fallbackRendererHtml = `<!doctype html><html><head><meta charset="utf-8"><title>Devcord Installer</title></head><body style="background:#0b1020;color:#dbe7ff;font-family:Segoe UI,Arial,sans-serif;padding:24px"><h2>Bootstrapper renderer failed to load</h2><p>Check bootstrapper-main.log for details.</p></body></html>`;
+function inferArchiveName(archive) {
+    const explicit = archive?.fileName?.trim();
+    if (explicit)
+        return explicit;
+    const fromUrl = archive?.url?.trim();
+    if (fromUrl) {
+        try {
+            const u = new URL(fromUrl);
+            const base = path.basename(u.pathname);
+            if (base)
+                return base;
+        }
+        catch {
+            const base = path.basename(fromUrl);
+            if (base)
+                return base;
+        }
+    }
+    return 'Devcord-App-latest.zip';
+}
 let mainWindow = null;
+let mainLogPath = null;
+if (process.platform === 'win32') {
+    app.setAppUserModelId('com.devcord.installer');
+}
+function formatErr(error) {
+    if (error instanceof Error)
+        return error.stack || error.message;
+    try {
+        return JSON.stringify(error);
+    }
+    catch {
+        return String(error);
+    }
+}
+function ensureMainLogPath() {
+    if (mainLogPath)
+        return mainLogPath;
+    try {
+        const userData = app.getPath('userData');
+        fs.mkdirSync(userData, { recursive: true });
+        mainLogPath = path.join(userData, 'bootstrapper-main.log');
+        return mainLogPath;
+    }
+    catch {
+        return null;
+    }
+}
+function logMain(message, detail) {
+    const line = `[${new Date().toISOString()}] ${message}${detail === undefined ? '' : ` ${formatErr(detail)}`}\n`;
+    const target = ensureMainLogPath();
+    if (target) {
+        try {
+            fs.appendFileSync(target, line, 'utf8');
+            return;
+        }
+        catch {
+            // Fall through to stderr when file logging fails.
+        }
+    }
+    process.stderr.write(line);
+}
+function resolvePreloadPath() {
+    const candidates = [
+        path.join(__dirname, 'preload.js'),
+        path.join(app.getAppPath(), 'dist-electron', 'preload.js'),
+    ];
+    for (const candidate of candidates) {
+        if (fs.existsSync(candidate))
+            return candidate;
+    }
+    return candidates[0];
+}
+function resolveIconPath() {
+    if (process.platform !== 'win32')
+        return undefined;
+    const candidates = app.isPackaged
+        ? [
+            path.join(process.resourcesPath, 'icon.ico'),
+            path.join(app.getAppPath(), 'build', 'icons', 'icon.ico'),
+        ]
+        : [
+            path.join(app.getAppPath(), 'build', 'icons', 'icon.ico'),
+            path.join(__dirname, '..', 'build', 'icons', 'icon.ico'),
+        ];
+    for (const candidate of candidates) {
+        if (fs.existsSync(candidate))
+            return candidate;
+    }
+    return undefined;
+}
+function resolveRendererEntry() {
+    if (!app.isPackaged) {
+        return { kind: 'url', value: devServerUrl };
+    }
+    const candidates = [
+        path.join(app.getAppPath(), 'dist', 'index.html'),
+        path.join(__dirname, '..', 'dist', 'index.html'),
+    ];
+    for (const candidate of candidates) {
+        if (fs.existsSync(candidate))
+            return { kind: 'file', value: candidate };
+    }
+    return { kind: 'file', value: candidates[0] };
+}
+function attachWindowDiagnostics(win) {
+    win.on('unresponsive', () => {
+        logMain('window unresponsive');
+    });
+    win.webContents.on('did-finish-load', () => {
+        logMain('renderer did-finish-load');
+        void win.webContents.executeJavaScript('document.body ? document.body.innerHTML : "<no-body>"', true)
+            .then((bodyHtml) => {
+            const domPreview = String(bodyHtml).slice(0, 500);
+            logMain('renderer dom snapshot', { length: String(bodyHtml).length, preview: domPreview });
+        })
+            .catch((error) => {
+            logMain('renderer dom snapshot failed', error);
+        });
+    });
+    win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+        logMain('renderer did-fail-load', { errorCode, errorDescription, validatedURL, isMainFrame });
+    });
+    win.webContents.on('preload-error', (_event, preloadPath, error) => {
+        logMain('renderer preload-error', { preloadPath, error: formatErr(error) });
+    });
+    win.webContents.on('render-process-gone', (_event, details) => {
+        logMain('renderer process gone', details);
+    });
+    win.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+        logMain('renderer console-message', { level, message, line, sourceId });
+    });
+}
+async function loadRendererWithFallback(win) {
+    const entry = resolveRendererEntry();
+    logMain('renderer entry selected', entry);
+    try {
+        if (entry.kind === 'url') {
+            await win.loadURL(entry.value);
+            return;
+        }
+        await win.loadFile(entry.value);
+    }
+    catch (error) {
+        logMain('renderer load failed', error);
+        const dataUrl = `data:text/html;charset=UTF-8,${encodeURIComponent(fallbackRendererHtml)}`;
+        await win.loadURL(dataUrl);
+        if (!win.isVisible())
+            win.show();
+    }
+}
+function setupGlobalDiagnostics() {
+    process.on('uncaughtException', (error) => {
+        logMain('uncaughtException', error);
+    });
+    process.on('unhandledRejection', (reason) => {
+        logMain('unhandledRejection', reason);
+    });
+    app.on('render-process-gone', (_event, _webContents, details) => {
+        logMain('app render-process-gone', details);
+    });
+}
 function sendStatus(payload) {
     if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('bootstrapper:status', payload);
     }
 }
 function createWindow() {
-    const preloadPath = path.join(__dirname, 'preload.js');
+    const preloadPath = resolvePreloadPath();
+    const iconPath = resolveIconPath();
+    logMain('createWindow paths', { preloadPath, iconPath, appPath: app.getAppPath(), resourcesPath: process.resourcesPath });
     const win = new BrowserWindow({
         title: 'Devcord Installer',
-        width: 980,
-        height: 620,
+        width: 900,
+        height: 600,
+        frame: false,
+        transparent: true,
         resizable: false,
         maximizable: false,
         minimizable: true,
+        autoHideMenuBar: true,
         show: false,
-        backgroundColor: '#060a19',
+        backgroundColor: '#00000000',
+        icon: process.platform === 'win32' ? iconPath : undefined,
         webPreferences: {
             preload: preloadPath,
             contextIsolation: true,
             nodeIntegration: false,
+            allowRunningInsecureContent: process.env.DEVCORD_ALLOW_INSECURE_CONTENT === '1',
             sandbox: false,
             spellcheck: false,
         },
     });
+    attachWindowDiagnostics(win);
+    win.setMenu(null);
+    win.setMenuBarVisibility(false);
+    if (iconPath) {
+        win.setIcon(iconPath);
+    }
     win.once('ready-to-show', () => win.show());
-    if (isDev) {
-        void win.loadURL(devServerUrl);
+    if (shouldOpenDevTools) {
+        win.webContents.openDevTools({ mode: 'detach' });
     }
-    else {
-        void win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
-    }
+    void loadRendererWithFallback(win);
     return win;
 }
 async function ensureDir(dirPath) {
@@ -84,10 +256,12 @@ async function downloadFile(url, outFile, expectedSize) {
                 loaded += value.length;
                 file.write(Buffer.from(value));
                 if (total > 0) {
+                    const raw = Math.min(1, loaded / total);
+                    const mapped = 0.1 + raw * 0.65;
                     sendStatus({
                         state: 'downloading',
                         message: 'Pobieranie paczki Devcord...',
-                        progress: Math.min(0.99, loaded / total),
+                        progress: Math.min(0.75, mapped),
                     });
                 }
             }
@@ -136,13 +310,29 @@ async function verifySha512(filePath, expectedBase64) {
 }
 async function extract7z(archivePath, destination) {
     await ensureDir(destination);
+    sendStatus({ state: 'extracting', message: 'Wypakowywanie plików...', progress: 0.78 });
     await new Promise((resolve, reject) => {
         const child = spawn(path7za, ['x', archivePath, `-o${destination}`, '-y'], {
             stdio: ['ignore', 'pipe', 'pipe'],
         });
-        child.stderr.on('data', () => {
-            sendStatus({ state: 'extracting', message: 'Wypakowywanie plików...' });
-        });
+        const onChunk = (chunk) => {
+            const text = chunk.toString('utf8');
+            const matches = text.match(/(\d{1,3})%/g);
+            if (!matches?.length)
+                return;
+            const last = Number(matches[matches.length - 1].replace('%', ''));
+            if (!Number.isFinite(last))
+                return;
+            const normalized = Math.max(0, Math.min(100, last)) / 100;
+            const mapped = 0.78 + normalized * 0.16;
+            sendStatus({
+                state: 'extracting',
+                message: 'Wypakowywanie plików...',
+                progress: Math.max(0.78, Math.min(0.94, mapped)),
+            });
+        };
+        child.stdout.on('data', onChunk);
+        child.stderr.on('data', onChunk);
         child.on('error', reject);
         child.on('close', (code) => {
             if (code === 0)
@@ -194,11 +384,62 @@ $s2.Save()
         });
     });
 }
-async function runPipeline() {
+function defaultInstallRootPath() {
     const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
-    const installRoot = path.join(localAppData, 'Devcord');
+    return path.join(localAppData, 'Devcord');
+}
+function getShortcutPaths() {
+    const desktop = path.join(os.homedir(), 'Desktop', 'Devcord.lnk');
+    const startMenu = path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Devcord.lnk');
+    return { desktop, startMenu };
+}
+async function detectInstallation(installRootOverride) {
+    const installRoot = installRootOverride?.trim() || defaultInstallRootPath();
     const appDir = path.join(installRoot, 'app');
-    const tempArchive = path.join(app.getPath('temp'), 'Devcord-App-latest.7z');
+    try {
+        const exePath = await findMainExe(appDir);
+        return {
+            installed: true,
+            installRoot,
+            appDir,
+            exePath,
+        };
+    }
+    catch {
+        return {
+            installed: false,
+            installRoot,
+            appDir,
+        };
+    }
+}
+async function uninstallInstallation(installRootOverride) {
+    killProcess('Devcord.exe');
+    const installRoot = installRootOverride?.trim() || defaultInstallRootPath();
+    await fsp.rm(installRoot, { recursive: true, force: true });
+    const { desktop, startMenu } = getShortcutPaths();
+    await Promise.all([
+        fsp.rm(desktop, { force: true }),
+        fsp.rm(startMenu, { force: true }),
+    ]);
+}
+function killProcess(imageName) {
+    if (process.platform !== 'win32')
+        return;
+    try {
+        execSync(`taskkill /F /IM ${imageName} /T`, { stdio: 'ignore' });
+        logMain('process killed', { imageName });
+    }
+    catch (error) {
+        // Process may already be closed; keep uninstall/repair flow running.
+        logMain('process kill skipped', { imageName, reason: formatErr(error) });
+    }
+}
+async function runPipeline(installRootOverride, cleanInstallRoot = false) {
+    const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+    const fallbackInstallRoot = path.join(localAppData, 'Devcord');
+    const installRoot = installRootOverride?.trim() || fallbackInstallRoot;
+    const appDir = path.join(installRoot, 'app');
     const lockFile = path.join(installRoot, '.bootstrapper.lock');
     await ensureDir(installRoot);
     try {
@@ -210,15 +451,24 @@ async function runPipeline() {
     }
     await fsp.writeFile(lockFile, String(Date.now()), 'utf8');
     try {
+        if (cleanInstallRoot) {
+            killProcess('Devcord.exe');
+            sendStatus({ state: 'checking', message: 'Czyszczenie poprzedniej instalacji...', progress: 0.02 });
+            await removeDirContents(installRoot);
+        }
         sendStatus({ state: 'checking', message: 'Sprawdzanie najnowszej wersji...' });
+        sendStatus({ state: 'checking', message: 'Sprawdzanie najnowszej wersji...', progress: 0.04 });
         const info = await fetchLatestInfo();
         const archive = info.app_archive;
         if (!archive?.url)
             throw new Error('Updates API: missing app_archive.url');
-        sendStatus({ state: 'downloading', message: `Pobieranie wersji ${info.version ?? 'latest'}...`, progress: 0 });
+        const archiveName = inferArchiveName(archive);
+        const tempArchive = path.join(app.getPath('temp'), archiveName);
+        sendStatus({ state: 'checking', message: 'Wersja znaleziona, przygotowanie pobierania...', progress: 0.1 });
+        sendStatus({ state: 'downloading', message: `Pobieranie wersji ${info.version ?? 'latest'}...`, progress: 0.1 });
         await downloadFileWithRetry(archive.url, tempArchive, archive.size, 3);
         await verifySha512(tempArchive, archive.sha512);
-        sendStatus({ state: 'extracting', message: 'Instalowanie plików aplikacji...' });
+        sendStatus({ state: 'extracting', message: 'Instalowanie plików aplikacji...', progress: 0.78 });
         await removeDirContents(appDir);
         try {
             await extract7z(tempArchive, appDir);
@@ -227,12 +477,14 @@ async function runPipeline() {
             await removeDirContents(appDir);
             throw e;
         }
-        sendStatus({ state: 'creating_shortcuts', message: 'Tworzenie skrótów systemowych...' });
+        sendStatus({ state: 'creating_shortcuts', message: 'Tworzenie skrótów systemowych...', progress: 0.95 });
         const mainExe = await findMainExe(appDir);
         await createShortcuts(mainExe);
-        sendStatus({ state: 'launching', message: 'Uruchamianie Devcord...' });
-        await shell.openPath(mainExe);
-        sendStatus({ state: 'done', message: 'Instalacja zakończona.' });
+        sendStatus({ state: 'launching', message: 'Uruchamianie Devcord...', progress: 0.98 });
+        const launchErr = await shell.openPath(mainExe);
+        if (launchErr)
+            throw new Error(`Devcord launch failed: ${launchErr}`);
+        sendStatus({ state: 'done', message: 'Instalacja zakończona.', progress: 1 });
         setTimeout(() => app.quit(), 1200);
     }
     finally {
@@ -240,9 +492,49 @@ async function runPipeline() {
     }
 }
 function setupIpc() {
-    ipcMain.handle('bootstrapper:start-install', async () => {
+    ipcMain.handle('bootstrapper:window-minimize', () => {
+        const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : BrowserWindow.getFocusedWindow();
+        win?.minimize();
+        return { ok: true };
+    });
+    ipcMain.handle('bootstrapper:window-close', () => {
+        const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : BrowserWindow.getFocusedWindow();
+        win?.close();
+        return { ok: true };
+    });
+    ipcMain.handle('bootstrapper:get-installation-state', async (_event, payload) => {
         try {
-            await runPipeline();
+            return await detectInstallation(payload?.installRoot);
+        }
+        catch (error) {
+            logMain('bootstrapper:get-installation-state failed', error);
+            return {
+                installed: false,
+                installRoot: payload?.installRoot?.trim() || defaultInstallRootPath(),
+                appDir: path.join(payload?.installRoot?.trim() || defaultInstallRootPath(), 'app'),
+            };
+        }
+    });
+    ipcMain.handle('bootstrapper:pick-install-dir', async () => {
+        const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+        const dialogOptions = {
+            title: 'Wybierz folder instalacji Devcord',
+            defaultPath: defaultInstallRootPath(),
+            properties: ['openDirectory', 'createDirectory', 'promptToCreate'],
+            buttonLabel: 'Wybierz folder',
+        };
+        const result = win
+            ? await dialog.showOpenDialog(win, dialogOptions)
+            : await dialog.showOpenDialog(dialogOptions);
+        if (result.canceled || result.filePaths.length === 0) {
+            return { ok: false };
+        }
+        return { ok: true, path: result.filePaths[0] };
+    });
+    ipcMain.handle('bootstrapper:start-install', async (_event, payload) => {
+        try {
+            const installRoot = payload?.installRoot?.trim();
+            await runPipeline(installRoot, Boolean(payload?.cleanInstallRoot));
             return { ok: true };
         }
         catch (e) {
@@ -251,8 +543,21 @@ function setupIpc() {
             return { ok: false, error: message };
         }
     });
+    ipcMain.handle('bootstrapper:uninstall', async (_event, payload) => {
+        try {
+            await uninstallInstallation(payload?.installRoot);
+            return { ok: true };
+        }
+        catch (e) {
+            const message = e instanceof Error ? e.message : 'Unknown uninstall error';
+            logMain('bootstrapper:uninstall failed', message);
+            return { ok: false, error: message };
+        }
+    });
 }
 app.whenReady().then(() => {
+    setupGlobalDiagnostics();
+    logMain('bootstrapper main ready');
     mainWindow = createWindow();
     setupIpc();
 });

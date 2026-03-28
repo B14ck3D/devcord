@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { loadDevcordLocalSettings } from '../../devcordLocalSettings';
+import { loadDevcordLocalSettings } from '../app/devcordLocalSettings';
 
 export type SettingsTab = 'profile' | 'appearance' | 'audio' | 'video' | 'privacy';
 

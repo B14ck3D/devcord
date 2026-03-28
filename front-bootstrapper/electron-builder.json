@@ -11,25 +11,25 @@
     "package.json",
     "node_modules/7zip-bin/**/*"
   ],
+  "extraResources": [
+    {
+      "from": "build/icons/icon.ico",
+      "to": "icon.ico"
+    }
+  ],
   "extraMetadata": {
     "main": "dist-electron/main.js"
   },
   "win": {
+    "icon": "build/icons/icon.ico",
     "target": [
       {
-        "target": "nsis",
+        "target": "portable",
         "arch": [
           "x64"
         ]
       }
     ],
     "artifactName": "Devcord_Installer.${ext}"
-  },
-  "nsis": {
-    "oneClick": true,
-    "perMachine": false,
-    "allowToChangeInstallationDirectory": false,
-    "createDesktopShortcut": false,
-    "createStartMenuShortcut": false
   }
 }

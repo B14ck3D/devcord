@@ -1,5 +1,6 @@
 import { app, BrowserWindow, desktopCapturer, globalShortcut, ipcMain } from 'electron';
 import electronUpdaterPkg from 'electron-updater';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 const { autoUpdater } = electronUpdaterPkg;
@@ -24,6 +25,41 @@ app.commandLine.appendSwitch('enable-webrtc-hw-encoding');
 app.commandLine.appendSwitch('enable-webrtc-hw-decoding');
 app.commandLine.appendSwitch('force-high-performance-gpu');
 let mainWindow = null;
+let mainLogPath = null;
+function ensureMainLogPath() {
+    if (mainLogPath)
+        return mainLogPath;
+    try {
+        const userData = app.getPath('userData');
+        fs.mkdirSync(userData, { recursive: true });
+        mainLogPath = path.join(userData, 'devcord-main.log');
+        return mainLogPath;
+    }
+    catch {
+        return null;
+    }
+}
+function logMain(message, detail) {
+    const line = `[${new Date().toISOString()}] ${message}${detail === undefined ? '' : ` ${JSON.stringify(detail)}`}\n`;
+    const target = ensureMainLogPath();
+    if (target) {
+        try {
+            fs.appendFileSync(target, line, 'utf8');
+            return;
+        }
+        catch {
+            // Fall through to stderr.
+        }
+    }
+    process.stderr.write(line);
+}
+function resolveWindowIconPath() {
+    if (process.platform !== 'win32')
+        return undefined;
+    if (!app.isPackaged)
+        return path.join(__dirname, '..', 'build', 'icons', 'icon.ico');
+    return path.join(process.resourcesPath, 'icon.ico');
+}
 function broadcast(channel, payload) {
     for (const win of BrowserWindow.getAllWindows()) {
         if (!win.isDestroyed())
@@ -32,7 +68,7 @@ function broadcast(channel, payload) {
 }
 function createMainWindow() {
     const preloadPath = path.join(__dirname, 'preload.js');
-    const iconPath = path.join(__dirname, '..', 'build', 'icons', 'icon.ico');
+    const iconPath = resolveWindowIconPath();
     const win = new BrowserWindow({
         title: 'Devcord',
         width: 1480,
@@ -40,8 +76,9 @@ function createMainWindow() {
         minWidth: 1280,
         minHeight: 720,
         backgroundColor: '#111214',
+        autoHideMenuBar: true,
         show: false,
-        icon: process.platform === 'win32' ? iconPath : undefined,
+        icon: iconPath,
         webPreferences: {
             preload: preloadPath,
             contextIsolation: true,
@@ -51,14 +88,25 @@ function createMainWindow() {
             partition: 'persist:devcord-main',
         },
     });
+    win.setMenu(null);
+    win.setMenuBarVisibility(false);
     win.once('ready-to-show', () => win.show());
+    win.webContents.on('did-fail-load', (_event, code, desc) => {
+        // Keep stderr logging in production builds for black-screen diagnostics.
+        // eslint-disable-next-line no-console
+        console.error('FAILED TO LOAD:', code, desc);
+        logMain('renderer did-fail-load', { code, desc });
+    });
     if (isDev) {
         void win.loadURL(devServerUrl);
         win.webContents.openDevTools({ mode: 'detach' });
     }
     else {
-        const appHtml = path.join(__dirname, '..', 'dist', 'index.html');
+        const appHtml = path.join(app.getAppPath(), 'dist', 'index.html');
+        logMain('renderer loadFile', { appHtml });
         void win.loadFile(appHtml);
+        // Temporary production diagnostics for blank-screen investigation.
+        win.webContents.openDevTools({ mode: 'detach' });
     }
     return win;
 }

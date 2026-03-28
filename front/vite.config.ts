@@ -7,6 +7,7 @@ const devHttps = process.env.VITE_DEV_HTTPS === '1';
 const previewHttps = process.env.VITE_PREVIEW_HTTPS === '1';
 
 export default defineConfig({
+  base: './',
   plugins: [react(), ...(devHttps || previewHttps ? [basicSsl()] : [])],
   resolve: {
     alias: {

@@ -41,7 +41,7 @@ func (a *App) composeDesktopUpdateInfo() desktopUpdateInfo {
 	sha := strings.TrimSpace(a.cfg.DesktopArtifactSHA512)
 	appArchiveName := strings.TrimSpace(a.cfg.DesktopAppArchiveName)
 	if appArchiveName == "" {
-		appArchiveName = "Devcord-App-latest.7z"
+		appArchiveName = "Devcord-App-latest.zip"
 	}
 	appArchiveSha := strings.TrimSpace(a.cfg.DesktopAppArchiveSHA512)
 	appArchiveSize, _ := strconv.ParseInt(strings.TrimSpace(a.cfg.DesktopAppArchiveSize), 10, 64)

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Edit2, MessageSquareShare, MoreHorizontal, Smile, Trash2 } from 'lucide-react';
-import { NickLabel } from '../../nickAppearance';
+import { NickLabel } from '../app/nickAppearance';
 import type { ChatRow } from '../store/chatStore';
 
 export type ChatMessageUser = {

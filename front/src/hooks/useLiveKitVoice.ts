@@ -1,1 +1,1 @@
-export * from '../../useLiveKitVoice';
+export * from '../app/useLiveKitVoice';

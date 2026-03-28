@@ -16,6 +16,12 @@ export default {
         mono: ['"JetBrains Mono"', '"Fira Mono"', 'monospace'],
       },
       colors: {
+        border: 'hsl(var(--border) / <alpha-value>)',
+        foreground: 'hsl(var(--foreground) / <alpha-value>)',
+        muted: {
+          DEFAULT: 'hsl(var(--muted) / <alpha-value>)',
+          foreground: 'hsl(var(--muted-foreground) / <alpha-value>)',
+        },
         /* MD3 semantic */
         primary: 'var(--md-sys-color-primary)',
         'on-primary': 'var(--md-sys-color-on-primary)',

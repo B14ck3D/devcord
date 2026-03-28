@@ -34,7 +34,7 @@ npm run electron:dev
 
 To uruchamia Vite + Electron oraz preload bridge IPC.
 
-## 4) Build głównej aplikacji (archiwum .7z)
+## 4) Build głównej aplikacji (archiwum .zip)
 
 ```bash
 npm install
@@ -43,16 +43,16 @@ npm run electron:dist:win
 
 Artefakt głównej appki pojawi się w `front/release/` jako:
 
-- `Devcord-App-<version>.7z`
+- `Devcord-App-<version>.zip`
 
 Branding i ikony:
 
 - źródło logo: `front/public/devcordlogo.png`
 - favicon: `front/public/favicon.ico`
 - ikona Windows: `front/build/icons/icon.ico`
-- electron-builder używa `build/icons/icon.ico` dla `win` i NSIS.
+- electron-builder używa `build/icons/icon.ico` dla `win`.
 
-## 5) Build bootstrappera (installer .exe)
+## 5) Build bootstrappera (portable .exe, bez NSIS)
 
 ```bash
 cd ../front-bootstrapper
@@ -63,12 +63,13 @@ npm run dist:win
 Artefakt bootstrappera:
 
 - `front-bootstrapper/release/Devcord_Installer.exe`
+- Jest to portable EXE (React splash widoczny od razu, bez systemowego okna NSIS).
 
 ## 6) Publikacja aktualizacji
 
 1. Wystaw pliki pod `https://devcord.ndevelopment.org/updates/win/`:
    - `Devcord_Installer.exe`
-   - `Devcord-App-<version>.7z` (lub alias `Devcord-App-latest.7z`)
+   - `Devcord-App-<version>.zip` (lub alias `Devcord-App-latest.zip`)
 2. Ustaw/odśwież envy Go API dla `/api/updates/latest`:
    - `DEVCORD_DESKTOP_APP_ARCHIVE`
    - `DEVCORD_DESKTOP_APP_ARCHIVE_SHA512`

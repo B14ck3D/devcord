@@ -18,8 +18,20 @@ type InstallEvent = {
 };
 
 interface Window {
+  electronAPI?: {
+    minimizeWindow: () => Promise<{ ok: boolean }>;
+    closeWindow: () => Promise<{ ok: boolean }>;
+  };
   bootstrapper?: {
-    startInstall: () => Promise<{ ok: boolean; error?: string }>;
+    startInstall: (payload?: { installRoot?: string; cleanInstallRoot?: boolean }) => Promise<{ ok: boolean; error?: string }>;
+    pickInstallDir: () => Promise<{ ok: boolean; path?: string }>;
+    getInstallationState: (payload?: { installRoot?: string }) => Promise<{
+      installed: boolean;
+      installRoot: string;
+      appDir: string;
+      exePath?: string;
+    }>;
+    uninstall: (payload?: { installRoot?: string }) => Promise<{ ok: boolean; error?: string }>;
     onStatus: (listener: (event: InstallEvent) => void) => () => void;
   };
 }

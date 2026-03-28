@@ -9,10 +9,11 @@
     "build:web": "vite build",
     "build:main": "tsc -p electron/tsconfig.json",
     "build": "npm run build:web && npm run build:main",
-    "dist:win": "npm run build && electron-builder --config electron-builder.json --win nsis"
+    "dist:win": "npm run build && electron-builder --config electron-builder.json --win portable"
   },
   "dependencies": {
     "7zip-bin": "^5.2.0",
+    "framer-motion": "^12.38.0",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
@@ -21,6 +22,7 @@
     "@types/node": "^25.5.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-legacy": "^5.4.3",
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.2.1",
     "cross-env": "^10.1.0",

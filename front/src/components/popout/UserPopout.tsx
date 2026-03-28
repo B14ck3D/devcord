@@ -1,6 +1,6 @@
 import React from 'react';
 import { MessageSquare, User as UserIcon } from 'lucide-react';
-import { NickLabel } from '../../../nickAppearance';
+import { NickLabel } from '../../app/nickAppearance';
 
 type UserShape = {
   id: string;

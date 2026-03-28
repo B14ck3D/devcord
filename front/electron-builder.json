@@ -9,6 +9,12 @@
     "dist-electron/**/*",
     "package.json"
   ],
+  "extraResources": [
+    {
+      "from": "build/icons/icon.ico",
+      "to": "icon.ico"
+    }
+  ],
   "extraMetadata": {
     "main": "dist-electron/main.js"
   },
@@ -16,7 +22,7 @@
     "icon": "build/icons/icon.ico",
     "target": [
       {
-        "target": "7z",
+        "target": "zip",
         "arch": [
           "x64"
         ]
