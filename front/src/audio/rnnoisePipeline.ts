@@ -7,7 +7,7 @@ export type PreparedMicTrack = {
 };
 
 const LOG_PREFIX = '[devcord-rnnoise]';
-const MIC_PRE_LIVEKIT_GAIN = 3.5;
+const MIC_PRE_LIVEKIT_GAIN = 1.0;
 const RNNOISE_DEBUG_LOGS = import.meta.env.DEV;
 
 async function resumeIfNeeded(ctx: AudioContext) {
@@ -34,9 +34,9 @@ export async function prepareMicTrackWithRnnoise(
   const rawStream = await navigator.mediaDevices.getUserMedia({
     audio: {
       deviceId: deviceId && deviceId !== 'default' ? { exact: deviceId } : undefined,
-      echoCancellation: false,
-      noiseSuppression: false,
-      autoGainControl: false,
+      echoCancellation: { ideal: true },
+      noiseSuppression: { ideal: false },
+      autoGainControl: { ideal: true },
       channelCount: { ideal: 1, max: 1 },
       sampleRate: { ideal: 48000 },
     },

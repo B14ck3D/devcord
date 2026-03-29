@@ -25,6 +25,8 @@ if (process.platform === 'win32') {
 app.commandLine.appendSwitch('enable-webrtc-hw-encoding');
 app.commandLine.appendSwitch('enable-webrtc-hw-decoding');
 app.commandLine.appendSwitch('force-high-performance-gpu');
+app.commandLine.appendSwitch('enable-features', 'WebRtcHideLocalIpsWithMdns,WebRtcApmInAudioService');
+app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'default_public_interface_only');
 let mainWindow = null;
 let updateInstallInProgress = false;
 function configureElectronLog() {
@@ -123,7 +125,26 @@ function createMainWindow() {
     return win;
 }
 function setupDesktopSessionNetworking() {
+    const installMediaPermissions = (ses) => {
+        ses.setPermissionCheckHandler((_webContents, permission) => {
+            const perm = String(permission);
+            if (perm === 'media' || perm === 'audioCapture' || perm === 'videoCapture') {
+                return true;
+            }
+            return true;
+        });
+        ses.setPermissionRequestHandler((_webContents, permission, callback) => {
+            const perm = String(permission);
+            if (perm === 'media' || perm === 'audioCapture' || perm === 'videoCapture') {
+                callback(true);
+                return;
+            }
+            callback(true);
+        });
+    };
     const ses = session.fromPartition('persist:devcord-main');
+    installMediaPermissions(ses);
+    installMediaPermissions(session.defaultSession);
     ses.webRequest.onBeforeSendHeaders((details, callback) => {
         const headers = details.requestHeaders ?? {};
         const target = details.url || '';

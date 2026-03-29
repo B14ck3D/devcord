@@ -31,7 +31,8 @@ function logVoice(level: 'debug' | 'warn' | 'info', ...args: unknown[]) {
 }
 
 /** LiveKit wymaga attach() zdalnego audio do elementu — inaczej attachedElements=0 i nie ma dźwięku (README livekit-client). */
-function ensureRemoteAudioAttached(track: RemoteTrack) {
+function ensureRemoteAudioAttached(track: RemoteTrack, participantIdentity?: string, localIdentity?: string) {
+  if (participantIdentity && localIdentity && participantIdentity === localIdentity) return;
   if (track.kind !== Track.Kind.Audio) return;
   const existing = track.attachedElements.find((el) => el instanceof HTMLAudioElement) as
     | HTMLAudioElement
@@ -80,10 +81,16 @@ async function ensureMicPermission(deviceId: string) {
       deviceId && deviceId !== 'default'
         ? {
             deviceId: { exact: deviceId },
+            echoCancellation: { ideal: true },
+            noiseSuppression: { ideal: false },
+            autoGainControl: { ideal: true },
             channelCount: { ideal: 1, max: 1 },
             sampleRate: { ideal: 48000 },
           }
         : {
+            echoCancellation: { ideal: true },
+            noiseSuppression: { ideal: false },
+            autoGainControl: { ideal: true },
             channelCount: { ideal: 1, max: 1 },
             sampleRate: { ideal: 48000 },
           },
@@ -142,6 +149,8 @@ export function useLiveKitVoice(opts: {
   const screenBytesRef = useRef<Record<string, { bytes: number; ts: number }>>({});
   const localMicRef = useRef<PreparedMicTrack | null>(null);
   const audioGestureCleanupRef = useRef<(() => void) | null>(null);
+  const uiSyncTimerRef = useRef<number | null>(null);
+  const uiSyncNeedsScreensRef = useRef(false);
   const connectSessionRef = useRef(0);
   const userIdNorm = String(userId);
 
@@ -205,6 +214,25 @@ export function useLiveKitVoice(opts: {
     });
   }, []);
 
+  const scheduleRoomUiSync = useCallback(
+    (room: Room, includeScreens = false) => {
+      if (includeScreens) uiSyncNeedsScreensRef.current = true;
+      if (uiSyncTimerRef.current !== null) return;
+      uiSyncTimerRef.current = window.setTimeout(() => {
+        uiSyncTimerRef.current = null;
+        if (roomRef.current !== room) return;
+        syncParticipantList(room);
+        if (uiSyncNeedsScreensRef.current) {
+          refreshRemoteScreens(room);
+          uiSyncNeedsScreensRef.current = false;
+        }
+        applyRemoteMuteUi(room);
+        applyRemoteVolumes(room);
+      }, 0);
+    },
+    [syncParticipantList, refreshRemoteScreens, applyRemoteMuteUi, applyRemoteVolumes],
+  );
+
   const localDeafenedRef = useRef(localDeafened);
   localDeafenedRef.current = localDeafened;
   const localMutedRef = useRef(localMuted);
@@ -250,6 +278,11 @@ export function useLiveKitVoice(opts: {
   }, []);
 
   const cleanupRoom = useCallback(async () => {
+    if (uiSyncTimerRef.current !== null) {
+      clearTimeout(uiSyncTimerRef.current);
+      uiSyncTimerRef.current = null;
+    }
+    uiSyncNeedsScreensRef.current = false;
     teardownVoiceActivityProbes();
     audioGestureCleanupRef.current?.();
     audioGestureCleanupRef.current = null;
@@ -350,10 +383,10 @@ export function useLiveKitVoice(opts: {
         if (isStale()) return;
 
         setPhase('negotiating');
-        // Screen-share path targets high-fidelity desktop streaming, so disable adaptive degradations.
+        // Hybrid mode: optimize voice bandwidth, keep high-performance screen publish settings.
         const room = new Room({
-          adaptiveStream: false,
-          dynacast: false,
+          adaptiveStream: true,
+          dynacast: true,
           webAudioMix: true,
           publishDefaults: {
             audioPreset: AudioPresets.speech,
@@ -422,10 +455,7 @@ export function useLiveKitVoice(opts: {
             const t = pub.track;
             if (t?.kind === Track.Kind.Audio) attachRemoteMicVad(participant.identity, t.mediaStreamTrack);
           });
-          syncParticipantList(room);
-          refreshRemoteScreens(room);
-          applyRemoteMuteUi(room);
-          applyRemoteVolumes(room);
+          scheduleRoomUiSync(room, true);
           void unlockRemoteAudio();
         });
         room.on(RoomEvent.ParticipantDisconnected, (participant) => {
@@ -434,8 +464,7 @@ export function useLiveKitVoice(opts: {
           remoteVadStopRef.current.delete(participant.identity);
           delete probeSpeakingRef.current[participant.identity];
           flushSpeakingPeers();
-          syncParticipantList(room);
-          refreshRemoteScreens(room);
+          scheduleRoomUiSync(room, true);
         });
         room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
           logVoice('debug', 'TrackSubscribed', {
@@ -445,15 +474,13 @@ export function useLiveKitVoice(opts: {
             isLocal: participant.identity === room.localParticipant.identity,
           });
           if (track.kind === Track.Kind.Audio && participant.identity !== room.localParticipant.identity) {
-            ensureRemoteAudioAttached(track);
+            ensureRemoteAudioAttached(track, participant.identity, room.localParticipant.identity);
             if (publication.source === Track.Source.Microphone) {
               attachRemoteMicVad(participant.identity, track.mediaStreamTrack);
             }
             void unlockRemoteAudio();
           }
-          refreshRemoteScreens(room);
-          applyRemoteMuteUi(room);
-          applyRemoteVolumes(room);
+          scheduleRoomUiSync(room, track.kind === Track.Kind.Video);
         });
         room.on(RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
           if (track.kind === Track.Kind.Audio) {
@@ -470,12 +497,13 @@ export function useLiveKitVoice(opts: {
               logVoice('warn', 'detach remote audio', e);
             }
           }
+          scheduleRoomUiSync(room, track.kind === Track.Kind.Video);
         });
         room.on(RoomEvent.TrackMuted, () => {
-          applyRemoteMuteUi(room);
+          scheduleRoomUiSync(room);
         });
         room.on(RoomEvent.TrackUnmuted, () => {
-          applyRemoteMuteUi(room);
+          scheduleRoomUiSync(room);
         });
         room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
           const srv: Record<string, boolean> = {};
@@ -497,7 +525,9 @@ export function useLiveKitVoice(opts: {
         room.remoteParticipants.forEach((p) => {
           p.audioTrackPublications.forEach((pub) => {
             const t = pub.track;
-            if (t) ensureRemoteAudioAttached(t);
+            if (t?.kind === Track.Kind.Audio) {
+              ensureRemoteAudioAttached(t, p.identity, room.localParticipant.identity);
+            }
           });
         });
         wireExistingRemoteMics();
@@ -550,10 +580,7 @@ export function useLiveKitVoice(opts: {
           setLocalMuted(true);
         }
 
-        syncParticipantList(room);
-        refreshRemoteScreens(room);
-        applyRemoteMuteUi(room);
-        applyRemoteVolumes(room);
+        scheduleRoomUiSync(room, true);
         if (isStale()) return;
         setPhase('connected');
       } catch (e) {
@@ -579,10 +606,7 @@ export function useLiveKitVoice(opts: {
     micDeviceId,
     rnnoiseEnabled,
     cleanupRoom,
-    syncParticipantList,
-    refreshRemoteScreens,
-    applyRemoteMuteUi,
-    applyRemoteVolumes,
+    scheduleRoomUiSync,
   ]);
 
   useEffect(() => {
