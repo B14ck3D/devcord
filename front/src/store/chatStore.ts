@@ -1,9 +1,7 @@
 import { create } from 'zustand';
+import { resolveApiBaseUrl } from '../config/apiBase';
 
-const API_BASE_URL = (
-  (import.meta.env.VITE_API_URL as string | undefined) ??
-  'https://devcord.ndevelopment.org/api'
-).replace(/\/$/, '');
+const API_BASE_URL = resolveApiBaseUrl(import.meta.env.VITE_API_URL as string | undefined);
 const DEMO_MODE = !API_BASE_URL;
 
 export type ChatRow = {

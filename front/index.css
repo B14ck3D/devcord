@@ -368,3 +368,14 @@ a { text-decoration: none; color: inherit; }
   0%, 100% { opacity: 0.2; }
   50% { opacity: 0.8; }
 }
+
+/* Wymuszenie kanciastych rogów dla całej struktury głównej */
+html, body, #root {
+  border-radius: 0 !important;
+  overflow: hidden;
+}
+
+/* Celowanie w zagnieżdżone kontenery layoutu */
+.bg-gray-900, .bg-gray-800, main, aside, section, div[class*="rounded-xl"], div[class*="rounded-2xl"], div[class*="rounded-lg"] {
+  border-radius: 0 !important;
+}

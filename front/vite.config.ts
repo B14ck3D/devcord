@@ -5,34 +5,49 @@ import path from 'node:path';
 
 const devHttps = process.env.VITE_DEV_HTTPS === '1';
 const previewHttps = process.env.VITE_PREVIEW_HTTPS === '1';
+const fallbackApiUrl = 'https://devcord.ndevelopment.org/api';
 
-export default defineConfig({
-  base: './',
-  plugins: [react(), ...(devHttps || previewHttps ? [basicSsl()] : [])],
-  resolve: {
-    alias: {
-      '@': path.resolve(__dirname, 'src'),
+export default defineConfig(({ command }) => {
+  const isDesktopBuild = process.env.DEVCORD_DESKTOP_BUILD === '1';
+  const rawApiUrl = (process.env.VITE_API_URL ?? '').trim();
+  if (command === 'build') {
+    if (!rawApiUrl || !/^https?:\/\//i.test(rawApiUrl)) {
+      process.env.VITE_API_URL = fallbackApiUrl;
+    }
+  }
+  return {
+    // Web build needs absolute root assets for SPA deep-link refresh.
+    // Electron packaged build needs relative assets under file:// protocol.
+    base: isDesktopBuild ? './' : '/',
+    build: {
+      outDir: isDesktopBuild ? 'dist-desktop' : 'dist',
     },
-  },
-  server: {
-    host: true,
-    port: 5173,
-    strictPort: true,
-    https: devHttps,
-    proxy: {
-      '/api': {
-        target: 'http://127.0.0.1:12823',
-        changeOrigin: true,
+    plugins: [react(), ...(devHttps || previewHttps ? [basicSsl()] : [])],
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, 'src'),
       },
     },
-  },
-  preview: {
-    host: true,
-    port: 4173,
-    strictPort: true,
-    https: previewHttps,
-    proxy: {
-      '/api': { target: 'http://127.0.0.1:12823', changeOrigin: true },
+    server: {
+      host: true,
+      port: 5173,
+      strictPort: true,
+      https: devHttps,
+      proxy: {
+        '/api': {
+          target: 'http://127.0.0.1:12823',
+          changeOrigin: true,
+        },
+      },
     },
-  },
+    preview: {
+      host: true,
+      port: 4173,
+      strictPort: true,
+      https: previewHttps,
+      proxy: {
+        '/api': { target: 'http://127.0.0.1:12823', changeOrigin: true },
+      },
+    },
+  };
 });

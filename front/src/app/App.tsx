@@ -24,6 +24,7 @@ import { iconFromKey } from './iconMap';
 import { AuthGate } from './AuthGate';
 import { MemberProfileCard } from './MemberProfileCard';
 import { resolveMediaUrl } from './resolveMediaUrl';
+import { resolveApiBaseUrl } from '../config/apiBase';
 import { 
   Send, Search, Plus, ArrowUpRight, Hash, Volume2, 
   Phone, Video, Users, UserPlus, Settings, Mic, 
@@ -41,10 +42,7 @@ import {
 // ============================================================================
 
 // VITE_API_URL=http://localhost:3000/api — pusty = tryb mock (lokalne placeholdery).
-const API_BASE_URL = (
-  (import.meta.env.VITE_API_URL as string | undefined) ??
-  'https://devcord.ndevelopment.org/api'
-).replace(/\/$/, '');
+const API_BASE_URL = resolveApiBaseUrl(import.meta.env.VITE_API_URL as string | undefined);
 const DEMO_MODE = !API_BASE_URL;
 const APP_BASE_PATH = '/app';
 
@@ -614,6 +612,8 @@ export default function App() {
   const [pwdBusy, setPwdBusy] = useState(false);
   const [pwdErr, setPwdErr] = useState('');
   const [pwdOk, setPwdOk] = useState('');
+  const [desktopUpdaterBusy, setDesktopUpdaterBusy] = useState(false);
+  const [desktopUpdaterState, setDesktopUpdaterState] = useState<string>('');
   
   // Modale (Kanały/Serwery/Kategorie/Zadania)
   const [createServerModal, setCreateServerModal] = useState<'create' | 'join' | null>(null);
@@ -656,6 +656,9 @@ export default function App() {
   const [screenStreamContext, setScreenStreamContext] = useState<{ x: number; y: number } | null>(null);
   const [screenCaptureProfile, setScreenCaptureProfile] = useState<240 | 120 | 60 | null>(null);
   const [screenCaptureFps, setScreenCaptureFps] = useState<number | null>(null);
+  const [screenSourcePickerOpen, setScreenSourcePickerOpen] = useState(false);
+  const [screenSourcePickerError, setScreenSourcePickerError] = useState<string | null>(null);
+  const [screenSourceCandidates, setScreenSourceCandidates] = useState<DevcordDesktopSourceInfo[]>([]);
   const screenFallbackStrikeRef = useRef(0);
   const micDeviceId = useSettingsStore((s) => s.micDeviceId);
   const setMicDeviceId = useSettingsStore((s) => s.setMicDeviceId);
@@ -1897,6 +1900,63 @@ export default function App() {
   }, [toggleVoiceHeadphones, toggleVoiceMic]);
 
   useEffect(() => {
+    if (!window.devcordDesktop?.onUpdaterStatus) return;
+    return window.devcordDesktop.onUpdaterStatus((payload: unknown) => {
+      const p = (payload ?? {}) as { state?: string };
+      const state = String(p.state ?? '');
+      if (!state) return;
+      setDesktopUpdaterState(state);
+      if (state === 'error' || state === 'not-available' || state === 'downloaded' || state === 'installing') {
+        setDesktopUpdaterBusy(false);
+      }
+      if (state === 'downloaded') {
+        setSettingsSuccess('Aktualizacja została pobrana. Kliknij „Zaktualizuj i zrestartuj”, aby ją zainstalować.');
+      }
+    });
+  }, []);
+
+  const checkDesktopUpdatesNow = useCallback(async () => {
+    if (!window.devcordDesktop?.isElectron || !window.devcordDesktop?.checkForUpdatesNow) {
+      setSettingsError('Sprawdzanie aktualizacji jest dostępne tylko w aplikacji desktopowej.');
+      return;
+    }
+    setDesktopUpdaterBusy(true);
+    setDesktopUpdaterState('checking');
+    setSettingsError('');
+    setSettingsSuccess('Sprawdzanie aktualizacji...');
+    const result = await window.devcordDesktop.checkForUpdatesNow();
+    if (!result.ok) {
+      setDesktopUpdaterBusy(false);
+      if (result.reason === 'dev-mode') {
+        setDesktopUpdaterState('dev-mode');
+        setSettingsError('Aktualizacje są niedostępne w trybie deweloperskim Electron.');
+        return;
+      }
+      setDesktopUpdaterState('error');
+      setSettingsError(result.message || 'Nie udało się uruchomić sprawdzania aktualizacji.');
+      return;
+    }
+    setSettingsSuccess('Sprawdzanie uruchomione. Aktualizacja pobierze się automatycznie, jeśli jest dostępna.');
+  }, [setSettingsError, setSettingsSuccess]);
+
+  const installDesktopUpdateNow = useCallback(async () => {
+    if (!window.devcordDesktop?.isElectron || !window.devcordDesktop?.installUpdateNow) {
+      setSettingsError('Instalacja aktualizacji jest dostępna tylko w aplikacji desktopowej.');
+      return;
+    }
+    setDesktopUpdaterBusy(true);
+    setDesktopUpdaterState('installing');
+    setSettingsError('');
+    setSettingsSuccess('Instalowanie aktualizacji i restart aplikacji...');
+    const result = await window.devcordDesktop.installUpdateNow();
+    if (!result.ok) {
+      setDesktopUpdaterBusy(false);
+      setDesktopUpdaterState('error');
+      setSettingsError(result.message || 'Nie udało się zainstalować aktualizacji.');
+    }
+  }, [setSettingsError, setSettingsSuccess]);
+
+  useEffect(() => {
     if (!screenStream) {
       setScreenCaptureFps(null);
       screenFallbackStrikeRef.current = 0;
@@ -2684,32 +2744,10 @@ export default function App() {
       if (!listSources) throw new Error('desktop-capturer unavailable');
       const sources = await listSources();
       if (!Array.isArray(sources) || sources.length === 0) throw new Error('no capture sources');
-      const source =
-        sources.find((s) => String(s.id).startsWith('screen:')) ??
-        sources[0];
-      const profiles: Array<240 | 120 | 60> = [240, 120, 60];
-      for (const profile of profiles) {
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({
-            audio: false,
-            video: {
-              mandatory: {
-                chromeMediaSource: 'desktop',
-                chromeMediaSourceId: source.id,
-                minFrameRate: 60,
-                maxFrameRate: profile,
-                minWidth: 1920,
-                minHeight: 1080,
-              },
-            } as MediaTrackConstraints,
-          } as MediaStreamConstraints);
-          setScreenCaptureProfile(profile);
-          return stream;
-        } catch {
-          /* try next profile */
-        }
-      }
-      throw new Error('no compatible desktop profile');
+      setScreenSourcePickerError(null);
+      setScreenSourceCandidates(sources);
+      setScreenSourcePickerOpen(true);
+      throw new Error('__picker_opened__');
     };
 
     try {
@@ -2746,7 +2784,8 @@ export default function App() {
         setScreenCaptureProfile(null);
       };
       setScreenStream(stream);
-    } catch {
+    } catch (error) {
+      if (error instanceof Error && error.message === '__picker_opened__') return;
       const mockStream = createMockScreenStream();
       mockStream.getVideoTracks()[0].onended = () => {
         setScreenStream(null);
@@ -2756,6 +2795,52 @@ export default function App() {
       setScreenStream(mockStream);
     }
   };
+
+  const startScreenShareFromDesktopSource = useCallback(
+    async (sourceId: string) => {
+      try {
+        const profiles: Array<240 | 120 | 60> = [240, 120, 60];
+        let chosen: MediaStream | null = null;
+        for (const profile of profiles) {
+          try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+              audio: {
+                mandatory: {
+                  chromeMediaSource: 'desktop',
+                },
+              } as unknown as MediaTrackConstraints,
+              video: {
+                mandatory: {
+                  chromeMediaSource: 'desktop',
+                  chromeMediaSourceId: sourceId,
+                  minFrameRate: 60,
+                  maxFrameRate: profile,
+                  minWidth: 1920,
+                  minHeight: 1080,
+                },
+              } as unknown as MediaTrackConstraints,
+            } as MediaStreamConstraints);
+            chosen = stream;
+            setScreenCaptureProfile(profile);
+            break;
+          } catch {
+            /* next profile */
+          }
+        }
+        if (!chosen) throw new Error('Nie udało się uruchomić przechwytywania dla wybranego źródła.');
+        chosen.getVideoTracks()[0].onended = () => {
+          setScreenStream(null);
+          setScreenCaptureProfile(null);
+        };
+        setScreenStream(chosen);
+        setScreenSourcePickerOpen(false);
+        setScreenSourcePickerError(null);
+      } catch (error) {
+        setScreenSourcePickerError(error instanceof Error ? error.message : 'Nie udało się uruchomić streamu.');
+      }
+    },
+    [],
+  );
 
   const toggleCameraShare = async () => {
     if (!activeVoiceChannel && dmCallState?.status !== 'connected') return;
@@ -2986,7 +3071,7 @@ export default function App() {
   return (
     <div
       data-devcord-theme={localTheme}
-      className="flex h-screen w-full p-1.5 overflow-hidden relative"
+      className="flex h-screen w-screen m-0 p-0 overflow-hidden relative rounded-none"
       style={{ background: '#191919', color: 'var(--md-sys-color-on-surface)', fontFamily: 'Inter, system-ui, sans-serif', userSelect: 'none' }}
       onDragEnter={handleDragEnter} onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop} 
       onContextMenu={(e) => handleContextMenu(e, 'general', null)}
@@ -3001,6 +3086,60 @@ export default function App() {
         .devcord-category-body[data-open="false"] { max-height: 0; overflow: hidden; opacity: 0; transition: max-height 0.2s ease, opacity 0.15s ease; }
         .devcord-category-body[data-open="true"] { max-height: 2000px; opacity: 1; transition: max-height 0.25s ease, opacity 0.15s ease; }
       `}</style>
+
+      {screenSourcePickerOpen && (
+        <div
+          className="fixed inset-0 z-[340] bg-black/70 backdrop-blur-sm flex items-center justify-center p-6"
+          onClick={() => {
+            setScreenSourcePickerOpen(false);
+            setScreenSourcePickerError(null);
+          }}
+        >
+          <div
+            className="w-full max-w-5xl bg-[#0c0c0e] border border-white/[0.12] rounded-2xl p-5 max-h-[85vh] overflow-hidden flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-white">Wybierz okno lub ekran do udostępnienia</h3>
+              <button
+                type="button"
+                onClick={() => {
+                  setScreenSourcePickerOpen(false);
+                  setScreenSourcePickerError(null);
+                }}
+                className="px-3 py-1.5 rounded-lg text-sm text-zinc-300 hover:text-white hover:bg-white/[0.08]"
+              >
+                Zamknij
+              </button>
+            </div>
+            {screenSourcePickerError ? (
+              <div className="mb-3 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-xs">
+                {screenSourcePickerError}
+              </div>
+            ) : null}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 overflow-y-auto custom-scrollbar pr-1">
+              {screenSourceCandidates.map((src) => (
+                <button
+                  key={src.id}
+                  type="button"
+                  onClick={() => void startScreenShareFromDesktopSource(src.id)}
+                  className="text-left border border-white/[0.1] hover:border-[#00eeff]/60 bg-black/30 hover:bg-[#00eeff]/10 rounded-xl p-2 transition-colors"
+                >
+                  <div className="aspect-video rounded-lg overflow-hidden border border-white/[0.08] bg-black/50 flex items-center justify-center">
+                    {src.thumbnailDataUrl ? (
+                      <img src={src.thumbnailDataUrl} alt={src.name} className="w-full h-full object-cover" />
+                    ) : (
+                      <Monitor size={22} className="text-zinc-500" />
+                    )}
+                  </div>
+                  <div className="mt-2 text-xs font-semibold text-zinc-200 truncate">{src.name}</div>
+                  <div className="text-[10px] text-zinc-500 truncate">{src.id}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* --- MENU KONTEKSTOWE --- */}
       {contextMenu && (
@@ -3796,6 +3935,36 @@ export default function App() {
                       </button>
                     </div>
                   ) : null}
+
+                  <div className="pt-6 border-t border-white/[0.06]">
+                    <h4 className="text-sm font-bold text-white mb-1">Aktualizacje aplikacji desktopowej</h4>
+                    <p className="text-xs text-zinc-500 mb-4">
+                      Ręcznie sprawdź nową wersję. Jeśli jest dostępna, Devcord pobierze ją i zainstaluje automatycznie po zamknięciu aplikacji.
+                    </p>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => void checkDesktopUpdatesNow()}
+                        disabled={!window.devcordDesktop?.isElectron || desktopUpdaterBusy}
+                        className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-cyan-400/35 text-cyan-300 hover:bg-cyan-500/10 hover:text-cyan-200 transition-colors text-sm font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        {desktopUpdaterBusy ? 'Sprawdzanie...' : 'Sprawdź aktualizacje'}
+                      </button>
+                      {desktopUpdaterState === 'downloaded' ? (
+                        <button
+                          type="button"
+                          onClick={() => void installDesktopUpdateNow()}
+                          disabled={!window.devcordDesktop?.isElectron || desktopUpdaterBusy}
+                          className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-emerald-400/35 text-emerald-300 hover:bg-emerald-500/10 hover:text-emerald-200 transition-colors text-sm font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          Zaktualizuj i zrestartuj
+                        </button>
+                      ) : null}
+                      <span className="text-xs text-zinc-500">
+                        Status: {desktopUpdaterState || 'brak'}
+                      </span>
+                    </div>
+                  </div>
 
                   <div className="pt-2 border-t border-white/[0.06]">
                      <h4 className="text-sm font-bold text-red-500 mb-2">Strefa zagrożenia</h4>

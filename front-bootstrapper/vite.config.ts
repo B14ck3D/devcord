@@ -13,6 +13,8 @@ export default defineConfig({
   ],
   build: {
     assetsDir: 'assets',
+    minify: 'terser',
+    cssMinify: true,
   },
   resolve: {
     alias: {

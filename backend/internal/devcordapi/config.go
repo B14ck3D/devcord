@@ -35,6 +35,7 @@ type Config struct {
 	LiveKitAPISecret string
 	// Desktop updater feed (Electron Windows).
 	DesktopUpdatesBaseURL   string
+	DesktopUpdatesLocalDir  string
 	DesktopLatestVersion    string
 	DesktopArtifactName     string
 	DesktopArtifactSHA512   string
@@ -74,13 +75,17 @@ func LoadConfig() *Config {
 			),
 			"/",
 		),
+		DesktopUpdatesLocalDir: firstNonEmpty(
+			unquoteEnv(os.Getenv("DEVCORD_UPDATES_LOCAL_DIR")),
+			"updates/win",
+		),
 		DesktopLatestVersion: firstNonEmpty(
 			unquoteEnv(os.Getenv("DEVCORD_DESKTOP_LATEST_VERSION")),
 			firstNonEmpty(unquoteEnv(os.Getenv("DEVCORD_DESKTOP_VERSION")), "0.0.0"),
 		),
 		DesktopArtifactName: firstNonEmpty(
 			unquoteEnv(os.Getenv("DEVCORD_DESKTOP_ARTIFACT")),
-			"Devcord-Setup-latest.exe",
+			"Devcord-App-latest.zip",
 		),
 		DesktopArtifactSHA512: unquoteEnv(os.Getenv("DEVCORD_DESKTOP_SHA512")),
 		DesktopArtifactSize:   firstNonEmpty(unquoteEnv(os.Getenv("DEVCORD_DESKTOP_SIZE")), "0"),

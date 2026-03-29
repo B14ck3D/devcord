@@ -1,5 +1,6 @@
-import { app, BrowserWindow, desktopCapturer, globalShortcut, ipcMain } from 'electron';
+import { app, BrowserWindow, desktopCapturer, globalShortcut, ipcMain, session } from 'electron';
 import electronUpdaterPkg from 'electron-updater';
+import log from 'electron-log';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -32,32 +33,35 @@ app.commandLine.appendSwitch('enable-webrtc-hw-decoding');
 app.commandLine.appendSwitch('force-high-performance-gpu');
 
 let mainWindow: BrowserWindow | null = null;
-let mainLogPath: string | null = null;
+let updateInstallInProgress = false;
 
-function ensureMainLogPath() {
-  if (mainLogPath) return mainLogPath;
+function configureElectronLog() {
   try {
-    const userData = app.getPath('userData');
-    fs.mkdirSync(userData, { recursive: true });
-    mainLogPath = path.join(userData, 'devcord-main.log');
-    return mainLogPath;
+    const logDir = path.join(app.getPath('appData'), 'Devcord', 'logs');
+    fs.mkdirSync(logDir, { recursive: true });
+    log.transports.file.resolvePathFn = () => path.join(logDir, 'main.log');
+    log.initialize();
+    log.info('electron-log initialized', { logDir });
   } catch {
-    return null;
+    // If logger init fails, fallback is stderr in logMain.
   }
 }
 
 function logMain(message: string, detail?: unknown) {
-  const line = `[${new Date().toISOString()}] ${message}${detail === undefined ? '' : ` ${JSON.stringify(detail)}`}\n`;
-  const target = ensureMainLogPath();
-  if (target) {
+  let serialized = '';
+  if (detail !== undefined) {
     try {
-      fs.appendFileSync(target, line, 'utf8');
-      return;
+      serialized = ` ${JSON.stringify(detail)}`;
     } catch {
-      // Fall through to stderr.
+      serialized = ` ${String(detail)}`;
     }
   }
-  process.stderr.write(line);
+  const line = `${message}${serialized}`;
+  try {
+    log.info(line);
+  } catch {
+    process.stderr.write(`[${new Date().toISOString()}] ${line}\n`);
+  }
 }
 
 function resolveWindowIconPath() {
@@ -89,6 +93,7 @@ function createMainWindow() {
       preload: preloadPath,
       contextIsolation: true,
       nodeIntegration: false,
+      webSecurity: false,
       sandbox: false,
       spellcheck: false,
       partition: 'persist:devcord-main',
@@ -98,10 +103,19 @@ function createMainWindow() {
   win.setMenuBarVisibility(false);
 
   win.once('ready-to-show', () => win.show());
+  win.on('unresponsive', () => {
+    logMain('window unresponsive');
+  });
+  win.webContents.on('did-finish-load', () => {
+    logMain('renderer did-finish-load');
+  });
+  win.webContents.on('preload-error', (_event, preloadPath, error) => {
+    logMain('renderer preload-error', { preloadPath, error: String(error) });
+  });
+  win.webContents.on('render-process-gone', (_event, details) => {
+    logMain('renderer render-process-gone', details);
+  });
   win.webContents.on('did-fail-load', (_event, code, desc) => {
-    // Keep stderr logging in production builds for black-screen diagnostics.
-    // eslint-disable-next-line no-console
-    console.error('FAILED TO LOAD:', code, desc);
     logMain('renderer did-fail-load', { code, desc });
   });
 
@@ -109,18 +123,36 @@ function createMainWindow() {
     void win.loadURL(devServerUrl);
     win.webContents.openDevTools({ mode: 'detach' });
   } else {
-    const appHtml = path.join(app.getAppPath(), 'dist', 'index.html');
+    const appHtml = path.join(app.getAppPath(), 'dist-desktop', 'index.html');
     logMain('renderer loadFile', { appHtml });
     void win.loadFile(appHtml);
-    // Temporary production diagnostics for blank-screen investigation.
-    win.webContents.openDevTools({ mode: 'detach' });
   }
 
   return win;
 }
 
+function setupDesktopSessionNetworking() {
+  const ses = session.fromPartition('persist:devcord-main');
+  ses.webRequest.onBeforeSendHeaders((details, callback) => {
+    const headers = details.requestHeaders ?? {};
+    const target = details.url || '';
+    const targetIsApi = target.startsWith(defaultApiOrigin);
+    if (targetIsApi) {
+      const origin = String(headers.Origin ?? headers.origin ?? '');
+      if (!origin || origin.startsWith('file://')) {
+        headers.Origin = defaultApiOrigin;
+      }
+      const referer = String(headers.Referer ?? headers.referer ?? '');
+      if (!referer || referer.startsWith('file://')) {
+        headers.Referer = `${defaultApiOrigin}/`;
+      }
+    }
+    callback({ requestHeaders: headers });
+  });
+}
+
 function setupIpc() {
-  ipcMain.handle('devcord:desktop-capturer:list-sources', async () => {
+  const listDesktopSources = async () => {
     const sources = await desktopCapturer.getSources({
       types: ['screen', 'window'],
       thumbnailSize: { width: 320, height: 180 },
@@ -133,9 +165,45 @@ function setupIpc() {
       thumbnailDataUrl: s.thumbnail?.toDataURL?.() ?? '',
       appIconDataUrl: s.appIcon?.toDataURL?.() ?? '',
     }));
-  });
+  };
+
+  ipcMain.handle('devcord:desktop-capturer:list-sources', listDesktopSources);
+  ipcMain.handle('devcord:get-desktop-sources', listDesktopSources);
 
   ipcMain.handle('devcord:app-version', () => app.getVersion());
+  ipcMain.handle('devcord:updater-check-now', async () => {
+    if (isDev) {
+      return { ok: false as const, reason: 'dev-mode', message: 'Aktualizacje są niedostępne w trybie deweloperskim.' };
+    }
+    try {
+      await autoUpdater.checkForUpdates();
+      return { ok: true as const };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logMain('updater check-now failed', { message });
+      return { ok: false as const, message };
+    }
+  });
+  ipcMain.handle('devcord:updater-install-now', async () => {
+    if (isDev) {
+      return { ok: false as const, reason: 'dev-mode', message: 'Instalacja aktualizacji jest niedostępna w trybie deweloperskim.' };
+    }
+    if (updateInstallInProgress) {
+      return { ok: false as const, reason: 'in-progress', message: 'Instalacja aktualizacji już trwa.' };
+    }
+    try {
+      updateInstallInProgress = true;
+      broadcast('devcord:updater-status', { state: 'installing' });
+      logMain('updater install-now requested');
+      autoUpdater.quitAndInstall(false, true);
+      return { ok: true as const };
+    } catch (error) {
+      updateInstallInProgress = false;
+      const message = error instanceof Error ? error.message : String(error);
+      logMain('updater install-now failed', { message });
+      return { ok: false as const, reason: 'error', message };
+    }
+  });
 }
 
 function setupGlobalShortcuts() {
@@ -151,8 +219,23 @@ function setupGlobalShortcuts() {
 function setupAutoUpdater() {
   if (isDev) return;
 
+  const ensureUpdateConfigFile = () => {
+    try {
+      const configPath = path.join(process.resourcesPath, 'app-update.yml');
+      if (fs.existsSync(configPath)) return;
+      const yaml = `provider: generic\nurl: ${updateFeedUrl}\nupdaterCacheDirName: devcord-updater\n`;
+      fs.writeFileSync(configPath, yaml, 'utf8');
+      logMain('updater app-update.yml created', { configPath, url: updateFeedUrl });
+    } catch (error) {
+      logMain('updater app-update.yml create failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
+  ensureUpdateConfigFile();
   autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.setFeedURL({ provider: 'generic', url: updateFeedUrl });
 
   autoUpdater.on('checking-for-update', () => {
@@ -174,17 +257,9 @@ function setupAutoUpdater() {
     broadcast('devcord:updater-status', { state: 'downloading', progress });
   });
   autoUpdater.on('update-downloaded', (info) => {
+    updateInstallInProgress = false;
     broadcast('devcord:updater-status', { state: 'downloaded', info });
-    setTimeout(() => {
-      try {
-        autoUpdater.quitAndInstall(false, true);
-      } catch (e) {
-        broadcast('devcord:updater-status', {
-          state: 'error',
-          message: e instanceof Error ? e.message : 'quitAndInstall failed',
-        });
-      }
-    }, 1500);
+    logMain('updater update-downloaded; waiting for explicit install action');
   });
 
   void autoUpdater.checkForUpdates().catch((e) => {
@@ -196,7 +271,18 @@ function setupAutoUpdater() {
 }
 
 app.whenReady().then(() => {
+  configureElectronLog();
+  process.on('uncaughtException', (error) => {
+    logMain('uncaughtException', { error: String(error) });
+  });
+  process.on('unhandledRejection', (reason) => {
+    logMain('unhandledRejection', { reason: String(reason) });
+  });
+  app.on('render-process-gone', (_event, _contents, details) => {
+    logMain('app render-process-gone', details);
+  });
   setupIpc();
+  setupDesktopSessionNetworking();
   mainWindow = createMainWindow();
   setupGlobalShortcuts();
   setupAutoUpdater();

@@ -11,6 +11,8 @@ import (
 	"webrtc/signaling/internal/snowflake"
 )
 
+func boolPtr(v bool) *bool { return &v }
+
 // GET /api/voice/livekit-token?channel_id=... lub ?dm_conversation_id=...
 func (a *App) handleVoiceLiveKitToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -46,8 +48,10 @@ func (a *App) handleVoiceLiveKitToken(w http.ResponseWriter, r *http.Request) {
 		identity := strconv.FormatInt(uid, 10)
 		tok, err := auth.NewAccessToken(key, sec).
 			AddGrant(&auth.VideoGrant{
-				RoomJoin: true,
-				Room:     roomName,
+				RoomJoin:     true,
+				Room:         roomName,
+				CanPublish:   boolPtr(true),
+				CanSubscribe: boolPtr(true),
 			}).
 			SetIdentity(identity).
 			SetValidFor(15 * time.Minute).
@@ -95,8 +99,10 @@ func (a *App) handleVoiceLiveKitToken(w http.ResponseWriter, r *http.Request) {
 	identity := strconv.FormatInt(uid, 10)
 	tok, err := auth.NewAccessToken(key, sec).
 		AddGrant(&auth.VideoGrant{
-			RoomJoin: true,
-			Room:     roomName,
+			RoomJoin:     true,
+			Room:         roomName,
+			CanPublish:   boolPtr(true),
+			CanSubscribe: boolPtr(true),
 		}).
 		SetIdentity(identity).
 		SetValidFor(15 * time.Minute).

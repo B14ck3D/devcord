@@ -1,6 +1,6 @@
 {
   "name": "ndev-front",
-  "version": "0.1.7",
+  "version": "0.1.26",
   "private": true,
   "type": "module",
   "main": "dist-electron/main.js",
@@ -12,7 +12,7 @@
     "electron:build-main": "tsc -p electron/tsconfig.json",
     "electron:dev": "npm run electron:build-main && cross-env ELECTRON_DEV_SERVER_URL=http://127.0.0.1:5173 concurrently -k \"vite --host 127.0.0.1 --port 5173\" \"wait-on tcp:5173 && electron ./dist-electron/main.js\"",
     "electron:start": "npm run electron:build-main && electron ./dist-electron/main.js",
-    "electron:dist:win": "npm run electron:version:bump && npm run build && npm run electron:build-main && electron-builder --config electron-builder.json --win zip",
+    "electron:dist:win": "npm run electron:version:bump && cross-env DEVCORD_DESKTOP_BUILD=1 npm run build && npm run electron:build-main && electron-builder --config electron-builder.json --win zip",
     "preview": "vite preview",
     "preview:https": "VITE_PREVIEW_HTTPS=1 vite preview"
   },
@@ -20,6 +20,7 @@
     "@emoji-mart/data": "^1.2.1",
     "@emoji-mart/react": "^1.1.1",
     "@shiguredo/noise-suppression": "^2025.1.0",
+    "electron-log": "^5.4.3",
     "electron-updater": "^6.8.3",
     "framer-motion": "^12.38.0",
     "livekit-client": "^2.18.0",

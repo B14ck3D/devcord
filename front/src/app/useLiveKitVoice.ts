@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ConnectionState, Room, RoomEvent, Track } from 'livekit-client';
+import { AudioPresets, ConnectionState, Room, RoomEvent, Track } from 'livekit-client';
 import type { RemoteTrack } from 'livekit-client';
 import type { VoicePhase } from './voicePhase';
 import { prepareMicTrackWithRnnoise, type PreparedMicTrack } from '../audio/rnnoisePipeline';
@@ -8,15 +8,14 @@ import {
   speakingRecordsEqual,
   startTrackRmsVad,
 } from './voiceActivity';
+import { resolveApiBaseUrl } from '../config/apiBase';
 
-const API_BASE = (
-  (import.meta.env.VITE_API_URL as string | undefined) ??
-  'https://devcord.ndevelopment.org/api'
-).replace(/\/$/, '');
+const API_BASE = resolveApiBaseUrl(import.meta.env.VITE_API_URL as string | undefined);
 /** Liniowy mnożnik odsłuchu (PPM / kontekst): musi być zgodny ze `min`/`max` suwaków w App. */
 export const VOICE_PEER_GAIN_MIN = 0.25;
 export const VOICE_PEER_GAIN_MAX = 4;
 const VOICE_LOG = '[devcord-voice]';
+const VOICE_DEBUG_LOGS = import.meta.env.DEV;
 
 export type ScreenPublishStats = {
   captureFps: number | null;
@@ -26,6 +25,7 @@ export type ScreenPublishStats = {
 
 function logVoice(level: 'debug' | 'warn' | 'info', ...args: unknown[]) {
   if (typeof console === 'undefined') return;
+  if (!VOICE_DEBUG_LOGS && (level === 'debug' || level === 'info')) return;
   const fn = console[level] ?? console.log;
   fn.call(console, VOICE_LOG, ...args);
 }
@@ -33,14 +33,34 @@ function logVoice(level: 'debug' | 'warn' | 'info', ...args: unknown[]) {
 /** LiveKit wymaga attach() zdalnego audio do elementu — inaczej attachedElements=0 i nie ma dźwięku (README livekit-client). */
 function ensureRemoteAudioAttached(track: RemoteTrack) {
   if (track.kind !== Track.Kind.Audio) return;
-  if (track.attachedElements.length > 0) {
-    logVoice('debug', 'remote audio already has elements', { sid: track.sid, n: track.attachedElements.length });
+  const existing = track.attachedElements.find((el) => el instanceof HTMLAudioElement) as
+    | HTMLAudioElement
+    | undefined;
+  if (existing) {
+    existing.autoplay = true;
+    existing.setAttribute('playsinline', 'true');
+    if (!existing.isConnected) document.body.appendChild(existing);
+    void existing.play().catch((e) => {
+      logVoice('debug', 'remote audio play() retry failed', { sid: track.sid, error: String(e) });
+    });
+    logVoice('debug', 'remote audio already has element', { sid: track.sid, n: track.attachedElements.length });
     return;
   }
   const el = track.attach();
-  el.hidden = true;
+  el.autoplay = true;
+  el.setAttribute('playsinline', 'true');
+  // Keep it off-screen instead of hidden to avoid browser quirks with hidden media playback.
+  el.style.position = 'fixed';
+  el.style.left = '-99999px';
+  el.style.width = '1px';
+  el.style.height = '1px';
+  el.style.opacity = '0';
+  el.style.pointerEvents = 'none';
   el.setAttribute('data-devcord-remote-audio', '1');
   if (!el.parentElement) document.body.appendChild(el);
+  void el.play().catch((e) => {
+    logVoice('debug', 'remote audio initial play() failed', { sid: track.sid, error: String(e) });
+  });
   logVoice('info', 'remote audio attached', { sid: track.sid, paused: (el as HTMLAudioElement).paused });
 }
 
@@ -51,6 +71,25 @@ function emitForceLogout(reason: string) {
   } catch {
     /* ignore */
   }
+}
+
+async function ensureMicPermission(deviceId: string) {
+  if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) return;
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio:
+      deviceId && deviceId !== 'default'
+        ? {
+            deviceId: { exact: deviceId },
+            channelCount: { ideal: 1, max: 1 },
+            sampleRate: { ideal: 48000 },
+          }
+        : {
+            channelCount: { ideal: 1, max: 1 },
+            sampleRate: { ideal: 48000 },
+          },
+    video: false,
+  });
+  stream.getTracks().forEach((track) => track.stop());
 }
 
 export function useLiveKitVoice(opts: {
@@ -103,6 +142,7 @@ export function useLiveKitVoice(opts: {
   const screenBytesRef = useRef<Record<string, { bytes: number; ts: number }>>({});
   const localMicRef = useRef<PreparedMicTrack | null>(null);
   const audioGestureCleanupRef = useRef<(() => void) | null>(null);
+  const connectSessionRef = useRef(0);
   const userIdNorm = String(userId);
 
   const [voiceDiagnostics, setVoiceDiagnostics] = useState({
@@ -267,8 +307,12 @@ export function useLiveKitVoice(opts: {
     }
 
     let cancelled = false;
+    const sessionId = ++connectSessionRef.current;
+    const isStale = () => cancelled || sessionId !== connectSessionRef.current;
 
     (async () => {
+      await cleanupRoom();
+      if (isStale()) return;
       setError(null);
       setPhase('connecting_signaling');
       try {
@@ -292,12 +336,37 @@ export function useLiveKitVoice(opts: {
         const token = body.token?.trim();
         const url = body.url?.trim();
         if (!token || !url) throw new Error('Niepoprawna odpowiedź tokena LiveKit.');
-        if (cancelled) return;
+        if (isStale()) return;
+
+        try {
+          await ensureMicPermission(micDeviceId);
+        } catch (micError) {
+          // Don't block room join on microphone permission failure.
+          // User should still be able to hear others even when local mic cannot be published.
+          logVoice('warn', 'mic permission preflight failed', {
+            message: micError instanceof Error ? micError.message : String(micError),
+          });
+        }
+        if (isStale()) return;
 
         setPhase('negotiating');
         // Screen-share path targets high-fidelity desktop streaming, so disable adaptive degradations.
-        const room = new Room({ adaptiveStream: false, dynacast: false, webAudioMix: true });
+        const room = new Room({
+          adaptiveStream: false,
+          dynacast: false,
+          webAudioMix: true,
+          publishDefaults: {
+            audioPreset: AudioPresets.speech,
+            dtx: false,
+            red: false,
+            forceStereo: false,
+          },
+        });
         roomRef.current = room;
+        if (isStale()) {
+          await room.disconnect();
+          return;
+        }
 
         const unlockRemoteAudio = async () => {
           try {
@@ -339,9 +408,12 @@ export function useLiveKitVoice(opts: {
             });
           });
         };
-
         room.on(RoomEvent.ConnectionStateChanged, (s) => {
           setVoiceDiagnostics((d) => ({ ...d, connectionState: String(s) }));
+          logVoice('info', 'ConnectionStateChanged', { state: String(s) });
+        });
+        room.on(RoomEvent.Disconnected, (reason) => {
+          logVoice('warn', 'Disconnected', { reason: String(reason ?? 'unknown') });
         });
         room.on(RoomEvent.ParticipantConnected, (participant) => {
           logVoice('debug', 'ParticipantConnected', { identity: participant.identity });
@@ -417,7 +489,7 @@ export function useLiveKitVoice(opts: {
         });
 
         await room.connect(url, token, { autoSubscribe: true });
-        if (cancelled) {
+        if (isStale()) {
           await room.disconnect();
           return;
         }
@@ -442,31 +514,50 @@ export function useLiveKitVoice(opts: {
           if (!room.canPlaybackAudio) void unlockRemoteAudio();
         });
 
-        const prepared = await prepareMicTrackWithRnnoise(micDeviceId, rnnoiseEnabled);
-        localMicRef.current = prepared;
-        await room.localParticipant.publishTrack(prepared.track, { source: Track.Source.Microphone });
-
-        stopLocalVadRef.current?.();
-        const vadCtx = ensureVadCtx();
-        if (vadCtx) {
-          const localIdentity = room.localParticipant.identity;
-          stopLocalVadRef.current = startTrackRmsVad(prepared.track, {
-            audioContext: vadCtx,
-            onSpeakingChange: (speaking) => {
-              probeSpeakingRef.current[localIdentity] = speaking;
-              flushSpeakingPeers();
-            },
+        try {
+          if (isStale()) return;
+          const prepared = await prepareMicTrackWithRnnoise(micDeviceId, rnnoiseEnabled);
+          if (isStale()) {
+            prepared.cleanup();
+            return;
+          }
+          localMicRef.current = prepared;
+          await room.localParticipant.publishTrack(prepared.track, {
+            source: Track.Source.Microphone,
+            audioPreset: AudioPresets.speech,
+            dtx: false,
+            red: false,
+            forceStereo: false,
           });
-          flushSpeakingPeers();
+
+          stopLocalVadRef.current?.();
+          const vadCtx = ensureVadCtx();
+          if (vadCtx) {
+            const localIdentity = room.localParticipant.identity;
+            stopLocalVadRef.current = startTrackRmsVad(prepared.track, {
+              audioContext: vadCtx,
+              onSpeakingChange: (speaking) => {
+                probeSpeakingRef.current[localIdentity] = speaking;
+                flushSpeakingPeers();
+              },
+            });
+            flushSpeakingPeers();
+          }
+        } catch (micError) {
+          logVoice('warn', 'local mic publish failed, keep room connected for listen-only mode', {
+            message: micError instanceof Error ? micError.message : String(micError),
+          });
+          setLocalMuted(true);
         }
 
         syncParticipantList(room);
         refreshRemoteScreens(room);
         applyRemoteMuteUi(room);
         applyRemoteVolumes(room);
+        if (isStale()) return;
         setPhase('connected');
       } catch (e) {
-        if (cancelled) return;
+        if (isStale()) return;
         setError(e instanceof Error ? e.message : 'Błąd LiveKit');
         setPhase('error');
         await cleanupRoom();
@@ -475,6 +566,9 @@ export function useLiveKitVoice(opts: {
 
     return () => {
       cancelled = true;
+      if (connectSessionRef.current === sessionId) {
+        connectSessionRef.current += 1;
+      }
       void cleanupRoom();
     };
   }, [
@@ -499,9 +593,8 @@ export function useLiveKitVoice(opts: {
       micTrack.enabled = !localMuted;
       return;
     }
-    void room.localParticipant.setMicrophoneEnabled(!localMuted, {
-      deviceId: micDeviceId && micDeviceId !== 'default' ? { exact: micDeviceId } : undefined,
-    });
+    // Avoid spawning an unmanaged fallback track outside our mono/RNNoise pipeline.
+    logVoice('warn', 'skip setMicrophoneEnabled fallback: local mic pipeline track missing');
   }, [localMuted, phase, micDeviceId]);
 
   useEffect(() => {

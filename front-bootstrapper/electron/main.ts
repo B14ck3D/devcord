@@ -7,7 +7,6 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { path7za } from '7zip-bin';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,6 +15,13 @@ const devServerUrl = process.env.ELECTRON_DEV_SERVER_URL ?? 'http://127.0.0.1:51
 const updatesApiUrl = process.env.DEVCORD_UPDATES_API_URL?.trim() || 'https://devcord.ndevelopment.org/api/updates/latest';
 const shouldOpenDevTools = process.env.DEVCORD_BOOTSTRAPPER_DEVTOOLS === '1' || !app.isPackaged;
 const fallbackRendererHtml = `<!doctype html><html><head><meta charset="utf-8"><title>Devcord Installer</title></head><body style="background:#0b1020;color:#dbe7ff;font-family:Segoe UI,Arial,sans-serif;padding:24px"><h2>Bootstrapper renderer failed to load</h2><p>Check bootstrapper-main.log for details.</p></body></html>`;
+
+// Transparent windows start faster without GPU composition warm-up.
+app.disableHardwareAcceleration();
+app.commandLine.appendSwitch('disable-software-rasterizer');
+app.commandLine.appendSwitch('disable-gpu');
+app.commandLine.appendSwitch('disable-gpu-compositing');
+app.commandLine.appendSwitch('disable-features', 'VizDisplayCompositor');
 
 type InstallState =
   | 'idle'
@@ -218,6 +224,24 @@ function setupGlobalDiagnostics() {
 function sendStatus(payload: InstallEvent) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('bootstrapper:status', payload);
+    mainWindow.webContents.send('install-progress', {
+      progress: payload.progress ?? 0,
+      status: payload.message,
+      state: payload.state,
+      detail: payload.detail,
+    });
+  }
+}
+
+function sendInstallError(message: string) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('install-error', message);
+  }
+}
+
+function sendInstallComplete() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('install-complete');
   }
 }
 
@@ -227,10 +251,11 @@ function createWindow() {
   logMain('createWindow paths', { preloadPath, iconPath, appPath: app.getAppPath(), resourcesPath: process.resourcesPath });
   const win = new BrowserWindow({
     title: 'Devcord Installer',
-    width: 900,
-    height: 600,
+    width: 850,
+    height: 550,
     frame: false,
     transparent: true,
+    hasShadow: false,
     resizable: false,
     maximizable: false,
     minimizable: true,
@@ -357,35 +382,53 @@ async function verifySha512(filePath: string, expectedBase64: string | undefined
   }
 }
 
-async function extract7z(archivePath: string, destination: string) {
-  await ensureDir(destination);
-  sendStatus({ state: 'extracting', message: 'Wypakowywanie plików...', progress: 0.78 });
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(path7za, ['x', archivePath, `-o${destination}`, '-y'], {
-      stdio: ['ignore', 'pipe', 'pipe'],
+function escapePowerShellPath(value: string) {
+  return value.replace(/'/g, "''");
+}
+
+async function extractArchiveZip(archivePath: string, destination: string) {
+  const attempts = 3;
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    await ensureDir(destination);
+    sendStatus({
+      state: 'extracting',
+      message: attempt > 1 ? `Ponawianie rozpakowywania (${attempt}/${attempts})...` : 'Wypakowywanie plików...',
+      progress: 0.78,
     });
-    const onChunk = (chunk: Buffer) => {
-      const text = chunk.toString('utf8');
-      const matches = text.match(/(\d{1,3})%/g);
-      if (!matches?.length) return;
-      const last = Number(matches[matches.length - 1].replace('%', ''));
-      if (!Number.isFinite(last)) return;
-      const normalized = Math.max(0, Math.min(100, last)) / 100;
-      const mapped = 0.78 + normalized * 0.16;
+    const startedAt = Date.now();
+    const heartbeat = setInterval(() => {
       sendStatus({
         state: 'extracting',
-        message: 'Wypakowywanie plików...',
-        progress: Math.max(0.78, Math.min(0.94, mapped)),
+        message: attempt > 1 ? `Ponawianie rozpakowywania (${attempt}/${attempts})...` : 'Rozpakowywanie archiwum... to moze potrwac chwile.',
+        progress: 0.78,
       });
-    };
-    child.stdout.on('data', onChunk);
-    child.stderr.on('data', onChunk);
-    child.on('error', reject);
-    child.on('close', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`7z extraction failed with code ${code}`));
-    });
-  });
+    }, 2000);
+    try {
+      const archiveArg = escapePowerShellPath(archivePath);
+      const destinationArg = escapePowerShellPath(destination);
+      execSync(
+        `powershell.exe -NoP -NonI -ExecutionPolicy Bypass -Command "Expand-Archive -Path '${archiveArg}' -DestinationPath '${destinationArg}' -Force"`,
+        { stdio: 'ignore' },
+      );
+      sendStatus({ state: 'extracting', message: 'Wypakowywanie plików...', progress: 0.94 });
+      return;
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      logMain('extract-zip failed', { archivePath, destination, message, elapsedMs: Date.now() - startedAt, attempt });
+      if (attempt < attempts) {
+        killDevcordProcesses();
+        await removeDirContentsWithRetry(destination);
+        await new Promise((resolve) => setTimeout(resolve, 600));
+      }
+    } finally {
+      clearInterval(heartbeat);
+    }
+  }
+  const finalMessage = lastError instanceof Error ? lastError.message : String(lastError ?? 'Unknown extract error');
+  sendInstallError(`Rozpakowywanie nie powiodlo sie: ${finalMessage}`);
+  throw new Error(`extract-zip failed: ${finalMessage}`);
 }
 
 async function findMainExe(rootDir: string): Promise<string> {
@@ -474,14 +517,17 @@ async function detectInstallation(installRootOverride?: string): Promise<Install
 }
 
 async function uninstallInstallation(installRootOverride?: string) {
-  killProcess('Devcord.exe');
+  killDevcordProcesses();
   const installRoot = installRootOverride?.trim() || defaultInstallRootPath();
-  await fsp.rm(installRoot, { recursive: true, force: true });
+  const appDir = path.join(installRoot, 'app');
+  await fsp.rm(appDir, { recursive: true, force: true });
   const { desktop, startMenu } = getShortcutPaths();
   await Promise.all([
     fsp.rm(desktop, { force: true }),
     fsp.rm(startMenu, { force: true }),
   ]);
+  // Try removing root only if empty; avoid deleting running installer file.
+  await fsp.rmdir(installRoot).catch(() => undefined);
 }
 
 function killProcess(imageName: string) {
@@ -493,6 +539,29 @@ function killProcess(imageName: string) {
     // Process may already be closed; keep uninstall/repair flow running.
     logMain('process kill skipped', { imageName, reason: formatErr(error) });
   }
+}
+
+function killDevcordProcesses() {
+  killProcess('Devcord.exe');
+  killProcess('Devcord Helper.exe');
+}
+
+async function removeDirContentsWithRetry(dirPath: string, attempts = 6) {
+  let lastError: unknown = null;
+  for (let i = 1; i <= attempts; i += 1) {
+    try {
+      await removeDirContents(dirPath);
+      return;
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      const isRetryable = /EBUSY|EPERM|ENOTEMPTY/i.test(message);
+      if (!isRetryable || i === attempts) break;
+      logMain('removeDirContents retry', { dirPath, attempt: i, message });
+      await new Promise((resolve) => setTimeout(resolve, i * 350));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(`Failed cleaning directory: ${dirPath}`);
 }
 
 async function runPipeline(installRootOverride?: string, cleanInstallRoot = false) {
@@ -513,9 +582,9 @@ async function runPipeline(installRootOverride?: string, cleanInstallRoot = fals
 
   try {
     if (cleanInstallRoot) {
-      killProcess('Devcord.exe');
+      killDevcordProcesses();
       sendStatus({ state: 'checking', message: 'Czyszczenie poprzedniej instalacji...', progress: 0.02 });
-      await removeDirContents(installRoot);
+      await removeDirContentsWithRetry(appDir);
     }
     sendStatus({ state: 'checking', message: 'Sprawdzanie najnowszej wersji...' });
     sendStatus({ state: 'checking', message: 'Sprawdzanie najnowszej wersji...', progress: 0.04 });
@@ -531,11 +600,12 @@ async function runPipeline(installRootOverride?: string, cleanInstallRoot = fals
     await verifySha512(tempArchive, archive.sha512);
 
     sendStatus({ state: 'extracting', message: 'Instalowanie plików aplikacji...', progress: 0.78 });
-    await removeDirContents(appDir);
+    killDevcordProcesses();
+    await removeDirContentsWithRetry(appDir);
     try {
-      await extract7z(tempArchive, appDir);
+      await extractArchiveZip(tempArchive, appDir);
     } catch (e) {
-      await removeDirContents(appDir);
+      await removeDirContentsWithRetry(appDir);
       throw e;
     }
 
@@ -547,6 +617,7 @@ async function runPipeline(installRootOverride?: string, cleanInstallRoot = fals
     const launchErr = await shell.openPath(mainExe);
     if (launchErr) throw new Error(`Devcord launch failed: ${launchErr}`);
     sendStatus({ state: 'done', message: 'Instalacja zakończona.', progress: 1 });
+    sendInstallComplete();
     setTimeout(() => app.quit(), 1200);
   } finally {
     await fsp.rm(lockFile, { force: true }).catch(() => undefined);
@@ -564,6 +635,14 @@ function setupIpc() {
     const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : BrowserWindow.getFocusedWindow();
     win?.close();
     return { ok: true as const };
+  });
+
+  ipcMain.handle('bootstrapper:open-log', async () => {
+    const logPath = ensureMainLogPath();
+    if (!logPath) return { ok: false as const, error: 'Log file is unavailable' };
+    const openErr = await shell.openPath(logPath);
+    if (openErr) return { ok: false as const, error: openErr };
+    return { ok: true as const, path: logPath };
   });
 
   ipcMain.handle('bootstrapper:get-installation-state', async (_event, payload?: { installRoot?: string }) => {

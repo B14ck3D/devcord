@@ -25,7 +25,10 @@ interface Window {
   devcordDesktop?: {
     isElectron: boolean;
     listScreenSources: () => Promise<DevcordDesktopSourceInfo[]>;
+    getDesktopSources: () => Promise<DevcordDesktopSourceInfo[]>;
     getAppVersion: () => Promise<string>;
+    checkForUpdatesNow: () => Promise<{ ok: boolean; reason?: string; message?: string }>;
+    installUpdateNow: () => Promise<{ ok: boolean; reason?: string; message?: string }>;
     onShortcutAction: (
       listener: (payload: { action: DevcordShortcutAction }) => void,
     ) => () => void;

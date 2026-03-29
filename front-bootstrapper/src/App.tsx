@@ -1,108 +1,103 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowDownToLine, CheckCircle2, LoaderCircle, Minimize2, Play, TriangleAlert, X } from 'lucide-react';
+import {
+  Terminal,
+  Minus,
+  X,
+  Download,
+  Folder,
+  CheckCircle2,
+  MonitorPlay,
+  Settings,
+  Bot,
+  AlertTriangle,
+  RotateCcw,
+  FileText,
+} from 'lucide-react';
 
-import logo from '/devcordlogo.png';
-import InstallerSplash from './InstallerSplash';
-
-const phaseLabel: Record<InstallState, string> = {
-  idle: 'Gotowe do instalacji',
-  checking: 'Sprawdzanie najnowszej wersji',
-  downloading: 'Pobieranie paczki aplikacji',
-  extracting: 'Wypakowywanie plików',
-  creating_shortcuts: 'Tworzenie skrótów',
-  launching: 'Uruchamianie aplikacji',
-  done: 'Instalacja zakończona',
-  error: 'Błąd instalacji',
-};
+const INSTALL_FALLBACK_PATH = 'C:\\Users\\Nazwa\\AppData\\Local\\Devcord';
 
 export default function App() {
-  const [status, setStatus] = useState<InstallEvent>({
-    state: 'idle',
-    message: 'Installer pobierze i przygotuje najnowszą wersję Devcord.',
-    progress: 0,
-  });
-  const [busy, setBusy] = useState(false);
+  const [step, setStep] = useState<0 | 1 | 2>(0);
+  const [progress, setProgress] = useState(0);
+  const [statusText, setStatusText] = useState('Przygotowywanie środowiska...');
   const [showIntro, setShowIntro] = useState(true);
-  const [isStarted, setIsStarted] = useState(false);
-  const [installRoot, setInstallRoot] = useState<string>('');
-  const [isInstalled, setIsInstalled] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [showExitModal, setShowExitModal] = useState(false);
+  const [installRoot, setInstallRoot] = useState('');
   const [checkingInstall, setCheckingInstall] = useState(true);
+  const [busy, setBusy] = useState(false);
   const installStartedRef = useRef(false);
+
+  useEffect(() => {
+    if (!showIntro) return;
+    const timer = setTimeout(() => setShowIntro(false), 2500);
+    return () => clearTimeout(timer);
+  }, [showIntro]);
 
   useEffect(() => {
     if (!window.bootstrapper?.onStatus) return;
     return window.bootstrapper.onStatus((ev) => {
-      setStatus(ev);
-      if (ev.state === 'done' || ev.state === 'error') {
+      setStatusText(ev.message);
+      if (typeof ev.progress === 'number') setProgress(Math.max(0, Math.min(100, Math.round(ev.progress * 100))));
+      if (ev.state === 'done') {
         setBusy(false);
-        if (ev.state === 'error') installStartedRef.current = false;
+        setErrorMsg(null);
+        setStep(2);
+      } else if (ev.state === 'error') {
+        setBusy(false);
+        installStartedRef.current = false;
+        setErrorMsg(ev.detail || ev.message || 'Nieznany błąd instalacji.');
+        setStep(1);
+      } else if (ev.state !== 'idle') {
+        setStep(1);
       }
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!window.bootstrapper?.onInstallError) return;
+    return window.bootstrapper.onInstallError((message) => {
+      setBusy(false);
+      installStartedRef.current = false;
+      setErrorMsg(message || 'Nieznany błąd wypakowywania');
+      setStep(1);
     });
   }, []);
 
   const refreshInstallState = async (nextRoot?: string) => {
     if (!window.bootstrapper?.getInstallationState) return;
     setCheckingInstall(true);
-    const resolvedRoot = nextRoot ?? installRoot;
-    const state = await window.bootstrapper.getInstallationState({ installRoot: resolvedRoot || undefined });
+    const state = await window.bootstrapper.getInstallationState({ installRoot: nextRoot || undefined });
     setInstallRoot(state.installRoot);
-    setIsInstalled(state.installed);
     setCheckingInstall(false);
   };
 
   useEffect(() => {
     void refreshInstallState();
-    // one-time startup probe
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const startInstall = async (cleanInstallRoot = false) => {
     if (!window.bootstrapper?.startInstall || busy || installStartedRef.current) return;
     installStartedRef.current = true;
-    setIsStarted(true);
     setBusy(true);
-    setStatus({ state: 'checking', message: 'Start instalacji...', progress: 0 });
-    const payload = installRoot.trim() ? { installRoot: installRoot.trim() } : undefined;
-    const res = await window.bootstrapper.startInstall({
-      ...payload,
-      cleanInstallRoot,
-    });
+    setErrorMsg(null);
+    setStep(1);
+    setProgress(0);
+    const payload = installRoot.trim() ? { installRoot: installRoot.trim(), cleanInstallRoot } : { cleanInstallRoot };
+    const res = await window.bootstrapper.startInstall(payload);
     if (!res.ok) {
-      setStatus({
-        state: 'error',
-        message: 'Instalator napotkał błąd.',
-        detail: res.error,
-      });
       setBusy(false);
       installStartedRef.current = false;
+      setErrorMsg(res.error || 'Nieznany błąd instalacji.');
     }
   };
 
-  const repairInstall = async () => {
-    await startInstall(true);
+  const handleInstall = () => {
+    void startInstall(false);
   };
 
-  const uninstallInstall = async () => {
-    if (!window.bootstrapper?.uninstall || busy) return;
-    setBusy(true);
-    const res = await window.bootstrapper.uninstall({ installRoot: installRoot.trim() || undefined });
-    setBusy(false);
-    if (!res.ok) {
-      setStatus({
-        state: 'error',
-        message: 'Odinstalowanie nie powiodło się.',
-        detail: res.error,
-      });
-      return;
-    }
-    setStatus({
-      state: 'idle',
-      message: 'Devcord został odinstalowany. Możesz zainstalować ponownie.',
-      progress: 0,
-    });
-    setIsStarted(false);
-    installStartedRef.current = false;
-    await refreshInstallState();
+  const handleRetry = () => {
+    void startInstall(true);
   };
 
   const pickInstallDir = async () => {
@@ -114,99 +109,141 @@ export default function App() {
     }
   };
 
-  const closeWindow = async () => {
+  const openLogs = async () => {
+    await window.bootstrapper?.openLogFile?.();
+  };
+
+  const handleClose = async () => {
+    if (step === 1 && !errorMsg) {
+      setShowExitModal(true);
+      return;
+    }
     await window.electronAPI?.closeWindow?.();
   };
 
-  const minimizeWindow = async () => {
-    await window.electronAPI?.minimizeWindow?.();
+  const confirmExit = async () => {
+    setShowExitModal(false);
+    await window.electronAPI?.closeWindow?.();
   };
 
-  const isError = status.state === 'error';
-  const isDone = status.state === 'done';
-  const progress = Math.max(0, Math.min(1, status.progress ?? (isDone ? 1 : 0)));
-
-  if (showIntro) {
-    return (
-      <div className="installer-root intro-only">
-        <InstallerSplash autoplay onSequenceComplete={() => setShowIntro(false)} />
-      </div>
-    );
-  }
+  const cancelExit = () => setShowExitModal(false);
 
   return (
-    <div className="installer-root">
-      <header className="titlebar">
-        <div className="titlebar-left">
-          <img src={logo} alt="Devcord" className="titlebar-logo" />
-          <span>Devcord Installer</span>
-        </div>
-        <div className="titlebar-actions">
-          <button type="button" className="titlebar-btn no-drag" onClick={minimizeWindow} aria-label="Minimalizuj">
-            <Minimize2 size={14} />
-          </button>
-          <button type="button" className="titlebar-btn no-drag danger" onClick={closeWindow} aria-label="Zamknij">
-            <X size={14} />
-          </button>
-        </div>
-      </header>
-
-      <main className="panel">
-        <section className="phase">
-          <h2>{phaseLabel[status.state]}</h2>
-          <p>{status.message}</p>
-          {status.detail ? <p className="detail">{status.detail}</p> : null}
-        </section>
-
-        <section className="progress-wrap">
-          <div className="progress-line">
-            <div className="progress-value" style={{ width: `${Math.round(progress * 100)}%` }} />
+    <div className="bootstrapper-shell">
+      <div className="bootstrapper-window">
+        {showIntro ? (
+          <div className="intro-overlay">
+            <div className="intro-bot-wrap">
+              <Bot size={140} className="intro-bot" />
+            </div>
           </div>
-          <span className="progress-text">{Math.round(progress * 100)}%</span>
-        </section>
+        ) : null}
 
-        <footer className="actions">
-          {!isDone ? (
-            <>
-              {isInstalled ? (
+        {showExitModal ? (
+          <div className="exit-modal-overlay">
+            <div className="exit-modal-card">
+              <div className="exit-modal-head">
+                <AlertTriangle size={24} />
+                <h3>Przerwać instalację?</h3>
+              </div>
+              <p>Devcord jest w trakcie instalacji. Przerwanie procesu może pozostawić niekompletne pliki na dysku.</p>
+              <div className="exit-modal-actions" style={{ WebkitAppRegion: 'no-drag' as const }}>
+                <button onClick={cancelExit} className="secondary-btn">Kontynuuj</button>
+                <button onClick={() => void confirmExit()} className="danger-btn">Tak, przerwij</button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        <header className="bootstrapper-titlebar" style={{ WebkitAppRegion: 'drag' as const }}>
+          <div className="titlebar-left">
+            <div className="titlebar-icon-box">
+              <Terminal size={14} />
+            </div>
+            <span>DEVCORD INSTALLER</span>
+          </div>
+          <div className="titlebar-actions" style={{ WebkitAppRegion: 'no-drag' as const }}>
+            <button onClick={() => void window.electronAPI?.minimizeWindow?.()}>
+              <Minus size={16} />
+            </button>
+            <button onClick={() => void handleClose()} className="close-btn">
+              <X size={16} />
+            </button>
+          </div>
+        </header>
+
+        <main className="bootstrapper-content">
+          {step === 0 ? (
+            <section className="step-welcome">
+              <h1>
+                GOTOWE DO <br /> <span>INSTALACJI</span>
+              </h1>
+              <p>Pobierzemy najnowszą wersję i skonfigurujemy środowisko Devcord na Twoim komputerze.</p>
+              <div className="path-card">
+                <label><Settings size={12} /> Ścieżka instalacji</label>
+                <div className="path-row">
+                  <div className="path-icon"><Folder size={18} /></div>
+                  <input type="text" readOnly value={installRoot || INSTALL_FALLBACK_PATH} />
+                  <button onClick={() => void pickInstallDir()} disabled={busy || checkingInstall}>Zmień</button>
+                </div>
+              </div>
+              <div className="welcome-actions">
+                <button onClick={handleInstall} disabled={busy || checkingInstall} className="primary-btn">
+                  <Download size={18} />
+                  Zainstaluj Devcord
+                </button>
+              </div>
+            </section>
+          ) : null}
+
+          {step === 1 ? (
+            <section className="step-installing">
+              {!errorMsg ? (
                 <>
-                  <button type="button" onClick={repairInstall} disabled={busy || checkingInstall} className={`btn ${isError ? 'btn-retry' : ''}`}>
-                    {busy ? <LoaderCircle size={18} className="spin" /> : <ArrowDownToLine size={18} />}
-                    {busy ? 'Naprawianie...' : 'Napraw instalację'}
-                  </button>
-                  <button type="button" onClick={uninstallInstall} disabled={busy || checkingInstall} className="btn btn-retry">
-                    {busy ? <LoaderCircle size={18} className="spin" /> : <TriangleAlert size={18} />}
-                    {busy ? 'Odinstalowywanie...' : 'Odinstaluj'}
-                  </button>
+                  <div className="install-icon"><Download size={40} /></div>
+                  <h2>TRWA INSTALACJA</h2>
+                  <p>{statusText}</p>
+                  <div className="progress-wrap">
+                    <div className="progress-value" style={{ width: `${progress}%` }} />
+                  </div>
+                  <div className="progress-numbers">
+                    <span>0%</span><strong>{progress}%</strong><span>100%</span>
+                  </div>
                 </>
               ) : (
-                <button type="button" onClick={() => startInstall(false)} disabled={busy || checkingInstall} className={`btn ${isError ? 'btn-retry' : ''}`}>
-                  {busy ? <LoaderCircle size={18} className="spin" /> : isError ? <TriangleAlert size={18} /> : <ArrowDownToLine size={18} />}
-                  {busy ? 'Instalowanie...' : isError ? 'Spróbuj ponownie' : 'Zainstaluj Devcord'}
-                </button>
+                <div className="error-stage">
+                  <div className="error-icon"><AlertTriangle size={56} /></div>
+                  <h2>BŁĄD INSTALACJI</h2>
+                  <p>Wystąpił problem podczas wypakowywania plików. Upewnij się, że Devcord jest zamknięty.</p>
+                  <div className="error-log-box">
+                    <div className="error-log-title"><Terminal size={10} /> LOG BŁĘDU:</div>
+                    <div className="error-log-text">{errorMsg}</div>
+                  </div>
+                  <div className="error-actions" style={{ WebkitAppRegion: 'no-drag' as const }}>
+                    <button onClick={handleRetry} className="secondary-btn"><RotateCcw size={16} /> Spróbuj ponownie</button>
+                    <button onClick={() => void openLogs()} className="danger-btn"><FileText size={16} /> Pokaż logi</button>
+                  </div>
+                </div>
               )}
-              <button type="button" onClick={pickInstallDir} disabled={busy || isStarted} className="btn">
-                Wybierz folder instalacji
-              </button>
-              <div className="hint">
-                <span>{installRoot ? `Folder: ${installRoot}` : 'Folder domyślny: %LOCALAPPDATA%/Devcord'}</span>
+            </section>
+          ) : null}
+
+          {step === 2 ? (
+            <section className="step-done">
+              <div className="done-icon"><CheckCircle2 size={48} /></div>
+              <h2>INSTALACJA ZAKOŃCZONA</h2>
+              <p>Devcord został pomyślnie zainstalowany i skonfigurowany. Możesz zamknąć instalator i rozpocząć pracę.</p>
+              <div className="done-actions">
+                <button onClick={() => void handleClose()} className="secondary-btn">Zakończ</button>
+                <button onClick={() => void handleClose()} className="primary-btn light-btn">
+                  <MonitorPlay size={18} />
+                  Otwórz Devcord
+                </button>
               </div>
-              <div className="hint">
-                <span>{checkingInstall ? 'Sprawdzanie instalacji...' : isInstalled ? 'Devcord jest już zainstalowany.' : 'Devcord nie jest jeszcze zainstalowany.'}</span>
-              </div>
-            </>
-          ) : (
-            <div className="done-wrap">
-              <CheckCircle2 size={19} />
-              <span>Gotowe — aplikacja uruchamia się automatycznie.</span>
-            </div>
-          )}
-          <div className="hint">
-            <Play size={14} />
-            <span>{isStarted ? 'Instalacja uruchomiona przez użytkownika.' : 'Kliknij przycisk, aby rozpocząć instalację.'}</span>
-          </div>
-        </footer>
-      </main>
+            </section>
+          ) : null}
+        </main>
+      </div>
     </div>
   );
 }

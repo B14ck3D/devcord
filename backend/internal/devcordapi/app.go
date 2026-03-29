@@ -74,8 +74,10 @@ func (a *App) Router() http.Handler {
 
 	r.Route("/api", func(r chi.Router) {
 		r.Post("/voice/livekit-webhook", a.handleLiveKitWebhook)
+		r.Get("/updates", a.handleUpdatesRoot)
 		r.Get("/updates/latest", a.handleUpdatesLatest)
 		r.Get("/updates/latest.yml", a.handleUpdatesLatestYml)
+		r.Get("/updates/{artifact}", a.handleUpdatesArtifact)
 		r.Post("/auth/register", a.handleRegister)
 		r.Post("/auth/verify", a.handleVerify)
 		r.Post("/auth/login", a.handleLogin)

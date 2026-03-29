@@ -1,5 +1,5 @@
 import { Suspense, lazy } from 'react';
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, HashRouter, Navigate, Route, Routes } from 'react-router-dom';
 import LandingPage from '../landing/LandingPage';
 
 const DevcordApp = lazy(() => import('./DevcordApp'));
@@ -15,18 +15,23 @@ function LoadingScreen() {
 }
 
 export function AppRouter() {
+  const useHashRouter = typeof window !== 'undefined' && window.location.protocol === 'file:';
+  const Router = useHashRouter ? HashRouter : BrowserRouter;
+  const rootElement = useHashRouter ? <Navigate to="/app" replace /> : <LandingPage />;
+  const fallbackElement = useHashRouter ? <Navigate to="/app" replace /> : <Navigate to="/" replace />;
+
   return (
-    <BrowserRouter>
+    <Router>
       <Suspense fallback={<LoadingScreen />}>
         <Routes>
-          <Route path="/" element={<LandingPage />} />
+          <Route path="/" element={rootElement} />
           <Route path="/app/*" element={<DevcordApp />} />
           <Route path="/channels/*" element={<Navigate to="/app/channels" replace />} />
           <Route path="/join/:code" element={<Navigate to="/app" replace />} />
           <Route path="/invite/:code" element={<Navigate to="/app" replace />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
+          <Route path="*" element={fallbackElement} />
         </Routes>
       </Suspense>
-    </BrowserRouter>
+    </Router>
   );
 }

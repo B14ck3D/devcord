@@ -21,6 +21,9 @@ interface Window {
   electronAPI?: {
     minimizeWindow: () => Promise<{ ok: boolean }>;
     closeWindow: () => Promise<{ ok: boolean }>;
+    onInstallProgress: (listener: (data: { progress: number; status: string; state?: InstallState; detail?: string }) => void) => () => void;
+    onInstallError: (listener: (err: string) => void) => () => void;
+    onInstallComplete: (listener: () => void) => () => void;
   };
   bootstrapper?: {
     startInstall: (payload?: { installRoot?: string; cleanInstallRoot?: boolean }) => Promise<{ ok: boolean; error?: string }>;
@@ -33,6 +36,10 @@ interface Window {
     }>;
     uninstall: (payload?: { installRoot?: string }) => Promise<{ ok: boolean; error?: string }>;
     onStatus: (listener: (event: InstallEvent) => void) => () => void;
+    onInstallProgress: (listener: (data: { progress: number; status: string; state?: InstallState; detail?: string }) => void) => () => void;
+    onInstallError: (listener: (payload: string) => void) => () => void;
+    onInstallComplete: (listener: () => void) => () => void;
+    openLogFile: () => Promise<{ ok: boolean; error?: string; path?: string }>;
   };
 }
 

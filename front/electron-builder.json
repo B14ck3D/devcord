@@ -5,7 +5,7 @@
     "output": "release"
   },
   "files": [
-    "dist/**/*",
+    "dist-desktop/**/*",
     "dist-electron/**/*",
     "package.json"
   ],

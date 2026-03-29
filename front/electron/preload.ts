@@ -14,7 +14,13 @@ contextBridge.exposeInMainWorld('devcordDesktop', {
   isElectron: true,
   listScreenSources: () =>
     ipcRenderer.invoke('devcord:desktop-capturer:list-sources') as Promise<DesktopSourceInfo[]>,
+  getDesktopSources: () =>
+    ipcRenderer.invoke('devcord:get-desktop-sources') as Promise<DesktopSourceInfo[]>,
   getAppVersion: () => ipcRenderer.invoke('devcord:app-version') as Promise<string>,
+  checkForUpdatesNow: () =>
+    ipcRenderer.invoke('devcord:updater-check-now') as Promise<{ ok: boolean; reason?: string; message?: string }>,
+  installUpdateNow: () =>
+    ipcRenderer.invoke('devcord:updater-install-now') as Promise<{ ok: boolean; reason?: string; message?: string }>,
   onShortcutAction: (listener: (payload: { action: ShortcutAction }) => void) => {
     const wrapped = (_event: unknown, payload: { action: ShortcutAction }) => listener(payload);
     ipcRenderer.on('devcord:shortcut-action', wrapped);
