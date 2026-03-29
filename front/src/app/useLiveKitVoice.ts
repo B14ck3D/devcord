@@ -196,7 +196,8 @@ export function useLiveKitVoice(opts: {
       p.audioTrackPublications.forEach((pub) => {
         if (pub.track && !pub.isMuted) micMuted = false;
       });
-      st[p.identity] = { muted: micMuted, deafened: false };
+      const attrs = (p as unknown as { attributes?: Record<string, string> }).attributes ?? {};
+      st[p.identity] = { muted: micMuted, deafened: attrs.deafened === 'true' };
     });
     setRemoteVoiceState(st);
   }, []);
@@ -291,8 +292,16 @@ export function useLiveKitVoice(opts: {
     if (room) {
       for (const pub of room.localParticipant.trackPublications.values()) {
         const tr = pub.track;
-        if (tr?.kind === Track.Kind.Audio && pub.source === Track.Source.Microphone) {
+        if (!tr) continue;
+        try {
           await room.localParticipant.unpublishTrack(tr);
+        } catch {
+          /* ignore */
+        }
+        try {
+          tr.mediaStreamTrack.stop();
+        } catch {
+          /* ignore */
         }
       }
       room.removeAllListeners();
@@ -505,6 +514,9 @@ export function useLiveKitVoice(opts: {
         room.on(RoomEvent.TrackUnmuted, () => {
           scheduleRoomUiSync(room);
         });
+        room.on(RoomEvent.ParticipantAttributesChanged, () => {
+          scheduleRoomUiSync(room);
+        });
         room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
           const srv: Record<string, boolean> = {};
           room.remoteParticipants.forEach((p) => {
@@ -620,6 +632,14 @@ export function useLiveKitVoice(opts: {
     // Avoid spawning an unmanaged fallback track outside our mono/RNNoise pipeline.
     logVoice('warn', 'skip setMicrophoneEnabled fallback: local mic pipeline track missing');
   }, [localMuted, phase, micDeviceId]);
+
+  useEffect(() => {
+    const room = roomRef.current;
+    if (!room || phase !== 'connected') return;
+    void room.localParticipant
+      .setAttributes({ deafened: localDeafened ? 'true' : 'false' })
+      .catch((e) => logVoice('warn', 'setAttributes(deafened) failed', e));
+  }, [localDeafened, phase]);
 
   useEffect(() => {
     if (localDeafened && !localMuted) setLocalMuted(true);

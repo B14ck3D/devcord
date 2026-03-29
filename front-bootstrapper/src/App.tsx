@@ -26,7 +26,20 @@ export default function App() {
   const [installRoot, setInstallRoot] = useState('');
   const [checkingInstall, setCheckingInstall] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [isUpdateMode, setIsUpdateMode] = useState(false);
   const installStartedRef = useRef(false);
+
+  const activateUpdateModeUi = () => {
+    setIsUpdateMode(true);
+    setShowIntro(false);
+    setCheckingInstall(false);
+    setBusy(true);
+    installStartedRef.current = true;
+    setErrorMsg(null);
+    setStatusText('Przygotowywanie aktualizacji...');
+    setProgress(0);
+    setStep(1);
+  };
 
   useEffect(() => {
     if (!showIntro) return;
@@ -62,6 +75,26 @@ export default function App() {
       setErrorMsg(message || 'Nieznany błąd wypakowywania');
       setStep(1);
     });
+  }, []);
+
+  useEffect(() => {
+    if (!window.bootstrapper?.onUpdateMode) return;
+    return window.bootstrapper.onUpdateMode(() => {
+      activateUpdateModeUi();
+    });
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    if (!window.bootstrapper?.isUpdateMode) return () => {
+      alive = false;
+    };
+    void window.bootstrapper.isUpdateMode().then((enabled) => {
+      if (alive && enabled) activateUpdateModeUi();
+    }).catch(() => undefined);
+    return () => {
+      alive = false;
+    };
   }, []);
 
   const refreshInstallState = async (nextRoot?: string) => {
@@ -201,7 +234,7 @@ export default function App() {
               {!errorMsg ? (
                 <>
                   <div className="install-icon"><Download size={40} /></div>
-                  <h2>TRWA INSTALACJA</h2>
+                  <h2>{isUpdateMode ? 'TRWA AKTUALIZACJA' : 'TRWA INSTALACJA'}</h2>
                   <p>{statusText}</p>
                   <div className="progress-wrap">
                     <div className="progress-value" style={{ width: `${progress}%` }} />
@@ -231,8 +264,12 @@ export default function App() {
           {step === 2 ? (
             <section className="step-done">
               <div className="done-icon"><CheckCircle2 size={48} /></div>
-              <h2>INSTALACJA ZAKOŃCZONA</h2>
-              <p>Devcord został pomyślnie zainstalowany i skonfigurowany. Możesz zamknąć instalator i rozpocząć pracę.</p>
+              <h2>{isUpdateMode ? 'AKTUALIZACJA ZAKOŃCZONA' : 'INSTALACJA ZAKOŃCZONA'}</h2>
+              <p>
+                {isUpdateMode
+                  ? 'Devcord został pomyślnie zaktualizowany. Możesz zamknąć updater.'
+                  : 'Devcord został pomyślnie zainstalowany i skonfigurowany. Możesz zamknąć instalator i rozpocząć pracę.'}
+              </p>
               <div className="done-actions">
                 <button onClick={() => void handleClose()} className="secondary-btn">Zakończ</button>
                 <button onClick={() => void handleClose()} className="primary-btn light-btn">

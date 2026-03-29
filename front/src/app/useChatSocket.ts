@@ -107,6 +107,7 @@ export function useChatSocket(opts: {
   const onDmCallStateRef = useRef(onDmCallState);
   const onVoiceInitialStateRef = useRef(onVoiceInitialState);
   const onVoiceRoomStateRef = useRef(onVoiceRoomState);
+  const typingSendRef = useRef<{ key: string; typing: boolean; ts: number } | null>(null);
   onMessageRef.current = onMessage;
   onTypingRef.current = onTyping;
   onUserUpdatedRef.current = onUserUpdated;
@@ -118,13 +119,21 @@ export function useChatSocket(opts: {
   onVoiceRoomStateRef.current = onVoiceRoomState;
 
   const subscribeOpenChannels = useCallback((ws: WebSocket) => {
+    const safeSend = (payload: unknown) => {
+      try {
+        if (ws.readyState !== WebSocket.OPEN) return;
+        ws.send(JSON.stringify(payload));
+      } catch {
+        /* ignore socket send crash */
+      }
+    };
     const ch = chRef.current;
     if (ch) {
-      ws.send(JSON.stringify({ type: 'subscribe', channel_id: String(ch) }));
+      safeSend({ type: 'subscribe', channel_id: String(ch) });
     }
     const dm = dmRef.current;
     if (dm) {
-      ws.send(JSON.stringify({ type: 'subscribe_dm', conversation_id: String(dm) }));
+      safeSend({ type: 'subscribe_dm', conversation_id: String(dm) });
     }
   }, []);
 
@@ -257,7 +266,11 @@ export function useChatSocket(opts: {
     chRef.current = channelId;
     const ws = wsRef.current;
     if (ws?.readyState === WebSocket.OPEN && channelId) {
-      ws.send(JSON.stringify({ type: 'subscribe', channel_id: String(channelId) }));
+      try {
+        ws.send(JSON.stringify({ type: 'subscribe', channel_id: String(channelId) }));
+      } catch {
+        /* ignore socket send crash */
+      }
     }
   }, [channelId]);
 
@@ -265,7 +278,11 @@ export function useChatSocket(opts: {
     dmRef.current = dmConversationId;
     const ws = wsRef.current;
     if (ws?.readyState === WebSocket.OPEN && dmConversationId) {
-      ws.send(JSON.stringify({ type: 'subscribe_dm', conversation_id: String(dmConversationId) }));
+      try {
+        ws.send(JSON.stringify({ type: 'subscribe_dm', conversation_id: String(dmConversationId) }));
+      } catch {
+        /* ignore socket send crash */
+      }
     }
   }, [dmConversationId]);
 
@@ -273,14 +290,32 @@ export function useChatSocket(opts: {
     const ws = wsRef.current;
     const ch = chRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN || !ch) return;
-    ws.send(JSON.stringify({ type: 'typing', channel_id: String(ch), typing }));
+    const now = Date.now();
+    const prev = typingSendRef.current;
+    const key = `ch:${String(ch)}`;
+    if (prev && prev.key === key && prev.typing === typing && now - prev.ts < 300) return;
+    typingSendRef.current = { key, typing, ts: now };
+    try {
+      ws.send(JSON.stringify({ type: 'typing', channel_id: String(ch), typing }));
+    } catch {
+      /* ignore socket send crash */
+    }
   }, []);
 
   const sendTypingDm = useCallback((typing: boolean) => {
     const ws = wsRef.current;
     const dm = dmRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN || !dm) return;
-    ws.send(JSON.stringify({ type: 'typing_dm', conversation_id: String(dm), typing }));
+    const now = Date.now();
+    const prev = typingSendRef.current;
+    const key = `dm:${String(dm)}`;
+    if (prev && prev.key === key && prev.typing === typing && now - prev.ts < 300) return;
+    typingSendRef.current = { key, typing, ts: now };
+    try {
+      ws.send(JSON.stringify({ type: 'typing_dm', conversation_id: String(dm), typing }));
+    } catch {
+      /* ignore socket send crash */
+    }
   }, []);
 
   return { sendTyping, sendTypingDm };

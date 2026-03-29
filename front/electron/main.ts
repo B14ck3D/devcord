@@ -34,7 +34,10 @@ if (process.platform === 'win32') {
 app.commandLine.appendSwitch('enable-webrtc-hw-encoding');
 app.commandLine.appendSwitch('enable-webrtc-hw-decoding');
 app.commandLine.appendSwitch('force-high-performance-gpu');
-app.commandLine.appendSwitch('enable-features', 'WebRtcHideLocalIpsWithMdns,WebRtcApmInAudioService');
+app.commandLine.appendSwitch(
+  'enable-features',
+  'WebRtcHideLocalIpsWithMdns,WebRtcApmInAudioService,AudioWorkletRealtimeThread',
+);
 app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'default_public_interface_only');
 
 let mainWindow: BrowserWindow | null = null;
@@ -103,36 +106,24 @@ async function downloadFileToPath(url: string, destinationPath: string, redirect
   });
 }
 
-function psQuote(value: string) {
-  return `'${value.replace(/'/g, "''")}'`;
-}
-
-async function runDetachedZipUpdater(updateZipPath: string) {
-  const installDir = path.dirname(app.getPath('exe'));
-  const exePath = app.getPath('exe');
-  const ps1Path = path.join(app.getPath('temp'), 'devcord-updater.ps1');
-  const ps1Content = `
-Start-Sleep -Seconds 3
-try {
-  Expand-Archive -Path ${psQuote(updateZipPath)} -DestinationPath ${psQuote(installDir)} -Force
-} catch {
-  Write-Output "Blad rozpakowywania"
-}
-Start-Process -FilePath ${psQuote(exePath)}
-Remove-Item -Path ${psQuote(ps1Path)} -Force -ErrorAction SilentlyContinue
-Remove-Item -Path ${psQuote(updateZipPath)} -Force -ErrorAction SilentlyContinue
-`;
-
-  await fs.promises.writeFile(ps1Path, ps1Content, 'utf8');
-  const child = spawn(
-    'powershell.exe',
-    ['-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', ps1Path],
-    {
-      detached: true,
-      stdio: 'ignore',
-    },
-  );
-  child.unref();
+function resolveSidecarBinaryPath() {
+  const localAppData = process.env.LOCALAPPDATA?.trim();
+  const candidates: string[] = [];
+  if (localAppData) {
+    candidates.push(path.join(localAppData, 'Devcord', 'Updater', 'DevcordInstaller.exe'));
+    candidates.push(path.join(localAppData, 'Devcord', 'Updater', 'Devcord_Installer.exe'));
+  }
+  if (app.isPackaged) {
+    candidates.push(path.join(process.resourcesPath, 'Updater', 'DevcordInstaller.exe'));
+    candidates.push(path.join(process.resourcesPath, 'Updater', 'Devcord_Installer.exe'));
+  } else {
+    candidates.push(path.join(__dirname, '..', '..', 'front-bootstrapper', 'release', 'DevcordInstaller.exe'));
+    candidates.push(path.join(__dirname, '..', '..', 'front-bootstrapper', 'release', 'Devcord_Installer.exe'));
+  }
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(candidate)) return candidate;
+  }
+  return null;
 }
 
 function configureElectronLog() {
@@ -313,23 +304,46 @@ function setupIpc() {
     if (process.platform !== 'win32') {
       return { ok: false as const, reason: 'unsupported-platform', message: 'Instalacja ZIP updater jest wspierana tylko na Windows.' };
     }
+    if (!downloadedUpdateInfo) {
+      return {
+        ok: false as const,
+        reason: 'not-downloaded',
+        message: 'Brak pobranej aktualizacji. Najpierw wykonaj sprawdzenie aktualizacji.',
+      };
+    }
     try {
       updateInstallInProgress = true;
       broadcast('devcord:updater-status', { state: 'installing' });
       logMain('updater install-now requested');
       const artifactUrl = resolveDownloadedArtifactUrl(downloadedUpdateInfo);
       const updateZipPath = path.join(app.getPath('temp'), 'devcord-update.zip');
-      logMain('updater detached install download start', { artifactUrl, updateZipPath });
+      logMain('updater sidecar install download start', { artifactUrl, updateZipPath });
       await downloadFileToPath(artifactUrl, updateZipPath);
-      logMain('updater detached install download done', { updateZipPath });
-      await runDetachedZipUpdater(updateZipPath);
-      logMain('updater detached updater spawned; quitting app');
+      logMain('updater sidecar install download done', { updateZipPath });
+      const sidecarPath = resolveSidecarBinaryPath();
+      if (!sidecarPath) {
+        throw new Error(
+          'Nie znaleziono sidecar updatera (oczekiwano %LocalAppData%/Devcord/Updater/DevcordInstaller.exe).',
+        );
+      }
+      const child = spawn(
+        sidecarPath,
+        ['--update-mode', `--archive-path=${updateZipPath}`],
+        {
+          detached: true,
+          stdio: 'ignore',
+        },
+      );
+      child.unref();
+      broadcast('devcord:updater-status', { state: 'installing-detached' });
+      logMain('updater sidecar updater spawned; quitting app', { sidecarPath });
       app.quit();
       return { ok: true as const };
     } catch (error) {
       updateInstallInProgress = false;
       const message = error instanceof Error ? error.message : String(error);
       logMain('updater install-now failed', { message });
+      broadcast('devcord:updater-status', { state: 'error', message });
       return { ok: false as const, reason: 'error', message };
     }
   });

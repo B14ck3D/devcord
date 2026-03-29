@@ -48,6 +48,12 @@ contextBridge.exposeInMainWorld('bootstrapper', {
     ipcRenderer.on('install-complete', wrapped);
     return () => ipcRenderer.removeListener('install-complete', wrapped);
   },
+  isUpdateMode: () => ipcRenderer.invoke('bootstrapper:is-update-mode') as Promise<boolean>,
+  onUpdateMode: (listener: () => void) => {
+    const wrapped = () => listener();
+    ipcRenderer.on('set-update-mode', wrapped);
+    return () => ipcRenderer.removeListener('set-update-mode', wrapped);
+  },
   openLogFile: () => ipcRenderer.invoke('bootstrapper:open-log') as Promise<{ ok: boolean; error?: string; path?: string }>,
 });
 

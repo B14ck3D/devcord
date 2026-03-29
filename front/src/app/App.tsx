@@ -582,6 +582,9 @@ export default function App() {
   // Stany Inputu i Czatu
   const [inputValue, setInputValue] = useState('');
   const [isInputFocused, setIsInputFocused] = useState(false);
+  const sendBurstRef = useRef<number[]>([]);
+  const [chatCooldownUntil, setChatCooldownUntil] = useState(0);
+  const [chatCooldownNow, setChatCooldownNow] = useState(() => Date.now());
   const [activeThread, setActiveThread] = useState<ChatRow | null>(null);
   const [threadInputValue, setThreadInputValue] = useState('');
   const [isAILoading, setIsAILoading] = useState(false);
@@ -659,6 +662,7 @@ export default function App() {
   const [screenSourcePickerOpen, setScreenSourcePickerOpen] = useState(false);
   const [screenSourcePickerError, setScreenSourcePickerError] = useState<string | null>(null);
   const [screenSourceCandidates, setScreenSourceCandidates] = useState<DevcordDesktopSourceInfo[]>([]);
+  const [screenShareIncludeSystemAudio, setScreenShareIncludeSystemAudio] = useState(false);
   const screenFallbackStrikeRef = useRef(0);
   const micDeviceId = useSettingsStore((s) => s.micDeviceId);
   const setMicDeviceId = useSettingsStore((s) => s.setMicDeviceId);
@@ -697,6 +701,36 @@ export default function App() {
   const [personalSidebarTab, setPersonalSidebarTab] = useState<'messages' | 'contacts'>('messages');
   const [friendIncoming, setFriendIncoming] = useState<{ id: string; from: UserInfo }[]>([]);
   const [friendOutgoing, setFriendOutgoing] = useState<{ id: string; to: UserInfo }[]>([]);
+
+  const isChatCooldownActive = chatCooldownUntil > chatCooldownNow;
+  const chatCooldownSeconds = isChatCooldownActive
+    ? Math.max(1, Math.ceil((chatCooldownUntil - chatCooldownNow) / 1000))
+    : 0;
+  const chatCooldownMessage = isChatCooldownActive
+    ? `Zbyt wiele wiadomości. Zwolnij. (${chatCooldownSeconds}s)`
+    : '';
+
+  useEffect(() => {
+    if (!isChatCooldownActive) return;
+    const id = window.setInterval(() => setChatCooldownNow(Date.now()), 200);
+    return () => clearInterval(id);
+  }, [isChatCooldownActive]);
+
+  const triggerChatRateLimitIfNeeded = useCallback(() => {
+    const now = Date.now();
+    if (chatCooldownUntil > now) return true;
+    const windowMs = 3000;
+    const maxMessages = 5;
+    sendBurstRef.current = sendBurstRef.current.filter((t) => now - t <= windowMs);
+    sendBurstRef.current.push(now);
+    if (sendBurstRef.current.length > maxMessages) {
+      const cooldownUntil = now + 5000;
+      setChatCooldownUntil(cooldownUntil);
+      setChatCooldownNow(now);
+      return true;
+    }
+    return false;
+  }, [chatCooldownUntil]);
   const [acceptedFriends, setAcceptedFriends] = useState<UserInfo[]>([]);
   const [profileCardNote, setProfileCardNote] = useState('');
   const [userPopout, setUserPopout] = useState<{ user: UserInfo; x: number; y: number } | null>(null);
@@ -2596,6 +2630,8 @@ export default function App() {
       return;
     }
 
+    if (triggerChatRateLimitIfNeeded()) return;
+
     try {
       const tempId = `tmp_${Date.now()}`;
       useChatStore.getState().appendChannelMessage(activeChannel, {
@@ -2700,6 +2736,32 @@ export default function App() {
     if (currentViewType === 'voice') setActiveChannel(currentServerChannels.find(c => c.type === 'text')?.id || currentServerChannels[0]?.id || '');
   };
 
+  useEffect(() => {
+    const hasVoiceSession = !!activeVoiceChannel || dmCallState?.status === 'connected';
+    if (hasVoiceSession) return;
+    if (screenStream) {
+      screenStream.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch {
+          /* ignore */
+        }
+      });
+      setScreenStream(null);
+      setScreenCaptureProfile(null);
+    }
+    if (cameraStream) {
+      cameraStream.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch {
+          /* ignore */
+        }
+      });
+      setCameraStream(null);
+    }
+  }, [activeVoiceChannel, dmCallState?.status, screenStream, cameraStream]);
+
   const forceLogout = useCallback(
     (reason: string = 'unknown') => {
       disconnectVoice();
@@ -2746,6 +2808,7 @@ export default function App() {
       if (!Array.isArray(sources) || sources.length === 0) throw new Error('no capture sources');
       setScreenSourcePickerError(null);
       setScreenSourceCandidates(sources);
+      setScreenShareIncludeSystemAudio(false);
       setScreenSourcePickerOpen(true);
       throw new Error('__picker_opened__');
     };
@@ -2797,18 +2860,20 @@ export default function App() {
   };
 
   const startScreenShareFromDesktopSource = useCallback(
-    async (sourceId: string) => {
+    async (sourceId: string, includeSystemAudio: boolean) => {
       try {
         const profiles: Array<240 | 120 | 60> = [240, 120, 60];
         let chosen: MediaStream | null = null;
         for (const profile of profiles) {
           try {
-            const stream = await navigator.mediaDevices.getUserMedia({
-              audio: {
-                mandatory: {
-                  chromeMediaSource: 'desktop',
-                },
-              } as unknown as MediaTrackConstraints,
+            const constraints: MediaStreamConstraints = {
+              audio: includeSystemAudio
+                ? ({
+                    mandatory: {
+                      chromeMediaSource: 'desktop',
+                    },
+                  } as unknown as MediaTrackConstraints)
+                : false,
               video: {
                 mandatory: {
                   chromeMediaSource: 'desktop',
@@ -2819,7 +2884,10 @@ export default function App() {
                   minHeight: 1080,
                 },
               } as unknown as MediaTrackConstraints,
-            } as MediaStreamConstraints);
+            };
+            const stream = await navigator.mediaDevices.getUserMedia({
+              ...constraints,
+            });
             chosen = stream;
             setScreenCaptureProfile(profile);
             break;
@@ -3117,12 +3185,26 @@ export default function App() {
                 {screenSourcePickerError}
               </div>
             ) : null}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 overflow-y-auto custom-scrollbar pr-1">
-              {screenSourceCandidates.map((src) => (
+            <label className="mb-3 inline-flex items-center gap-2 text-xs text-zinc-300 select-none">
+              <input
+                type="checkbox"
+                checked={screenShareIncludeSystemAudio}
+                onChange={(e) => setScreenShareIncludeSystemAudio(e.target.checked)}
+                className="accent-[#00eeff]"
+              />
+              Udostępnij dźwięk systemu
+            </label>
+            <div className="space-y-4 overflow-y-auto custom-scrollbar pr-1">
+              <div>
+                <h4 className="mb-2 text-[11px] uppercase tracking-[0.15em] text-zinc-400 font-semibold">Ekrany</h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {screenSourceCandidates
+                    .filter((src) => src.id.startsWith('screen:'))
+                    .map((src) => (
                 <button
                   key={src.id}
                   type="button"
-                  onClick={() => void startScreenShareFromDesktopSource(src.id)}
+                  onClick={() => void startScreenShareFromDesktopSource(src.id, screenShareIncludeSystemAudio)}
                   className="text-left border border-white/[0.1] hover:border-[#00eeff]/60 bg-black/30 hover:bg-[#00eeff]/10 rounded-xl p-2 transition-colors"
                 >
                   <div className="aspect-video rounded-lg overflow-hidden border border-white/[0.08] bg-black/50 flex items-center justify-center">
@@ -3135,7 +3217,34 @@ export default function App() {
                   <div className="mt-2 text-xs font-semibold text-zinc-200 truncate">{src.name}</div>
                   <div className="text-[10px] text-zinc-500 truncate">{src.id}</div>
                 </button>
-              ))}
+                  ))}
+                </div>
+              </div>
+              <div>
+                <h4 className="mb-2 text-[11px] uppercase tracking-[0.15em] text-zinc-400 font-semibold">Aplikacje</h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {screenSourceCandidates
+                    .filter((src) => !src.id.startsWith('screen:'))
+                    .map((src) => (
+                      <button
+                        key={src.id}
+                        type="button"
+                        onClick={() => void startScreenShareFromDesktopSource(src.id, screenShareIncludeSystemAudio)}
+                        className="text-left border border-white/[0.1] hover:border-[#00eeff]/60 bg-black/30 hover:bg-[#00eeff]/10 rounded-xl p-2 transition-colors"
+                      >
+                        <div className="aspect-video rounded-lg overflow-hidden border border-white/[0.08] bg-black/50 flex items-center justify-center">
+                          {src.thumbnailDataUrl ? (
+                            <img src={src.thumbnailDataUrl} alt={src.name} className="w-full h-full object-cover" />
+                          ) : (
+                            <Monitor size={22} className="text-zinc-500" />
+                          )}
+                        </div>
+                        <div className="mt-2 text-xs font-semibold text-zinc-200 truncate">{src.name}</div>
+                        <div className="text-[10px] text-zinc-500 truncate">{src.id}</div>
+                      </button>
+                    ))}
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -5102,16 +5211,21 @@ export default function App() {
                           <div ref={dmMessagesEndRef} className="h-4" />
                         </div>
                       </div>
+                      {chatCooldownMessage ? (
+                        <p className="px-6 pb-1 text-xs text-red-300">{chatCooldownMessage}</p>
+                      ) : null}
                       <MessageInput
                         inputValue={dmInputValue}
                         onChange={setDmInputValue}
                         onSend={() => {
                           if (!dmInputValue.trim()) return;
+                          if (triggerChatRateLimitIfNeeded()) return;
                           const trimmed = dmInputValue.trim();
                           if (API_BASE_URL && devcordToken && dmActiveConversationId) void sendDmApi(trimmed);
                           else sendDmLocal(trimmed);
                         }}
                         placeholder={`Wiadomość do ${dmPeer.name}…`}
+                        disabled={isChatCooldownActive}
                         pickerTheme={localTheme === 'light' ? 'light' : 'dark'}
                       />
                     </>
@@ -5733,13 +5847,16 @@ export default function App() {
               </div>
 
               {/* INPUT CZATU */}
+              {chatCooldownMessage ? (
+                <p className="px-6 pb-1 text-xs text-red-300">{chatCooldownMessage}</p>
+              ) : null}
               <MessageInput
                 inputValue={inputValue}
                 onChange={setInputValue}
                 onSend={handleSendMessage}
                 onKeyDown={handleKeyDown}
                 placeholder={`Napisz na #${currentChannelData?.name || 'kanale'}…`}
-                disabled={!currentChannelData}
+                disabled={!currentChannelData || isChatCooldownActive}
                 onAttach={handleAttachClick}
                 isAIPromptOpen={isAIPromptOpen}
                 onCloseAI={() => setIsAIPromptOpen(false)}

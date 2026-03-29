@@ -40,6 +40,30 @@ function inferArchiveName(archive) {
 }
 let mainWindow = null;
 let mainLogPath = null;
+function parseLaunchArgs(argv) {
+    let updateMode = false;
+    let archivePath = null;
+    for (let i = 0; i < argv.length; i += 1) {
+        const arg = argv[i];
+        if (arg === '--update-mode') {
+            updateMode = true;
+            continue;
+        }
+        if (arg.startsWith('--archive-path=')) {
+            archivePath = arg.slice('--archive-path='.length).trim() || null;
+            continue;
+        }
+        if (arg === '--archive-path') {
+            const next = argv[i + 1];
+            if (next) {
+                archivePath = next.trim();
+                i += 1;
+            }
+        }
+    }
+    return { updateMode, archivePath };
+}
+const launchArgs = parseLaunchArgs(process.argv);
 if (process.platform === 'win32') {
     app.setAppUserModelId('com.devcord.installer');
 }
@@ -376,6 +400,62 @@ async function extractArchiveZip(archivePath, destination) {
     sendInstallError(`Rozpakowywanie nie powiodlo sie: ${finalMessage}`);
     throw new Error(`extract-zip failed: ${finalMessage}`);
 }
+async function runPowerShellScript(scriptPath) {
+    await new Promise((resolve, reject) => {
+        const child = spawn('powershell.exe', ['-NoP', '-NonI', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], { stdio: 'ignore' });
+        child.on('error', reject);
+        child.on('close', (code) => {
+            if (code === 0)
+                resolve();
+            else
+                reject(new Error(`PowerShell exited with code ${code}`));
+        });
+    });
+}
+async function runUpdateModePipeline(archivePathRaw) {
+    const archivePath = archivePathRaw.trim();
+    if (!archivePath) {
+        throw new Error('Brak parametru --archive-path dla update mode.');
+    }
+    const archiveResolved = path.resolve(archivePath);
+    await fsp.access(archiveResolved, fs.constants.R_OK);
+    const installRoot = defaultInstallRootPath();
+    const appDir = path.join(installRoot, 'app');
+    const lockFile = path.join(installRoot, '.bootstrapper-update.lock');
+    await ensureDir(installRoot);
+    await fsp.writeFile(lockFile, String(Date.now()), 'utf8');
+    try {
+        sendStatus({ state: 'checking', message: 'Przygotowywanie aktualizacji...', progress: 0.05 });
+        killDevcordProcesses();
+        await ensureDir(appDir);
+        await removeDirContentsWithRetry(appDir);
+        sendStatus({ state: 'extracting', message: 'Aktualizowanie plików Devcord...', progress: 0.35 });
+        const scriptPath = path.join(app.getPath('temp'), `devcord-sidecar-update-${Date.now()}.ps1`);
+        const scriptContent = `
+Start-Sleep -Seconds 3
+Expand-Archive -Path '${escapePowerShellPath(archiveResolved)}' -DestinationPath '${escapePowerShellPath(appDir)}' -Force
+`;
+        await fsp.writeFile(scriptPath, scriptContent, 'utf8');
+        try {
+            await runPowerShellScript(scriptPath);
+        }
+        finally {
+            await fsp.rm(scriptPath, { force: true }).catch(() => undefined);
+        }
+        sendStatus({ state: 'launching', message: 'Uruchamianie zaktualizowanego Devcord...', progress: 0.92 });
+        const mainExe = await findMainExe(appDir);
+        const launchErr = await shell.openPath(mainExe);
+        if (launchErr)
+            throw new Error(`Devcord launch failed: ${launchErr}`);
+        sendStatus({ state: 'done', message: 'Aktualizacja zakończona.', progress: 1 });
+        sendInstallComplete();
+        await fsp.rm(archiveResolved, { force: true }).catch(() => undefined);
+        setTimeout(() => app.quit(), 800);
+    }
+    finally {
+        await fsp.rm(lockFile, { force: true }).catch(() => undefined);
+    }
+}
 async function findMainExe(rootDir) {
     const queue = [rootDir];
     while (queue.length) {
@@ -573,6 +653,7 @@ function setupIpc() {
             return { ok: false, error: openErr };
         return { ok: true, path: logPath };
     });
+    ipcMain.handle('bootstrapper:is-update-mode', () => launchArgs.updateMode);
     ipcMain.handle('bootstrapper:get-installation-state', async (_event, payload) => {
         try {
             return await detectInstallation(payload?.installRoot);
@@ -603,6 +684,9 @@ function setupIpc() {
         return { ok: true, path: result.filePaths[0] };
     });
     ipcMain.handle('bootstrapper:start-install', async (_event, payload) => {
+        if (launchArgs.updateMode) {
+            return { ok: false, error: 'Installer działa w trybie aktualizacji (update mode).' };
+        }
         try {
             const installRoot = payload?.installRoot?.trim();
             await runPipeline(installRoot, Boolean(payload?.cleanInstallRoot));
@@ -626,11 +710,37 @@ function setupIpc() {
         }
     });
 }
+function startUpdateModeFlow() {
+    if (!launchArgs.updateMode)
+        return;
+    if (!mainWindow || mainWindow.isDestroyed())
+        return;
+    mainWindow.webContents.send('set-update-mode', true);
+    const archivePath = launchArgs.archivePath?.trim() || '';
+    void (async () => {
+        try {
+            if (!archivePath)
+                throw new Error('Brak --archive-path dla sidecar update mode.');
+            await runUpdateModePipeline(archivePath);
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            logMain('sidecar update-mode failed', { message, archivePath });
+            sendStatus({ state: 'error', message: 'Aktualizacja nie powiodła się.', detail: message });
+            sendInstallError(message);
+        }
+    })();
+}
 app.whenReady().then(() => {
     setupGlobalDiagnostics();
-    logMain('bootstrapper main ready');
+    logMain('bootstrapper main ready', { launchArgs });
     mainWindow = createWindow();
     setupIpc();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.once('did-finish-load', () => {
+            startUpdateModeFlow();
+        });
+    }
 });
 app.on('window-all-closed', () => {
     if (process.platform !== 'darwin')

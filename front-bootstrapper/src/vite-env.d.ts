@@ -39,6 +39,8 @@ interface Window {
     onInstallProgress: (listener: (data: { progress: number; status: string; state?: InstallState; detail?: string }) => void) => () => void;
     onInstallError: (listener: (payload: string) => void) => () => void;
     onInstallComplete: (listener: () => void) => () => void;
+    isUpdateMode: () => Promise<boolean>;
+    onUpdateMode: (listener: () => void) => () => void;
     openLogFile: () => Promise<{ ok: boolean; error?: string; path?: string }>;
   };
 }
