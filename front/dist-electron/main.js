@@ -1,7 +1,10 @@
 import { app, BrowserWindow, desktopCapturer, globalShortcut, ipcMain, session } from 'electron';
 import electronUpdaterPkg from 'electron-updater';
 import log from 'electron-log';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
+import https from 'node:https';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 const { autoUpdater } = electronUpdaterPkg;
@@ -29,6 +32,91 @@ app.commandLine.appendSwitch('enable-features', 'WebRtcHideLocalIpsWithMdns,WebR
 app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'default_public_interface_only');
 let mainWindow = null;
 let updateInstallInProgress = false;
+let downloadedUpdateInfo = null;
+const MAX_UPDATE_REDIRECTS = 5;
+function joinFeedArtifactUrl(artifactPath) {
+    const base = updateFeedUrl.replace(/\/+$/, '');
+    const artifact = artifactPath.replace(/^\/+/, '');
+    return `${base}/${artifact}`;
+}
+function resolveDownloadedArtifactUrl(info) {
+    const asInfo = info;
+    const artifact = asInfo?.files?.[0]?.url?.trim() || asInfo?.path?.trim() || '';
+    if (!artifact)
+        throw new Error('Brak informacji o artefakcie aktualizacji.');
+    if (/^https?:\/\//i.test(artifact))
+        return artifact;
+    return joinFeedArtifactUrl(artifact);
+}
+async function downloadFileToPath(url, destinationPath, redirectsLeft = MAX_UPDATE_REDIRECTS) {
+    await fs.promises.mkdir(path.dirname(destinationPath), { recursive: true });
+    const tempPath = `${destinationPath}.downloading`;
+    await fs.promises.rm(tempPath, { force: true }).catch(() => undefined);
+    await new Promise((resolve, reject) => {
+        const client = url.startsWith('https://') ? https : http;
+        const request = client.get(url, (response) => {
+            const statusCode = response.statusCode ?? 0;
+            const location = response.headers.location;
+            if ([301, 302, 303, 307, 308].includes(statusCode) && location) {
+                response.resume();
+                if (redirectsLeft <= 0) {
+                    reject(new Error(`Za dużo redirectów przy pobieraniu aktualizacji (${url}).`));
+                    return;
+                }
+                const nextUrl = /^https?:\/\//i.test(location) ? location : new URL(location, url).toString();
+                void downloadFileToPath(nextUrl, destinationPath, redirectsLeft - 1).then(resolve).catch(reject);
+                return;
+            }
+            if (statusCode < 200 || statusCode >= 300) {
+                response.resume();
+                reject(new Error(`Nie udało się pobrać aktualizacji (${statusCode}) z ${url}.`));
+                return;
+            }
+            const writer = fs.createWriteStream(tempPath);
+            writer.on('error', reject);
+            response.on('error', reject);
+            writer.on('finish', () => {
+                writer.close((closeError) => {
+                    if (closeError) {
+                        reject(closeError);
+                        return;
+                    }
+                    fs.promises
+                        .rename(tempPath, destinationPath)
+                        .then(() => resolve())
+                        .catch(reject);
+                });
+            });
+            response.pipe(writer);
+        });
+        request.on('error', reject);
+    });
+}
+function psQuote(value) {
+    return `'${value.replace(/'/g, "''")}'`;
+}
+async function runDetachedZipUpdater(updateZipPath) {
+    const installDir = path.dirname(app.getPath('exe'));
+    const exePath = app.getPath('exe');
+    const ps1Path = path.join(app.getPath('temp'), 'devcord-updater.ps1');
+    const ps1Content = `
+Start-Sleep -Seconds 3
+try {
+  Expand-Archive -Path ${psQuote(updateZipPath)} -DestinationPath ${psQuote(installDir)} -Force
+} catch {
+  Write-Output "Blad rozpakowywania"
+}
+Start-Process -FilePath ${psQuote(exePath)}
+Remove-Item -Path ${psQuote(ps1Path)} -Force -ErrorAction SilentlyContinue
+Remove-Item -Path ${psQuote(updateZipPath)} -Force -ErrorAction SilentlyContinue
+`;
+    await fs.promises.writeFile(ps1Path, ps1Content, 'utf8');
+    const child = spawn('powershell.exe', ['-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', ps1Path], {
+        detached: true,
+        stdio: 'ignore',
+    });
+    child.unref();
+}
 function configureElectronLog() {
     try {
         const logDir = path.join(app.getPath('appData'), 'Devcord', 'logs');
@@ -201,11 +289,21 @@ function setupIpc() {
         if (updateInstallInProgress) {
             return { ok: false, reason: 'in-progress', message: 'Instalacja aktualizacji już trwa.' };
         }
+        if (process.platform !== 'win32') {
+            return { ok: false, reason: 'unsupported-platform', message: 'Instalacja ZIP updater jest wspierana tylko na Windows.' };
+        }
         try {
             updateInstallInProgress = true;
             broadcast('devcord:updater-status', { state: 'installing' });
             logMain('updater install-now requested');
-            autoUpdater.quitAndInstall(false, true);
+            const artifactUrl = resolveDownloadedArtifactUrl(downloadedUpdateInfo);
+            const updateZipPath = path.join(app.getPath('temp'), 'devcord-update.zip');
+            logMain('updater detached install download start', { artifactUrl, updateZipPath });
+            await downloadFileToPath(artifactUrl, updateZipPath);
+            logMain('updater detached install download done', { updateZipPath });
+            await runDetachedZipUpdater(updateZipPath);
+            logMain('updater detached updater spawned; quitting app');
+            app.quit();
             return { ok: true };
         }
         catch (error) {
@@ -267,6 +365,7 @@ function setupAutoUpdater() {
     });
     autoUpdater.on('update-downloaded', (info) => {
         updateInstallInProgress = false;
+        downloadedUpdateInfo = info;
         broadcast('devcord:updater-status', { state: 'downloaded', info });
         logMain('updater update-downloaded; waiting for explicit install action');
     });
