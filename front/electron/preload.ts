@@ -32,3 +32,8 @@ contextBridge.exposeInMainWorld('devcordDesktop', {
     return () => ipcRenderer.removeListener('devcord:updater-status', wrapped);
   },
 });
+
+contextBridge.exposeInMainWorld('electronAPI', {
+  getDesktopSources: () =>
+    ipcRenderer.invoke('app:get-desktop-sources') as Promise<DesktopSourceInfo[]>,
+});

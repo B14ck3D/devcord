@@ -22,6 +22,9 @@ type DevcordDesktopSourceInfo = {
 };
 
 interface Window {
+  electronAPI?: {
+    getDesktopSources: () => Promise<DevcordDesktopSourceInfo[]>;
+  };
   devcordDesktop?: {
     isElectron: boolean;
     listScreenSources: () => Promise<DevcordDesktopSourceInfo[]>;

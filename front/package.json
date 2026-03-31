@@ -1,6 +1,6 @@
 {
   "name": "ndev-front",
-  "version": "0.1.30",
+  "version": "0.1.33",
   "private": true,
   "type": "module",
   "main": "dist-electron/main.js",

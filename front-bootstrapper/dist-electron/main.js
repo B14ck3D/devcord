@@ -357,6 +357,21 @@ async function verifySha512(filePath, expectedBase64) {
 function escapePowerShellPath(value) {
     return value.replace(/'/g, "''");
 }
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+function forceDeleteDirWindows(dirPath) {
+    if (process.platform !== 'win32')
+        return;
+    const normalized = path.resolve(dirPath);
+    try {
+        execSync(`cmd.exe /c rd /s /q "${normalized}"`, { stdio: 'ignore' });
+        logMain('forceDeleteDirWindows ok', { dirPath: normalized });
+    }
+    catch (error) {
+        logMain('forceDeleteDirWindows skipped', { dirPath: normalized, reason: formatErr(error) });
+    }
+}
 async function extractArchiveZip(archivePath, destination) {
     const attempts = 3;
     let lastError = null;
@@ -388,8 +403,10 @@ async function extractArchiveZip(archivePath, destination) {
             logMain('extract-zip failed', { archivePath, destination, message, elapsedMs: Date.now() - startedAt, attempt });
             if (attempt < attempts) {
                 killDevcordProcesses();
-                await removeDirContentsWithRetry(destination);
-                await new Promise((resolve) => setTimeout(resolve, 600));
+                await removeDirContentsWithRetry(destination).catch(() => undefined);
+                forceDeleteDirWindows(destination);
+                await ensureDir(destination);
+                await sleep(2000);
             }
         }
         finally {
@@ -422,13 +439,24 @@ async function runUpdateModePipeline(archivePathRaw) {
     const installRoot = defaultInstallRootPath();
     const appDir = path.join(installRoot, 'app');
     const lockFile = path.join(installRoot, '.bootstrapper-update.lock');
+    const appDirResolved = path.resolve(appDir);
+    const relArchiveToApp = path.relative(appDirResolved, archiveResolved);
+    const archiveInsideApp = relArchiveToApp === '' || (!relArchiveToApp.startsWith('..') && !path.isAbsolute(relArchiveToApp));
+    if (archiveInsideApp) {
+        throw new Error('Archive path points inside install app directory. Aborting to avoid in-use archive lock.');
+    }
     await ensureDir(installRoot);
     await fsp.writeFile(lockFile, String(Date.now()), 'utf8');
     try {
         sendStatus({ state: 'checking', message: 'Przygotowywanie aktualizacji...', progress: 0.05 });
+        sendStatus({ state: 'checking', message: 'Oczekiwanie na zamknięcie Devcord...', progress: 0.08 });
+        await sleep(4000);
+        sendStatus({ state: 'checking', message: 'Wymuszanie zamknięcia procesów Devcord...', progress: 0.12 });
         killDevcordProcesses();
-        await ensureDir(appDir);
+        forceDeleteDirWindows(appDir);
         await removeDirContentsWithRetry(appDir);
+        forceDeleteDirWindows(appDir);
+        await ensureDir(appDir);
         sendStatus({ state: 'extracting', message: 'Aktualizowanie plików Devcord...', progress: 0.35 });
         const scriptPath = path.join(app.getPath('temp'), `devcord-sidecar-update-${Date.now()}.ps1`);
         const scriptContent = `
@@ -556,7 +584,7 @@ function killDevcordProcesses() {
     killProcess('Devcord.exe');
     killProcess('Devcord Helper.exe');
 }
-async function removeDirContentsWithRetry(dirPath, attempts = 6) {
+async function removeDirContentsWithRetry(dirPath, attempts = 3) {
     let lastError = null;
     for (let i = 1; i <= attempts; i += 1) {
         try {
@@ -570,7 +598,7 @@ async function removeDirContentsWithRetry(dirPath, attempts = 6) {
             if (!isRetryable || i === attempts)
                 break;
             logMain('removeDirContents retry', { dirPath, attempt: i, message });
-            await new Promise((resolve) => setTimeout(resolve, i * 350));
+            await sleep(2000);
         }
     }
     throw lastError instanceof Error ? lastError : new Error(`Failed cleaning directory: ${dirPath}`);

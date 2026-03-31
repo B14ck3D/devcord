@@ -126,6 +126,33 @@ function resolveSidecarBinaryPath() {
   return null;
 }
 
+async function prepareIsolatedSidecarBinary(sourcePath: string) {
+  const localAppData = process.env.LOCALAPPDATA?.trim();
+  if (!localAppData) {
+    throw new Error('Brak LOCALAPPDATA - nie można przygotować izolowanego sidecara.');
+  }
+  const updaterDir = path.join(localAppData, 'Devcord-Updater');
+  await fs.promises.mkdir(updaterDir, { recursive: true });
+  const sourceBaseName = path.basename(sourcePath) || 'Devcord_Installer.exe';
+  const targetPath = path.join(updaterDir, sourceBaseName);
+  const normalizedSource = path.normalize(sourcePath);
+  const normalizedTarget = path.normalize(targetPath);
+  if (normalizedSource.toLowerCase() === normalizedTarget.toLowerCase()) {
+    return targetPath;
+  }
+
+  const tmpTargetPath = `${targetPath}.tmp-${Date.now()}`;
+  await fs.promises.copyFile(sourcePath, tmpTargetPath);
+  await fs.promises.rm(targetPath, { force: true }).catch(() => undefined);
+  await fs.promises.rename(tmpTargetPath, targetPath);
+  try {
+    await fs.promises.chmod(targetPath, 0o755);
+  } catch {
+    /* ignore */
+  }
+  return targetPath;
+}
+
 function configureElectronLog() {
   try {
     const logDir = path.join(app.getPath('appData'), 'Devcord', 'logs');
@@ -265,7 +292,7 @@ function setupIpc() {
   const listDesktopSources = async () => {
     const sources = await desktopCapturer.getSources({
       types: ['screen', 'window'],
-      thumbnailSize: { width: 320, height: 180 },
+      thumbnailSize: { width: 480, height: 270 },
       fetchWindowIcons: true,
     });
     return sources.map((s) => ({
@@ -279,6 +306,7 @@ function setupIpc() {
 
   ipcMain.handle('devcord:desktop-capturer:list-sources', listDesktopSources);
   ipcMain.handle('devcord:get-desktop-sources', listDesktopSources);
+  ipcMain.handle('app:get-desktop-sources', listDesktopSources);
 
   ipcMain.handle('devcord:app-version', () => app.getVersion());
   ipcMain.handle('devcord:updater-check-now', async () => {
@@ -323,11 +351,13 @@ function setupIpc() {
       const sidecarPath = resolveSidecarBinaryPath();
       if (!sidecarPath) {
         throw new Error(
-          'Nie znaleziono sidecar updatera (oczekiwano %LocalAppData%/Devcord/Updater/DevcordInstaller.exe).',
+          'Nie znaleziono sidecar updatera (oczekiwano pliku DevcordInstaller/Devcord_Installer).',
         );
       }
+      const isolatedSidecarPath = await prepareIsolatedSidecarBinary(sidecarPath);
+      logMain('updater sidecar isolated binary prepared', { sidecarPath, isolatedSidecarPath });
       const child = spawn(
-        sidecarPath,
+        isolatedSidecarPath,
         ['--update-mode', `--archive-path=${updateZipPath}`],
         {
           detached: true,
@@ -336,7 +366,11 @@ function setupIpc() {
       );
       child.unref();
       broadcast('devcord:updater-status', { state: 'installing-detached' });
-      logMain('updater sidecar updater spawned; quitting app', { sidecarPath });
+      logMain('updater sidecar updater spawned; quitting app', {
+        sidecarPath,
+        isolatedSidecarPath,
+        args: ['--update-mode', `--archive-path=${updateZipPath}`],
+      });
       app.quit();
       return { ok: true as const };
     } catch (error) {

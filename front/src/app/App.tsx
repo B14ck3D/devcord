@@ -7,7 +7,7 @@ import { ServerRail } from '../layout/ServerRail';
 import { ChannelSidebar } from '../layout/ChannelSidebar';
 import { ChatColumn } from '../layout/ChatColumn';
 import { MemberColumn } from '../layout/MemberColumn';
-import { useLiveKitVoice, VOICE_PEER_GAIN_MAX, VOICE_PEER_GAIN_MIN } from './useLiveKitVoice';
+import { useLiveKitVoice, VOICE_PEER_GAIN_MAX, VOICE_PEER_GAIN_MIN } from './useLiveKitVoiceRefactored';
 import { VoiceSidebarParticipantRow, VoiceStageParticipantTile } from './VoiceSpeakingUi';
 import type { VoicePhase } from './voicePhase';
 import { loadDevcordLocalSettings, saveDevcordLocalSettings } from './devcordLocalSettings';
@@ -23,6 +23,7 @@ import { dmThreadKey, loadDmStore, saveDmStore, type DmRow } from './dmStorage';
 import { iconFromKey } from './iconMap';
 import { AuthGate } from './AuthGate';
 import { MemberProfileCard } from './MemberProfileCard';
+import { ScreensharePickerModal } from './components/ScreensharePickerModal';
 import { resolveMediaUrl } from './resolveMediaUrl';
 import { resolveApiBaseUrl } from '../config/apiBase';
 import { 
@@ -404,32 +405,6 @@ function useVoiceRoomMock({ enabled, roomId, userId }: { enabled: boolean, roomI
   };
 }
 
-const createMockScreenStream = (): MediaStream => {
-  const canvas = document.createElement('canvas');
-  canvas.width = 1280; canvas.height = 720;
-  const ctx = canvas.getContext('2d');
-  let animationId: number;
-  let x = 0; let dx = 4;
-
-  const draw = () => {
-    if (!ctx) return;
-    ctx.fillStyle = '#0a0a0c'; ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = '#00eeff'; ctx.font = 'bold 48px sans-serif'; ctx.textAlign = 'center';
-    ctx.fillText('SYMULACJA EKRANU DEVCORD_', canvas.width / 2, canvas.height / 2 - 30);
-    ctx.fillStyle = '#ff0055'; ctx.font = '24px sans-serif';
-    ctx.fillText('Prawdziwe API zablokowane przez uprawnienia iframe.', canvas.width / 2, canvas.height / 2 + 30);
-    ctx.fillStyle = '#00ffcc'; ctx.fillRect(x, canvas.height - 40, 300, 10);
-    x += dx; if (x > canvas.width - 300 || x < 0) dx = -dx;
-    animationId = requestAnimationFrame(draw);
-  };
-  draw();
-  const stream = canvas.captureStream(30);
-  const track = stream.getVideoTracks()[0];
-  const originalStop = track.stop.bind(track);
-  track.stop = () => { cancelAnimationFrame(animationId); originalStop(); };
-  return stream;
-};
-
 const VideoPlayer = ({
   stream,
   isLocal,
@@ -661,7 +636,6 @@ export default function App() {
   const [screenCaptureFps, setScreenCaptureFps] = useState<number | null>(null);
   const [screenSourcePickerOpen, setScreenSourcePickerOpen] = useState(false);
   const [screenSourcePickerError, setScreenSourcePickerError] = useState<string | null>(null);
-  const [screenSourceCandidates, setScreenSourceCandidates] = useState<DevcordDesktopSourceInfo[]>([]);
   const [screenShareIncludeSystemAudio, setScreenShareIncludeSystemAudio] = useState(false);
   const screenFallbackStrikeRef = useRef(0);
   const micDeviceId = useSettingsStore((s) => s.micDeviceId);
@@ -2801,22 +2775,13 @@ export default function App() {
       return;
     }
 
-    const openWithElectron = async (): Promise<MediaStream> => {
-      const listSources = window.devcordDesktop?.listScreenSources;
-      if (!listSources) throw new Error('desktop-capturer unavailable');
-      const sources = await listSources();
-      if (!Array.isArray(sources) || sources.length === 0) throw new Error('no capture sources');
-      setScreenSourcePickerError(null);
-      setScreenSourceCandidates(sources);
-      setScreenShareIncludeSystemAudio(false);
-      setScreenSourcePickerOpen(true);
-      throw new Error('__picker_opened__');
-    };
-
     try {
       let stream: MediaStream;
       if (window.devcordDesktop?.isElectron) {
-        stream = await openWithElectron();
+        setScreenSourcePickerError(null);
+        setScreenShareIncludeSystemAudio(false);
+        setScreenSourcePickerOpen(true);
+        return;
       } else {
         try {
           stream = await navigator.mediaDevices.getDisplayMedia({
@@ -2848,20 +2813,14 @@ export default function App() {
       };
       setScreenStream(stream);
     } catch (error) {
-      if (error instanceof Error && error.message === '__picker_opened__') return;
-      const mockStream = createMockScreenStream();
-      mockStream.getVideoTracks()[0].onended = () => {
-        setScreenStream(null);
-        setScreenCaptureProfile(null);
-      };
-      setScreenCaptureProfile(60);
-      setScreenStream(mockStream);
+      console.warn('[devcord-screen]', 'Screen share start failed', error);
     }
   };
 
   const startScreenShareFromDesktopSource = useCallback(
     async (sourceId: string, includeSystemAudio: boolean) => {
       try {
+        setScreenSourcePickerError(null);
         const profiles: Array<240 | 120 | 60> = [240, 120, 60];
         let chosen: MediaStream | null = null;
         for (const profile of profiles) {
@@ -3155,100 +3114,19 @@ export default function App() {
         .devcord-category-body[data-open="true"] { max-height: 2000px; opacity: 1; transition: max-height 0.25s ease, opacity 0.15s ease; }
       `}</style>
 
-      {screenSourcePickerOpen && (
-        <div
-          className="fixed inset-0 z-[340] bg-black/70 backdrop-blur-sm flex items-center justify-center p-6"
-          onClick={() => {
-            setScreenSourcePickerOpen(false);
-            setScreenSourcePickerError(null);
-          }}
-        >
-          <div
-            className="w-full max-w-5xl bg-[#0c0c0e] border border-white/[0.12] rounded-2xl p-5 max-h-[85vh] overflow-hidden flex flex-col"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-bold text-white">Wybierz okno lub ekran do udostępnienia</h3>
-              <button
-                type="button"
-                onClick={() => {
-                  setScreenSourcePickerOpen(false);
-                  setScreenSourcePickerError(null);
-                }}
-                className="px-3 py-1.5 rounded-lg text-sm text-zinc-300 hover:text-white hover:bg-white/[0.08]"
-              >
-                Zamknij
-              </button>
-            </div>
-            {screenSourcePickerError ? (
-              <div className="mb-3 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-xs">
-                {screenSourcePickerError}
-              </div>
-            ) : null}
-            <label className="mb-3 inline-flex items-center gap-2 text-xs text-zinc-300 select-none">
-              <input
-                type="checkbox"
-                checked={screenShareIncludeSystemAudio}
-                onChange={(e) => setScreenShareIncludeSystemAudio(e.target.checked)}
-                className="accent-[#00eeff]"
-              />
-              Udostępnij dźwięk systemu
-            </label>
-            <div className="space-y-4 overflow-y-auto custom-scrollbar pr-1">
-              <div>
-                <h4 className="mb-2 text-[11px] uppercase tracking-[0.15em] text-zinc-400 font-semibold">Ekrany</h4>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {screenSourceCandidates
-                    .filter((src) => src.id.startsWith('screen:'))
-                    .map((src) => (
-                <button
-                  key={src.id}
-                  type="button"
-                  onClick={() => void startScreenShareFromDesktopSource(src.id, screenShareIncludeSystemAudio)}
-                  className="text-left border border-white/[0.1] hover:border-[#00eeff]/60 bg-black/30 hover:bg-[#00eeff]/10 rounded-xl p-2 transition-colors"
-                >
-                  <div className="aspect-video rounded-lg overflow-hidden border border-white/[0.08] bg-black/50 flex items-center justify-center">
-                    {src.thumbnailDataUrl ? (
-                      <img src={src.thumbnailDataUrl} alt={src.name} className="w-full h-full object-cover" />
-                    ) : (
-                      <Monitor size={22} className="text-zinc-500" />
-                    )}
-                  </div>
-                  <div className="mt-2 text-xs font-semibold text-zinc-200 truncate">{src.name}</div>
-                  <div className="text-[10px] text-zinc-500 truncate">{src.id}</div>
-                </button>
-                  ))}
-                </div>
-              </div>
-              <div>
-                <h4 className="mb-2 text-[11px] uppercase tracking-[0.15em] text-zinc-400 font-semibold">Aplikacje</h4>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {screenSourceCandidates
-                    .filter((src) => !src.id.startsWith('screen:'))
-                    .map((src) => (
-                      <button
-                        key={src.id}
-                        type="button"
-                        onClick={() => void startScreenShareFromDesktopSource(src.id, screenShareIncludeSystemAudio)}
-                        className="text-left border border-white/[0.1] hover:border-[#00eeff]/60 bg-black/30 hover:bg-[#00eeff]/10 rounded-xl p-2 transition-colors"
-                      >
-                        <div className="aspect-video rounded-lg overflow-hidden border border-white/[0.08] bg-black/50 flex items-center justify-center">
-                          {src.thumbnailDataUrl ? (
-                            <img src={src.thumbnailDataUrl} alt={src.name} className="w-full h-full object-cover" />
-                          ) : (
-                            <Monitor size={22} className="text-zinc-500" />
-                          )}
-                        </div>
-                        <div className="mt-2 text-xs font-semibold text-zinc-200 truncate">{src.name}</div>
-                        <div className="text-[10px] text-zinc-500 truncate">{src.id}</div>
-                      </button>
-                    ))}
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      <ScreensharePickerModal
+        open={screenSourcePickerOpen}
+        includeSystemAudio={screenShareIncludeSystemAudio}
+        onIncludeSystemAudioChange={setScreenShareIncludeSystemAudio}
+        captureError={screenSourcePickerError}
+        onClose={() => {
+          setScreenSourcePickerOpen(false);
+          setScreenSourcePickerError(null);
+        }}
+        onPickSource={(sourceId, includeSystemAudio) => {
+          void startScreenShareFromDesktopSource(sourceId, includeSystemAudio);
+        }}
+      />
 
       {/* --- MENU KONTEKSTOWE --- */}
       {contextMenu && (
